@@ -20,15 +20,20 @@ LZSync：管理同一台机器上多个 osu!lazer fork（官方 lazer、DeltaLaz
 | `docs/design.md` | 施工蓝图（18 硬约束 + HB1-HB4 修订），改内核前必读 |
 | `docs/research/` | 四端差异的唯一事实源（自包含，reference/ 已删除） |
 | `GLOSSARY.md` / `docs/adr/` | 领域术语表与架构决策记录 |
+| `justfile` / `manifest.scm` / `lzsync.scm` | 开发指令封装 / guix 开发环境（direnv use guix 加载）/ guix 打包定义（`guix build -f lzsync.scm`） |
 | `scripts/fetch-librealm.sh` | native 库可复现获取（钉死 realm-core 20.1.1） |
 
-## 常用命令（门禁）
+## 常用命令（justfile，门禁）
 
 ```bash
-go build ./... && go vet ./...        # Go 构建/静态检查
-go test ./... -count=1                # 全量测试（含 itests 集成断言）
-node node_modules/typescript/bin/tsc --noEmit   # 前端类型（bun 不在 PATH，勿裸调 bun）
-bun run build   # mygo build 完整打包；bun 用绝对路径 ~/.npm-global/bin/bun
+just go-check    # go build ./... && go vet ./...
+just test        # go test ./... -count=1（含 itests 集成断言）
+just typecheck   # tsc --noEmit
+just generate    # mygo generate（改 appsvc Bind 面后重生 src/mygo.ts）
+just package     # mygo build 完整打包 → build/linux-amd64/
+just gates       # 四道门禁一次跑全
+just run         # 打包并启动主程序（调试入口）
+just dev         # mygo dev 热重载（vite 5173）
 ```
 
 ## 架构边界与硬约束
@@ -43,11 +48,12 @@ bun run build   # mygo build 完整打包；bun 用绝对路径 ~/.npm-global/bi
 
 - 修改前先读本文件、`docs/design.md` 相关章节与 `GLOSSARY.md` 术语。
 - 保持改动最小化，沿用现有风格；完成一小部分即 commit 一次（规范见 `~/.config/git/gitmessage`，带 Assisted-by trailer，不自动 push）。
-- 必须使用 direnv 套件来进行环境管理，若 manifest.scm 存在时则优先利用它来管理环境。
+- 必须使用 direnv 套件来进行环境管理，若 manifest.scm 存在时则优先利用它来管理环境（改 manifest.scm 后 `direnv reload` 生效；webview 运行库与工具链全部声明其中）。
 
 ## 已知坑
 
-- **bun 不在系统 PATH**（只在 `~/.npm-global/bin`）：`mygo.config.ts` 的子进程命令已统一切 npm；直接调 bun 一律用绝对路径。
+- **bun 已随 guix 进系统 PATH**（home profile 现为 1.4.4，guix 现行包 1.4.3，manifest 环境以 guix 现行为准）：`mygo.config.ts` 子进程命令与 justfile 均直接用 `bun`；~/.npm-global 时代的 npm 全局包已删除，勿再引用绝对路径或 npm 回退。
+- **webview 运行库（webkitgtk-for-gtk3 等）只在 manifest 环境里可见**：guix 无全局库路径，`just run`/`just dev` 经 `GUIX_ENVIRONMENT/lib` 补 LD_LIBRARY_PATH；裸跑产物二进制会报缺 libglib/libwebkit。
 - **realm-core 构建必须 gcc-toolchain@13**：GCC 16 与 glibc 的 isnan 宏冲突报 196 错，`-include cmath` 等救不了；其余三个坑（REALM_NO_TESTS、librealm-ffi target、NuGet wrappers 无 C API）记录在 `scripts/fetch-librealm.sh` 头注。
 - **Mimosa 安全门禁**：`internal/fixture` 的 MD5（osu! 谱面哈希格式要求）与测试辅助函数（copyFile/exec.Command 硬编码路径）是已裁定误报，已登记 `mimosa-ignore` 行注释（只对单文件扫描/IDE 层生效；1.0.4 的 L3 深扫不读注释）。L3 commit 门禁经用户拍板降为 warn 档（`.mimosa/config.json`，已 gitignore）：扫描与风险提示照常输出但不拦 commit；写入门禁仍全拦——编辑触到误报行本身被拦时，临时写 `{"hook":{"blockMode":"warn"}}` 过桥、用完 trash-put 恢复。勿整体关闭门禁。
 - 删除/补丁类命令在本环境冻结：文件清理走 trash-put，改动走 Edit 工具。

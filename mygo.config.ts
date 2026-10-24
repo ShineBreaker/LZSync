@@ -7,10 +7,10 @@ export default defineConfig({
   // `mygo dev` runs devCommand and loads devUrl; `mygo build` runs
   // buildCommand and embeds frontendDist into the app.
   devUrl: "http://localhost:5173",
-  // npm 而非 bun：mygo 子进程按 PATH 裸调命令，bun 只装在
-  // ~/.npm-global（不在系统 PATH），npm 恒在 guix home profile。
-  devCommand: "npm run dev:web",
-  buildCommand: "npm run build:web",
+  // bun 已装进 guix home profile（系统 PATH，1.4.4），mygo 子进程裸调可见；
+  // 早先 ~/.npm-global 时代的 npm 回退已废弃（npm 全局包已删除）。
+  devCommand: "bun run dev:web",
+  buildCommand: "bun run build:web",
   frontendDist: "dist",
   bindings: "src/mygo.ts",
   out: "build",
