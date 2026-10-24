@@ -44,10 +44,10 @@ type ProgressFunc func(stage Stage, current, total int)
 
 // Report 收集执行报告。
 type Report struct {
-	Entities        map[hub.EntityKind]int    // 各类型入仓行数
-	Skips           []hub.SkipStat            // 投影跳过（原因 + 计数）
-	FilesAdopted    int                       // 收仓成功文件数
-	FilesSkipped    int                       // 收仓跳过数（能力探测整体跳过等）
+	Entities        map[hub.EntityKind]int     // 各类型入仓行数
+	Skips           []hub.SkipStat             // 投影跳过（原因 + 计数）
+	FilesAdopted    int                        // 收仓成功文件数
+	FilesSkipped    int                        // 收仓跳过数（能力探测整体跳过等）
 	AdoptModeCounts map[filestore.LinkMode]int // 收仓后各链接形态计数（降级统计）
 }
 

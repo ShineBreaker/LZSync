@@ -96,16 +96,16 @@ func officialSeed(hashes map[string]string) fixture.Seed {
 		},
 		BeatmapSets: []hub.BeatmapSet{
 			{
-				Hash:     hashes["set1"],
-				OnlineID: 5,
+				Hash:      hashes["set1"],
+				OnlineID:  5,
 				StatusInt: 4,
-				Files:    []hub.NamedFile{{Hash: hashes["audio1"], Filename: "audio.mp3"}},
+				Files:     []hub.NamedFile{{Hash: hashes["audio1"], Filename: "audio.mp3"}},
 			},
 			{
-				Hash:     hashes["set2"],
-				OnlineID: 5, // 同谱面新版本（§4.2 强键配对夹具）
+				Hash:      hashes["set2"],
+				OnlineID:  5, // 同谱面新版本（§4.2 强键配对夹具）
 				StatusInt: 4,
-				Files:    []hub.NamedFile{
+				Files: []hub.NamedFile{
 					{Hash: hashes["audio1"], Filename: "audio.mp3"}, // 跨集共享 blob
 					{Hash: hashes["audio2"], Filename: "audio2.mp3"},
 				},
@@ -335,8 +335,8 @@ func TestSkinIsOwnFingerprint(t *testing.T) {
 		want          bool
 	}{
 		{"Ez Default", "Ez2Lazer", true},
-		{"Ez Default", "someone", false},  // 仅 Name 命中不算
-		{"other", "Ez2Lazer", false},      // 仅 Creator 命中不算
+		{"Ez Default", "someone", false}, // 仅 Name 命中不算
+		{"other", "Ez2Lazer", false},     // 仅 Creator 命中不算
 		{"My Skin", "maker", false},
 	} {
 		if got := skinIsOwn(own, tc.name, tc.creator); got != tc.want {
@@ -448,14 +448,14 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 
 	// 跳过规则逐条：计数与原因。
 	for reason, want := range map[string]int{
-		skipSoftDeleted:     1, // 软删集（难度随集消失）
-		skipProtectedSet:    1,
-		skipHiddenDiff:      1,
-		skipSkinSoftDel:     1,
-		skipProtectedSkin:   6, // 内置六皮肤（fixture 恒播）
-		skipSkinNoHash:      1,
-		skipScoreSoftDel:    1,
-		skipScoreNoBeatmap:  1,
+		skipSoftDeleted:    1, // 软删集（难度随集消失）
+		skipProtectedSet:   1,
+		skipHiddenDiff:     1,
+		skipSkinSoftDel:    1,
+		skipProtectedSkin:  6, // 内置六皮肤（fixture 恒播）
+		skipSkinNoHash:     1,
+		skipScoreSoftDel:   1,
+		skipScoreNoBeatmap: 1,
 	} {
 		if got := skipCount(report, reason); got != want {
 			t.Errorf("跳过[%s] = %d，期望 %d（Skips=%+v）", reason, got, want, report.Skips)
@@ -505,28 +505,28 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 
 	// 成绩逐字段断言。
 	wantScore := hub.Score{
-		ID:                   guidNorm(score.Guid),
-		BeatmapHash:          score.BeatmapHash,
-		Hash:                 score.Hash,
-		RulesetShortName:     score.RulesetShortName,
-		ClientVersion:        score.ClientVersion,
-		TotalScore:           score.TotalScore,
+		ID:                    guidNorm(score.Guid),
+		BeatmapHash:           score.BeatmapHash,
+		Hash:                  score.Hash,
+		RulesetShortName:      score.RulesetShortName,
+		ClientVersion:         score.ClientVersion,
+		TotalScore:            score.TotalScore,
 		TotalScoreWithoutMods: score.TotalScoreWithoutMods,
-		TotalScoreVersion:    int(score.TotalScoreVersion),
-		Accuracy:             score.Accuracy,
-		Date:                 score.Date,
-		PP:                   score.PP,
-		OnlineID:             score.OnlineID,
-		LegacyOnlineID:       score.LegacyOnlineID,
-		User:                 score.User,
-		ModsJson:             score.ModsJson,
-		StatisticsJson:       score.StatisticsJson,
+		TotalScoreVersion:     int(score.TotalScoreVersion),
+		Accuracy:              score.Accuracy,
+		Date:                  score.Date,
+		PP:                    score.PP,
+		OnlineID:              score.OnlineID,
+		LegacyOnlineID:        score.LegacyOnlineID,
+		User:                  score.User,
+		ModsJson:              score.ModsJson,
+		StatisticsJson:        score.StatisticsJson,
 		MaximumStatisticsJson: score.MaximumStatisticsJson,
-		Pauses:               score.Pauses,
-		RankInt:              int(score.RankInt),
-		Combo:                int(score.Combo),
-		MaxCombo:             int(score.MaxCombo),
-		Files:                []hub.NamedFile{{Hash: score.Hash, Filename: "replay.osr"}},
+		Pauses:                score.Pauses,
+		RankInt:               int(score.RankInt),
+		Combo:                 int(score.Combo),
+		MaxCombo:              int(score.MaxCombo),
+		Files:                 []hub.NamedFile{{Hash: score.Hash, Filename: "replay.osr"}},
 	}
 	gotScore, originScore, ok, err := h.hub.LoadScore(context.Background(), score.BeatmapHash, score.Hash)
 	if err != nil || !ok {

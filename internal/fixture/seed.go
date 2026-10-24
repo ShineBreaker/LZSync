@@ -95,14 +95,14 @@ func MaterializeSet(onlineID int64, artist, title, author string, diffs []DiffMa
 	submitted := seedTimeBase.Add(12 * time.Hour)
 	ranked := seedTimeBase.Add(30 * 24 * time.Hour)
 	set := hub.BeatmapSet{
-		OnlineID:      onlineID,
-		Artist:        artist,
-		Title:         title,
+		OnlineID:       onlineID,
+		Artist:         artist,
+		Title:          title,
 		AuthorUsername: author,
-		StatusInt:     1, // BeatmapOnlineStatus.Ranked（lazer-baseline §5）
-		DateAdded:     seedTimeBase,
-		DateSubmitted: &submitted,
-		DateRanked:    &ranked,
+		StatusInt:      1, // BeatmapOnlineStatus.Ranked（lazer-baseline §5）
+		DateAdded:      seedTimeBase,
+		DateSubmitted:  &submitted,
+		DateRanked:     &ranked,
 	}
 	// 集哈希 = 全部 .osu 按文件名排序后顺序拼接的 SHA-256
 	// （RealmArchiveModelImporter.ComputeHash 语义，lazer-baseline §6.1）。
@@ -122,18 +122,18 @@ func MaterializeSet(onlineID int64, artist, title, author string, diffs []DiffMa
 		played := seedTimeBase.Add(time.Duration(i) * 48 * time.Hour)
 		editorTS := 5000.5 + float64(i)
 		bm := hub.Beatmap{
-			Hash:             sha256Hex(d.OsuBytes),
-			MD5Hash:          md5,
-			OnlineMD5Hash:    md5, // 本地与在线版本一致（MatchesOnlineVersion）
-			DifficultyName:   d.Name,
-			RulesetShortName: "osu",
-			StatusInt:        1, // Ranked（lazer-baseline §5）
-			OnlineID:         int(onlineID)*10 + i,
-			Length:           62000.5 + float64(i)*1000,
-			BPM:              174.25 + float64(i)*7.5,
-			StarRating:       2.75 + float64(i)*1.25,
-			LastLocalUpdate:  &localUpdate,
-			LastOnlineUpdate: &onlineUpdate,
+			Hash:               sha256Hex(d.OsuBytes),
+			MD5Hash:            md5,
+			OnlineMD5Hash:      md5, // 本地与在线版本一致（MatchesOnlineVersion）
+			DifficultyName:     d.Name,
+			RulesetShortName:   "osu",
+			StatusInt:          1, // Ranked（lazer-baseline §5）
+			OnlineID:           int(onlineID)*10 + i,
+			Length:             62000.5 + float64(i)*1000,
+			BPM:                174.25 + float64(i)*7.5,
+			StarRating:         2.75 + float64(i)*1.25,
+			LastLocalUpdate:    &localUpdate,
+			LastOnlineUpdate:   &onlineUpdate,
 			EndTimeObjectCount: 100 + i,
 			TotalObjectCount:   620 + i,
 			LastPlayed:         &played,
@@ -231,7 +231,7 @@ func toLowerNormalized(p string) string {
 }
 
 // StandardSeed 四端共底种子：1 个谱面集（2 难度 + 音频，全列）+ 1 个收藏夹
-//（按 MD5 追踪，lazer-baseline §2.8）+ 1 条本地成绩（全列）。皮肤不入
+// （按 MD5 追踪，lazer-baseline §2.8）+ 1 条本地成绩（全列）。皮肤不入
 // 共底种子——deploy 等既有用例以 Files=nil 收敛夹具面，皮肤种子由收集
 // 用例自带（MaterializeSkin）。
 func StandardSeed() (Seed, error) {

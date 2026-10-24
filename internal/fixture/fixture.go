@@ -58,32 +58,32 @@ type Seed struct {
 // SeedScore 成绩种子（C2 白名单全列；跳过夹具行：DeletePending=true 或
 // BeatmapHash 为空，由投影端按 §4.1 计数丢弃）。
 type SeedScore struct {
-	Guid                  string // 行 Guid（断言锚点；空 = 全零）
-	BeatmapHash           string // 强锚点：打分时难度的 Hash（lazer-baseline §6.3）；空 = 无锚点跳过夹具
-	RulesetShortName      string
-	ClientVersion         string
-	Hash                  string // 全部 .osr 内容拼接 SHA-256
-	DeletePending         bool   // 软删跳过夹具
-	TotalScore            int64
-	TotalScoreWithoutMods int64
-	TotalScoreVersion     int64
-	LegacyTotalScore      *int64 // stable 原始总分；lazer 成绩为 null
+	Guid                         string // 行 Guid（断言锚点；空 = 全零）
+	BeatmapHash                  string // 强锚点：打分时难度的 Hash（lazer-baseline §6.3）；空 = 无锚点跳过夹具
+	RulesetShortName             string
+	ClientVersion                string
+	Hash                         string // 全部 .osr 内容拼接 SHA-256
+	DeletePending                bool   // 软删跳过夹具
+	TotalScore                   int64
+	TotalScoreWithoutMods        int64
+	TotalScoreVersion            int64
+	LegacyTotalScore             *int64 // stable 原始总分；lazer 成绩为 null
 	BackgroundReprocessingFailed bool
-	MaxCombo              int64
-	Accuracy              float64
-	Date                  time.Time
-	PP                    *float64
-	OnlineID              int64
-	LegacyOnlineID        int64
-	User                  hub.RealmUser // embedded 归属用户
-	ModsJson              string
-	StatisticsJson        string
-	MaximumStatisticsJson string
-	Pauses                []int32  // 暂停时间点（毫秒）
-	RankInt               int64
-	Combo                 int64
-	IsLegacyScore         bool
-	ReplayHashes          []string // 回放文件哈希（字节在 Seed.Files；Files 列表逐条 .osr usage）
+	MaxCombo                     int64
+	Accuracy                     float64
+	Date                         time.Time
+	PP                           *float64
+	OnlineID                     int64
+	LegacyOnlineID               int64
+	User                         hub.RealmUser // embedded 归属用户
+	ModsJson                     string
+	StatisticsJson               string
+	MaximumStatisticsJson        string
+	Pauses                       []int32 // 暂停时间点（毫秒）
+	RankInt                      int64
+	Combo                        int64
+	IsLegacyScore                bool
+	ReplayHashes                 []string // 回放文件哈希（字节在 Seed.Files；Files 列表逐条 .osr usage）
 
 	// Ez 专有列（仅 ez2lazer 镜像落库；非 0 值在其他端触发构造错误）。
 	JudgeMode  int64

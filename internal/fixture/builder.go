@@ -399,7 +399,7 @@ func seedOneSet(s *seeder, set hub.BeatmapSet) error {
 
 // seedOneBeatmap 播一行难度并挂好全部结构关系，返回行句柄（调用方释放
 // 并负责挂入父集 Beatmaps 列表）。Metadata 为零值时回落集级三字段
-//（手工构造的旧式种子兼容）。
+// （手工构造的旧式种子兼容）。
 func seedOneBeatmap(s *seeder, bm hub.Beatmap, set hub.BeatmapSet, setObj unsafe.Pointer) (unsafe.Pointer, error) {
 	bmCk, err := s.class("Beatmap")
 	if err != nil {
