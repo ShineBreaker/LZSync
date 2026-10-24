@@ -436,7 +436,7 @@ func (w *beatmapSetWriter) createSet(bs hub.BeatmapSet, sameRealm bool) (realmOb
 					bm.DifficultyName, bm.RulesetShortName)]++
 				continue
 			}
-			bmObj, err := w.createBeatmap(bm, setObj, rsObj)
+			bmObj, err := w.createBeatmap(bm, setObj, rsObj, sameRealm)
 			w.r.ReleaseObject(rsObj)
 			if err != nil {
 				return fail(err)
@@ -716,8 +716,9 @@ func resolveRulesetObj(r *realmc.Realm, rulesetCK uint32, rulesetCols map[string
 
 // createBeatmap 新建一行难度并挂好全部结构（标量白名单全列 + Ruleset
 // 链接 + Difficulty/UserSettings embedded + 独立 Metadata 行 + 父集反向
-// 链接），返回行句柄（调用方释放并挂入 Beatmaps 列表）。
-func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj realmObjectPtr, rsObj realmObjectPtr) (realmObjectPtr, error) {
+// 链接），返回行句柄（调用方释放并挂入 Beatmaps 列表）。sameRealm 是
+// S8 判定结果（透传给 Metadata.Author 的 RealmUser.OnlineID 面）。
+func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObjectPtr, sameRealm bool) (realmObjectPtr, error) {
 	var bmObj realmObjectPtr
 	var err error
 	if w.bmPK {
@@ -874,7 +875,7 @@ func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj realmObjectPtr, 
 	}
 
 	// Metadata 独立行（每难度一份，lazer-baseline §2.5/§2.6）。
-	mdObj, err := w.createMetadata(bm.Metadata)
+	mdObj, err := w.createMetadata(bm.Metadata, sameRealm)
 	if err != nil {
 		return fail(err)
 	}
@@ -893,7 +894,9 @@ func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj realmObjectPtr, 
 
 // createMetadata 新建一行 BeatmapMetadata（C2 白名单全列：标量 + Author
 // embedded RealmUser + UserTags 列表），返回行句柄（调用方释放）。
-func (w *beatmapSetWriter) createMetadata(md hub.Metadata) (realmObjectPtr, error) {
+// sameRealm 是 S8 判定结果：Author.OnlineID 同域随行携带、异域置 -1
+//（本函数只服务新建链路——就地更新不动难度/Metadata，无「异域更新」态）。
+func (w *beatmapSetWriter) createMetadata(md hub.Metadata, sameRealm bool) (realmObjectPtr, error) {
 	mdObj, err := w.r.CreateObject(w.mdCK)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: 新建 Metadata 行: %w", err)
@@ -925,7 +928,14 @@ func (w *beatmapSetWriter) createMetadata(md hub.Metadata) (realmObjectPtr, erro
 			return fail(fmt.Errorf("deploy: 建 Metadata Author embedded: %w", err))
 		}
 		if key, ok := w.userCols["OnlineID"]; ok {
-			if err := w.r.SetInt64(author, key, int64(md.Author.OnlineID)); err != nil {
+			// S8（RealmUser.OnlineID）：异域新行置 -1——跨服务器命名空间的
+			// 用户 id 不落目标库（对齐集行 OnlineID 与成绩写入器 User.OnlineID
+			// 的处理面）。
+			want := int64(md.Author.OnlineID)
+			if !sameRealm {
+				want = -1
+			}
+			if err := w.r.SetInt64(author, key, want); err != nil {
 				w.r.ReleaseObject(author)
 				return fail(fmt.Errorf("deploy: 写 Author OnlineID: %w", err))
 			}

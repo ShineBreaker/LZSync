@@ -389,8 +389,9 @@ func namedFilesEqual(a, b []hub.NamedFile) bool {
 }
 
 // assertSetDeepEqual 逐字段断言（wantOnlineID 独立传入：S8 异域时读回值
-// ≠ canonical 值）。
-func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID int64) {
+// ≠ canonical 值；wantAuthorOnlineID 同理——Metadata.Author 的 RealmUser.
+// OnlineID 也是 S8 面）。
+func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID, wantAuthorOnlineID int64) {
 	t.Helper()
 	if got.ID != want.ID && !guidEqual(got.ID, want.ID) {
 		t.Errorf("集 Guid = %s，期望 %s", got.ID, want.ID)
@@ -429,11 +430,11 @@ func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID int
 			t.Errorf("多出难度 %s（Hash %s）", bm.DifficultyName, bm.Hash)
 			continue
 		}
-		assertBeatmapDeepEqual(t, bm, wantBM)
+		assertBeatmapDeepEqual(t, bm, wantBM, wantAuthorOnlineID)
 	}
 }
 
-func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap) {
+func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, wantAuthorOnlineID int64) {
 	t.Helper()
 	if got.ID != want.ID && !guidEqual(got.ID, want.ID) {
 		t.Errorf("难度 %s Guid = %s，期望 %s", want.DifficultyName, got.ID, want.ID)
@@ -508,8 +509,12 @@ func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap) {
 		got.Metadata.AudioFile != want.Metadata.AudioFile || got.Metadata.BackgroundFile != want.Metadata.BackgroundFile {
 		t.Errorf("难度 %s Metadata 标量 = %+v，期望 %+v", want.DifficultyName, got.Metadata, want.Metadata)
 	}
-	if got.Metadata.Author != want.Metadata.Author {
-		t.Errorf("难度 %s Author = %+v，期望 %+v", want.DifficultyName, got.Metadata.Author, want.Metadata.Author)
+	if got.Metadata.Author.Username != want.Metadata.Author.Username ||
+		got.Metadata.Author.CountryString != want.Metadata.Author.CountryString {
+		t.Errorf("难度 %s Author 标量 = %+v，期望 %+v", want.DifficultyName, got.Metadata.Author, want.Metadata.Author)
+	}
+	if int64(got.Metadata.Author.OnlineID) != wantAuthorOnlineID {
+		t.Errorf("难度 %s Author.OnlineID = %d，期望 %d", want.DifficultyName, got.Metadata.Author.OnlineID, wantAuthorOnlineID)
 	}
 	if !equalUnordered(got.Metadata.UserTags, want.Metadata.UserTags) {
 		t.Errorf("难度 %s UserTags = %v，期望 %v", want.DifficultyName, got.Metadata.UserTags, want.Metadata.UserTags)
@@ -686,7 +691,7 @@ func TestDeployBeatmapSetFullChain(t *testing.T) {
 				t.Errorf("目标库缺谱面集 %s", want.Hash)
 				continue
 			}
-			assertSetDeepEqual(t, got, want, want.OnlineID)
+			assertSetDeepEqual(t, got, want, want.OnlineID, int64(want.Beatmaps[0].Metadata.Author.OnlineID))
 		}
 	})
 
@@ -764,7 +769,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !ok {
 			t.Fatal("同域投放后读回缺集")
 		}
-		assertSetDeepEqual(t, got, set, set.OnlineID)
+		assertSetDeepEqual(t, got, set, set.OnlineID, int64(set.Beatmaps[0].Metadata.Author.OnlineID))
 	})
 
 	// 目标 presence 建立（收集语义；投放不写 presence，§4.4）。
@@ -798,7 +803,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !ok {
 			t.Fatal("异域新行投放后读回缺集")
 		}
-		assertSetDeepEqual(t, got, set2, -1) // S8：异域新行 OnlineID = -1
+		assertSetDeepEqual(t, got, set2, -1, -1) // S8：异域新行集 OnlineID 与 Author.OnlineID 均 -1
 	})
 
 	// ③ 异域更新不触碰：g0v0 覆盖集 1 canonical（同 Hash、DateAdded/
@@ -843,7 +848,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !ok {
 			t.Fatal("异域更新后读回缺集 1")
 		}
-		assertSetDeepEqual(t, got, modified, set.OnlineID) // OnlineID 保持 7001 不被触碰
+		assertSetDeepEqual(t, got, modified, set.OnlineID, int64(set.Beatmaps[0].Metadata.Author.OnlineID)) // OnlineID/Author.OnlineID 保持 7001/100042 不被触碰（就地更新不动难度）
 		if got.DateAdded.Equal(set.DateAdded) {
 			t.Error("异域更新未覆盖 DateAdded（S8 只豁免 OnlineID 列）")
 		}
@@ -939,7 +944,7 @@ func TestDeployBeatmapSetMissingColumnsAndRulesetSeed(t *testing.T) {
 		want := set
 		want.DateRanked = nil
 		want.Beatmaps[0].EditorTimestamp = nil
-		assertSetDeepEqual(t, got, want, set.OnlineID)
+		assertSetDeepEqual(t, got, want, set.OnlineID, int64(set.Beatmaps[0].Metadata.Author.OnlineID))
 		// 官方规则集缺行按需新建：难度引用 osu → 只建 osu（Available=
 		// true、OnlineID 对号；不预播四集——按需解析语义）。
 		if got := classRowCount(t, sr, "Ruleset"); got != 1 {
@@ -1041,7 +1046,7 @@ func TestDeployBeatmapSetVersionReplace(t *testing.T) {
 		if !ok {
 			t.Fatal("版本替换后读回缺新版本集")
 		}
-		assertSetDeepEqual(t, gotV2, v2, v2.OnlineID)
+		assertSetDeepEqual(t, gotV2, v2, v2.OnlineID, int64(v2.Beatmaps[0].Metadata.Author.OnlineID))
 		gotV1, ok := sr.readSetProjection(v1.Hash)
 		if !ok {
 			t.Fatal("版本替换后旧版本行应保留（软删非物理删）")
