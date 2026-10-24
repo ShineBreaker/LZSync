@@ -512,6 +512,18 @@ func TestBuildDeltaGimmick(t *testing.T) {
 	if !strings.Contains(string(b), "EnableHPGimmick=True") {
 		t.Errorf("gimmick .osu 缺示例 gimmick 行")
 	}
+	// 物件级 gimmick 头（第二难度，fork-delta §5.1 两类 section 各一）。
+	hoHash := seed.BeatmapSets[1].Beatmaps[1].Hash
+	hb, err := os.ReadFile(filepath.Join(ref.DataDir, "files", hoHash[:1], hoHash[:2], hoHash))
+	if err != nil {
+		t.Fatalf("hit-object gimmick .osu 落盘缺失: %v", err)
+	}
+	if !strings.Contains(string(hb), "[BeatmapHitObjectGimmicks]") {
+		t.Errorf("hit-object gimmick .osu 缺 [BeatmapHitObjectGimmicks] section:\n%s", hb)
+	}
+	if !strings.Contains(string(hb), "EnableCountLimits=True") {
+		t.Errorf("hit-object gimmick .osu 缺示例 gimmick 行")
+	}
 }
 
 func TestBuildEzDiff(t *testing.T) {

@@ -316,8 +316,21 @@ Title:Gimmick Fixture
 0,0,1500,EnableHPGimmick=True|NoDrain=True|HP300=-0.02|HP100=-0.05|HP50=0.08|HPMiss=-0.12|EnableNoMiss=True
 `
 
-// DeltaGimmickSeed delta 夹具：标准种子 + 一个含 gimmick section 的 .osu
-// 难度（数据全在 .osu 文件内，不进库表——fork-delta §5.1）。
+// hitObjectGimmickOsu 物件级 gimmick 的 .osu 样例（fork-delta §5.1 行格式
+// {StartTime},{ComboIndexWithOffsets},[ObjectId=|]{Key=Value}；字段取自
+// HitObjectGimmickSettings）。
+const hitObjectGimmickOsu = `osu file format v14
+
+[Metadata]
+Title:Gimmick Fixture
+
+[BeatmapHitObjectGimmicks]
+1000.5,2,EnableCountLimits=True|EnableNoMiss=True
+500,1,ObjectId=42,EnableGreatOffsetPenalty=True
+`
+
+// DeltaGimmickSeed delta 夹具：标准种子 + 一个含两类 gimmick section 的
+// 谱面集（各一难度；数据全在 .osu 文件内，不进库表——fork-delta §5.1）。
 func DeltaGimmickSeed() (Seed, error) {
 	seed, err := StandardSeed()
 	if err != nil {
@@ -325,7 +338,10 @@ func DeltaGimmickSeed() (Seed, error) {
 	}
 	files := seed.Files
 	g, err := MaterializeSet(4004, "Delta Artist", "Gimmick Set", "mapper",
-		[]DiffMaterial{{Name: "Gimmick", OsuBytes: []byte(gimmickOsu)}}, nil, files)
+		[]DiffMaterial{
+			{Name: "Gimmick", OsuBytes: []byte(gimmickOsu)},
+			{Name: "Fake", OsuBytes: []byte(hitObjectGimmickOsu)},
+		}, nil, files)
 	if err != nil {
 		return Seed{}, err
 	}
