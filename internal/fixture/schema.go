@@ -12,7 +12,7 @@ package fixture
 //     Score/Skin）的链接列、embedded 列（RealmNamedFileUsage/RealmUser/
 //     BeatmapDifficulty/BeatmapUserSettings）与集合列（IList）按
 //     realmc.PropertyDef 的 LinkTarget/Collection/IsNullable 表达；
-//     ModPreset.Ruleset 等非 M2 载体的结构列维持省略；
+//     M3 起 ModPreset.Ruleset 链接列进镜像（设置类载体，§5.1-M3）；
 //   - 主键不声明——镜像行身份走内容哈希列（design §4.2，与对账键一致），
 //     Guid 列作普通 UUID 列写值；
 //   - 可空标志只对投影端需要区分 NULL/零值的列声明（BeatmapSet 的
@@ -63,6 +63,7 @@ func pf(name string) p { return p{Name: name, Type: PropTypeFloat} }
 func ptn(name string) p { return p{Name: name, Type: realmc.PropTypeTimestamp, IsNullable: true} }
 func pdn(name string) p { return p{Name: name, Type: PropTypeDouble, IsNullable: true} }
 func pin(name string) p { return p{Name: name, Type: realmc.PropTypeInt, IsNullable: true} }
+func psn(name string) p { return p{Name: name, Type: realmc.PropTypeString, IsNullable: true} }
 
 // 对象链接列（单值链接一律 nullable——realm-core Schema::validate 硬约束，
 // realmc.buildSchema 已自动补位）与集合列。
@@ -144,11 +145,12 @@ func officialClasses(withOnlineAsset bool) []cl {
 			pu("ID"), ps("Name"), ps("Creator"), ps("InstantiationInfo"), ps("Hash"),
 			pb("Protected"), pb("DeletePending"), plinklist("Files", "RealmNamedFileUsage"),
 		}},
-		{Name: "ModPreset", Properties: []p{ // §2.11（Ruleset 关系列非 M2 载体，维持省略）
+		{Name: "ModPreset", Properties: []p{ // §2.11（Ruleset 关系列是 M3 载体）
 			pu("ID"), ps("Name"), ps("Description"), ps("Mods"), pb("DeletePending"),
+			plink("Ruleset", "Ruleset"),
 		}},
-		{Name: "KeyBinding", Properties: []p{ // §2.12
-			pu("ID"), ps("RulesetName"), pi("Variant"), pi("Action"), ps("KeyCombination"),
+		{Name: "KeyBinding", Properties: []p{ // §2.12（RulesetName/Variant 是真实库的 string?/int?，null = 全局键位/无变体——内容键组成段，投影端需区分 NULL 与零值）
+			pu("ID"), psn("RulesetName"), pin("Variant"), pi("Action"), ps("KeyCombination"),
 		}},
 		{Name: "RulesetSetting", Properties: []p{ // §2.13
 			ps("RulesetName"), pi("Variant"), ps("Key"), ps("Value"),

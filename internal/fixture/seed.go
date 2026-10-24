@@ -465,3 +465,48 @@ func MaterializeScore(bm hub.Beatmap, clientVersion string, replay []byte, files
 		ReplayHashes:      []string{replayHash},
 	}, nil
 }
+
+// SettingsSeed M3 设置类种子（§5.1-M3 / §8.2-4 扩展承载）：键位（全局
+// null 键段 / 规则集级 / mania 4K/7K 多变体 + fork 专有规则集 bms 行）、
+// 规则集设置（官方键 + mania 变体键 + fork 专有 bms 键）、ModPreset（官方
+// osu/mania 各一 + fork 专有 bms 预设 + 名录外 mod 预设 EZX（D7）+ 软删
+// 预设（S4 收集侧跳过夹具））。bms 行配 ExtraRulesets 的 bms Ruleset 行
+// 装配（EzDiffSeed 先例）；Guid 取确定性常量（往返断言锚点）。
+// 键位全收（hub 保留原文，D20 过滤在投放侧）；fork 专有键的跳过分支由
+// 投放测试消费。
+func SettingsSeed() (Seed, error) {
+	mania4, mania7 := 4, 7
+	return Seed{
+		KeyBindings: []SeedKeyBinding{
+			{Guid: "3f8b7a10-0001-4a01-9001-000000000001", RulesetName: "", Variant: nil,
+				ActionInt: 100, KeyCombination: "Ctrl,Shift+Z"}, // 全局键位（null 键段）
+			{Guid: "3f8b7a10-0002-4a01-9001-000000000002", RulesetName: "osu", Variant: nil,
+				ActionInt: 7, KeyCombination: "Z"},
+			{Guid: "3f8b7a10-0003-4a01-9001-000000000003", RulesetName: "mania", Variant: &mania4,
+				ActionInt: 12, KeyCombination: "F"},
+			{Guid: "3f8b7a10-0004-4a01-9001-000000000004", RulesetName: "mania", Variant: &mania7,
+				ActionInt: 12, KeyCombination: "D,F,J,K"}, // 同 ActionInt 不同变体 = 不同内容键
+			{Guid: "3f8b7a10-0005-4a01-9001-000000000005", RulesetName: "bms", Variant: nil,
+				ActionInt: 3, KeyCombination: "Space"}, // fork 专有规则集键位（字符串列不解析，随行带走）
+		},
+		RulesetSettings: []SeedRulesetSetting{
+			{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
+			{RulesetName: "mania", Variant: 4, Key: "speed_change_style", Value: "1"},
+			{RulesetName: "bms", Variant: 0, Key: "bms_scroll_speed", Value: "25"}, // fork 专有键
+		},
+		ModPresets: []SeedModPreset{
+			{Guid: "5c1d2e30-0001-4b02-a001-000000000001", RulesetShortName: "osu",
+				Name: "Score Preset", Description: "for score runs",
+				ModsJson: `[{"acronym":"HD","settings":{}}]`},
+			{Guid: "5c1d2e30-0002-4b02-a001-000000000002", RulesetShortName: "mania",
+				Name: "Key7 Preset", Description: "",
+				ModsJson: `[{"acronym":"DT","settings":{}}]`},
+			{Guid: "5c1d2e30-0003-4b02-a001-000000000003", RulesetShortName: "bms",
+				Name: "BMS Preset", ModsJson: `[{"acronym":"NM","settings":{}}]`}, // fork 专有规则集（投放跳过夹具）
+			{Guid: "5c1d2e30-0004-4b02-a001-000000000004", RulesetShortName: "osu",
+				Name: "Exotic Preset", ModsJson: `[{"acronym":"EZX","settings":{}}]`}, // 名录外 mod（D7 跳过夹具）
+			{Guid: "5c1d2e30-0005-4b02-a001-000000000005", RulesetShortName: "osu",
+				Name: "Deleted Preset", DeletePending: true}, // 软删（S4 收集侧跳过夹具）
+		},
+	}, nil
+}

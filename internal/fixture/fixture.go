@@ -53,6 +53,18 @@ type Seed struct {
 	// Skins 追加皮肤行（用户皮肤全列 / Ez 专有皮肤指纹 / 软删与空 Hash
 	// 跳过夹具）；内置六皮肤恒播不走此。
 	Skins []SeedSkin
+
+	// KeyBindings 键位行（M3 载体：全局（RulesetName 列 null）/ 规则集级 /
+	// mania 多变体夹具，§5.1-M3）。
+	KeyBindings []SeedKeyBinding
+
+	// RulesetSettings 规则集设置行（M3 载体：官方键 + fork 专有规则集键
+	// 夹具——bms 等，投放侧按目标端可解析性跳过）。
+	RulesetSettings []SeedRulesetSetting
+
+	// ModPresets 模组预设行（M3 载体：Ruleset 关系解析到官方四集/
+	// ExtraRulesets 行；fork 专有规则集与名录外 mod 是投放跳过夹具）。
+	ModPresets []SeedModPreset
 }
 
 // SeedScore 成绩种子（C2 白名单全列；跳过夹具行：DeletePending=true 或
@@ -116,6 +128,37 @@ type SeedSkin struct {
 	Files             []hub.NamedFile
 	Protected         bool
 	DeletePending     bool
+}
+
+// SeedKeyBinding 键位行（lazer-baseline §2.12 全列）。RulesetName 空串 =
+// 全局键位（列写 null）；Variant nil = 无变体（列写 null，mania 键数等
+// 变体键位用非 nil——多变体夹具）。
+type SeedKeyBinding struct {
+	Guid           string
+	RulesetName    string // "" = 全局键位
+	Variant        *int   // nil = 无变体
+	ActionInt      int
+	KeyCombination string
+}
+
+// SeedRulesetSetting 规则集设置行（lazer-baseline §2.13 全列，无主键表）。
+type SeedRulesetSetting struct {
+	RulesetName string
+	Variant     int
+	Key         string
+	Value       string
+}
+
+// SeedModPreset 模组预设行（lazer-baseline §2.11 全列 + Ruleset 关系）。
+// RulesetShortName 解析到官方四集（恒播）或 ExtraRulesets 行；空 = Ruleset
+// 列留 null。DeletePending=true 是收集侧软删跳过夹具（S4）。
+type SeedModPreset struct {
+	Guid             string
+	RulesetShortName string
+	Name             string
+	Description      string
+	ModsJson         string
+	DeletePending    bool
 }
 
 // Spec 建库规格。
@@ -236,6 +279,26 @@ func validateSeed(forkID string, seed Seed) error {
 	}
 	if seed.EzSkillRows && forkID != ForkEz2Lazer {
 		return fmt.Errorf("EzSkillRows 仅 ez2lazer 镜像可载，fork=%s", forkID)
+	}
+	// ModPreset 的 Ruleset 关系解析面：官方四集（恒播）∪ ExtraRulesets。
+	builtin := map[string]bool{"osu": true, "taiko": true, "fruits": true, "mania": true}
+	for i, mp := range seed.ModPresets {
+		if mp.RulesetShortName == "" {
+			continue
+		}
+		if builtin[mp.RulesetShortName] {
+			continue
+		}
+		found := false
+		for _, rs := range seed.ExtraRulesets {
+			if rs.ShortName == mp.RulesetShortName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("ModPresets[%d].RulesetShortName %q 无 Ruleset 行可解析（非官方四集、不在 ExtraRulesets）", i, mp.RulesetShortName)
+		}
 	}
 	return nil
 }

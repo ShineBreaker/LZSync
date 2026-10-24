@@ -326,6 +326,149 @@ func skipCount(report Report, reason string) int {
 	return -1
 }
 
+// TestCollectM3SettingsEntities M3 设置类投影验收（§5.1-M3）：键位
+// （null 键段保真 + mania 多变体）、规则集设置（含 fork 专有键——全收，
+// hub 保留原文）、ModPreset（Ruleset 关系投影为 ShortName；软删行跳过
+// 计数）逐字段断言；bms 行装配进 Ez 库（ExtraRulesets 先例）。
+func TestCollectM3SettingsEntities(t *testing.T) {
+	seed, err := fixture.SettingsSeed()
+	if err != nil {
+		t.Fatalf("SettingsSeed: %v", err)
+	}
+	// bms Ruleset 行（bms 预设/设置/键位行随 SettingsSeed 装配）。
+	seed.ExtraRulesets = []fixture.SeedRuleset{{
+		ShortName:         "bms",
+		OnlineID:          -1,
+		Name:              "Beatmap Spectrum",
+		InstantiationInfo: "osu.Game.Rulesets.BMS.BMSRuleset, osu.Game.Rulesets.BMS",
+	}}
+	dataDir := t.TempDir()
+	ref, err := fixture.Build(context.Background(), fixture.Spec{
+		ForkID: fixture.ForkEz2Lazer, SchemaVersion: fixture.VersionEzDisk,
+		DataDir: dataDir, Seed: seed,
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build: %v", err)
+	}
+
+	h := newHarness(t, nil)
+	report, err := h.runner.Collect(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	for kind, want := range map[hub.EntityKind]int{
+		hub.KindKeyBinding: 5, hub.KindRulesetSetting: 3, hub.KindModPreset: 4,
+	} {
+		if got := report.Entities[kind]; got != want {
+			t.Errorf("Entities[%s] = %d，期望 %d", kind, got, want)
+		}
+	}
+	// 软删预设跳过：计数 + 人话原因（S4：软删行当作不存在）。
+	if got := skipCount(report, skipPresetSoftDel); got != 1 {
+		t.Errorf("跳过[%s] = %d，期望 1（Skips=%+v）", skipPresetSoftDel, got, report.Skips)
+	}
+
+	ctx := context.Background()
+	// 键位逐字段断言（nil 键段保真 = 全局/无变体；Guid 落 origin_guid）。
+	// kb2 是规则集级键位（osu、无变体）；kb3/kb4 是 mania 4K/7K 双变体。
+	osuName, maniaName := "osu", "mania"
+	mania4, mania7 := 4, 7
+	wantKB := map[string]hub.KeyBinding{
+		hub.KeyBindingContentKey(nil, nil, 100): {
+			ID: guidNorm(seed.KeyBindings[0].Guid), ActionInt: 100, KeyCombination: "Ctrl,Shift+Z"},
+		hub.KeyBindingContentKey(&osuName, nil, 7): {
+			ID: guidNorm(seed.KeyBindings[1].Guid), RulesetName: &osuName, ActionInt: 7, KeyCombination: "Z"},
+		hub.KeyBindingContentKey(&maniaName, &mania4, 12): {
+			ID: guidNorm(seed.KeyBindings[2].Guid), RulesetName: &maniaName, Variant: &mania4,
+			ActionInt: 12, KeyCombination: "F"},
+		hub.KeyBindingContentKey(&maniaName, &mania7, 12): {
+			ID: guidNorm(seed.KeyBindings[3].Guid), RulesetName: &maniaName, Variant: &mania7,
+			ActionInt: 12, KeyCombination: "D,F,J,K"},
+	}
+	for key, want := range wantKB {
+		got, origin, ok, err := h.hub.LoadKeyBinding(ctx, key)
+		if err != nil || !ok {
+			t.Fatalf("LoadKeyBinding(%s) = ok=%v err=%v", key, ok, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("hub 键位 payload = %+v，期望 %+v", got, want)
+		}
+		if origin.Fork != "ez2lazer" || origin.GUID != want.ID {
+			t.Errorf("键位 origin = %+v，期望 {ez2lazer, %s}", origin, want.ID)
+		}
+	}
+	// bms 键位（字符串列不解析）：照收。
+	got, _, ok, err := h.hub.LoadKeyBinding(ctx, hub.KeyBindingContentKey(strPtrC("bms"), nil, 3))
+	if err != nil || !ok || got.KeyCombination != "Space" || got.RulesetName == nil || *got.RulesetName != "bms" {
+		t.Errorf("bms 键位入仓 = (%+v,%v)，期望随行保留（D20 过滤在投放侧）", got, err)
+	}
+
+	// 规则集设置逐字段断言（fork 专有键照收）。
+	for _, want := range []hub.RulesetSetting{
+		{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
+		{RulesetName: "mania", Variant: 4, Key: "speed_change_style", Value: "1"},
+		{RulesetName: "bms", Variant: 0, Key: "bms_scroll_speed", Value: "25"},
+	} {
+		got, origin, ok, err := h.hub.LoadRulesetSetting(ctx,
+			hub.RulesetSettingContentKey(want.RulesetName, want.Variant, want.Key))
+		if err != nil || !ok {
+			t.Fatalf("LoadRulesetSetting(%+v) = ok=%v err=%v", want, ok, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("hub 规则集设置 payload = %+v，期望 %+v", got, want)
+		}
+		if origin.Fork != "ez2lazer" {
+			t.Errorf("规则集设置 origin = %+v，期望 ez2lazer", origin)
+		}
+	}
+
+	// ModPreset 逐字段断言（Ruleset 关系 → ShortName；软删行不入仓）。
+	for _, want := range []hub.ModPreset{
+		{ID: guidNorm(seed.ModPresets[0].Guid), RulesetShortName: "osu", Name: "Score Preset",
+			Description: "for score runs", ModsJson: `[{"acronym":"HD","settings":{}}]`},
+		{ID: guidNorm(seed.ModPresets[2].Guid), RulesetShortName: "bms", Name: "BMS Preset",
+			ModsJson: `[{"acronym":"NM","settings":{}}]`},
+	} {
+		got, origin, ok, err := h.hub.LoadModPreset(ctx, hub.ModPresetContentKey(want.RulesetShortName, want.Name))
+		if err != nil || !ok {
+			t.Fatalf("LoadModPreset(%+v) = ok=%v err=%v", want, ok, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("hub 模组预设 payload = %+v，期望 %+v", got, want)
+		}
+		if origin.Fork != "ez2lazer" || origin.GUID != want.ID {
+			t.Errorf("模组预设 origin = %+v，期望 {ez2lazer, %s}", origin, want.ID)
+		}
+	}
+	if _, _, ok, err := h.hub.LoadModPreset(ctx, hub.ModPresetContentKey("osu", "Deleted Preset")); err != nil || ok {
+		t.Errorf("软删预设入仓 = ok=%v（期望 false，S4 跳过）", ok)
+	}
+
+	// presence：三类快照完整（软删预设不在）。
+	for kind, want := range map[hub.EntityKind]int{
+		hub.KindKeyBinding: 5, hub.KindRulesetSetting: 3, hub.KindModPreset: 4,
+	} {
+		if got := h.presenceCount("ez2lazer", kind); got != want {
+			t.Errorf("presence(%s) = %d，期望 %d", kind, got, want)
+		}
+	}
+
+	// 幂等重跑：无 tombstone、payload 一致。
+	if _, err := h.runner.Collect(context.Background(), ref, nil); err != nil {
+		t.Fatalf("二次 Collect: %v", err)
+	}
+	var tombs int
+	if err := h.hub.DB().QueryRow(`SELECT count(*) FROM tombstone`).Scan(&tombs); err != nil {
+		t.Fatalf("tombstone 计数: %v", err)
+	}
+	if tombs != 0 {
+		t.Errorf("无删除场景 tombstone = %d，期望 0", tombs)
+	}
+}
+
+// strPtrC 测试内 *string 构造（键位内容键参数形态）。
+func strPtrC(s string) *string { return &s }
+
 // TestSkinIsOwnFingerprint fork 专有皮肤指纹规则单测（Name+Creator 双等值
 // 或 Guid 等值二通道；注册表数据属 forks 包，越界不补——规则语义在此
 // 独立验证）。
@@ -342,7 +485,7 @@ func TestSkinIsOwnFingerprint(t *testing.T) {
 		{"", "Ez Default", "someone", false}, // 仅 Name 命中不算
 		{"", "other", "Ez2Lazer", false},     // 仅 Creator 命中不算
 		{"", "My Skin", "maker", false},
-		{"fc372386381d4f8e897ac1d89ef39f9c", "any", "any", true},   // Guid 通道
+		{"fc372386381d4f8e897ac1d89ef39f9c", "any", "any", true},        // Guid 通道
 		{"deadbeefdeadbeefdeadbeefdeadbeef", "Not Ez", "anyone", false}, // 两通道均不命中
 	} {
 		if got := skinIsOwn(own, tc.guid, tc.name, tc.creator); got != tc.want {
@@ -691,7 +834,7 @@ func TestCollectEzCompatFilters(t *testing.T) {
 }
 
 // TestCollectG0v0MarketRulesetScore §5.4-D8 收集侧：指向市场规则集行
-//（OnlineID ≥ 10）的成绩跳过并计数；正常官方规则集成绩照常入 hub。
+// （OnlineID ≥ 10）的成绩跳过并计数；正常官方规则集成绩照常入 hub。
 func TestCollectG0v0MarketRulesetScore(t *testing.T) {
 	seed, err := fixture.G0v0DiffSeed()
 	if err != nil {

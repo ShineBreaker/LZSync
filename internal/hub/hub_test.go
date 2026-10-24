@@ -920,7 +920,7 @@ func TestBeatmapC2ColumnsRoundtrip(t *testing.T) {
 
 // mkSettingsSnapshot 三类实体各一行的标准快照（覆盖可空键段与业务键两态）。
 func mkSettingsSnapshot(fork string, kbGUID string) Snapshot {
-	osuName := "osu"
+	osuName, maniaName := "osu", "mania"
 	mania4 := 4
 	mania7 := 7
 	return Snapshot{
@@ -930,8 +930,8 @@ func mkSettingsSnapshot(fork string, kbGUID string) Snapshot {
 			//（同 ActionInt 不同 Variant 是不同内容键）。
 			{ID: kbGUID + "-global", RulesetName: nil, Variant: nil, ActionInt: 100, KeyCombination: "Ctrl,Shift+Z"},
 			{ID: kbGUID + "-osu", RulesetName: &osuName, Variant: nil, ActionInt: 7, KeyCombination: "Z"},
-			{ID: kbGUID + "-mania4", RulesetName: &osuName, Variant: &mania4, ActionInt: 12, KeyCombination: "F"},
-			{ID: kbGUID + "-mania7", RulesetName: &osuName, Variant: &mania7, ActionInt: 12, KeyCombination: "D,F,J,K"},
+			{ID: kbGUID + "-mania4", RulesetName: &maniaName, Variant: &mania4, ActionInt: 12, KeyCombination: "F"},
+			{ID: kbGUID + "-mania7", RulesetName: &maniaName, Variant: &mania7, ActionInt: 12, KeyCombination: "D,F,J,K"},
 		},
 		RulesetSettings: []RulesetSetting{
 			{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
@@ -969,18 +969,18 @@ func TestApplySnapshotSettingsRoundtrip(t *testing.T) {
 		t.Errorf("全局键位 Origin = %+v", origin)
 	}
 	// 规则集级（RulesetName 非空、Variant nil）与 mania 双变体。
-	osuName := "osu"
+	osuName, maniaName := "osu", "mania"
 	mania4 := 4
 	kb, _, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, nil, 7))
 	if err != nil || !ok || kb.ID != "g-v3-osu" || kb.KeyCombination != "Z" {
 		t.Errorf("规则集级键位往返不一致: (%+v,%v)", kb, err)
 	}
-	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, &mania4, 12))
+	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&maniaName, &mania4, 12))
 	if err != nil || !ok || kb.ID != "g-v3-mania4" || kb.KeyCombination != "F" {
 		t.Errorf("mania 4K 键位往返不一致: (%+v,%v)", kb, err)
 	}
 	mania7 := 7
-	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, &mania7, 12))
+	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&maniaName, &mania7, 12))
 	if err != nil || !ok || kb.ID != "g-v3-mania7" || kb.KeyCombination != "D,F,J,K" {
 		t.Errorf("mania 7K 键位往返不一致: (%+v,%v)", kb, err)
 	}

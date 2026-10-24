@@ -227,6 +227,9 @@ func seedAll(r *realmc.Realm, spec Spec) error {
 		func() error { return seedBeatmapSets(s, spec.Seed) },
 		func() error { return seedCollections(s, spec.Seed.Collections) },
 		func() error { return seedScores(s, spec) },
+		func() error { return seedKeyBindings(s, spec.Seed.KeyBindings) },
+		func() error { return seedRulesetSettings(s, spec.Seed.RulesetSettings) },
+		func() error { return seedModPresets(s, spec.Seed.ModPresets) },
 		func() error { return seedExternalSets(s, spec.Seed) },
 		func() error {
 			if !spec.Seed.EzSkillRows {
@@ -826,6 +829,119 @@ func seedScores(s *seeder, spec Spec) error {
 				files = append(files, hub.NamedFile{Hash: h, Filename: "replay.osr"})
 			}
 			return s.appendNamedFiles(obj, "Score", files)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seedKeyBindings 播键位行（lazer-baseline §2.12 全列）：RulesetName/
+// Variant 可空列按种子的空串/nil 语义写 null（全局键位/无变体）。
+func seedKeyBindings(s *seeder, kbs []SeedKeyBinding) error {
+	for _, kb := range kbs {
+		if err := s.row("KeyBinding", func(obj unsafe.Pointer) error {
+			if err := s.setGuid(obj, "KeyBinding", "ID", kb.Guid); err != nil {
+				return err
+			}
+			nameKey, err := s.prop("KeyBinding", "RulesetName")
+			if err != nil {
+				return err
+			}
+			if kb.RulesetName == "" {
+				if err := s.r.SetNull(obj, nameKey); err != nil {
+					return err
+				}
+			} else if err := s.r.SetString(obj, nameKey, kb.RulesetName); err != nil {
+				return err
+			}
+			variantKey, err := s.prop("KeyBinding", "Variant")
+			if err != nil {
+				return err
+			}
+			if kb.Variant == nil {
+				if err := s.r.SetNull(obj, variantKey); err != nil {
+					return err
+				}
+			} else if err := s.r.SetInt64(obj, variantKey, int64(*kb.Variant)); err != nil {
+				return err
+			}
+			actionKey, err := s.prop("KeyBinding", "Action")
+			if err != nil {
+				return err
+			}
+			if err := s.r.SetInt64(obj, actionKey, int64(kb.ActionInt)); err != nil {
+				return err
+			}
+			return s.setStr(obj, "KeyBinding", "KeyCombination", kb.KeyCombination)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seedRulesetSettings 播规则集设置行（lazer-baseline §2.13 全列，无主键表）。
+func seedRulesetSettings(s *seeder, rss []SeedRulesetSetting) error {
+	for _, rs := range rss {
+		if err := s.row("RulesetSetting", func(obj unsafe.Pointer) error {
+			if err := s.setStr(obj, "RulesetSetting", "RulesetName", rs.RulesetName); err != nil {
+				return err
+			}
+			if err := s.setInt(obj, "RulesetSetting", "Variant", int64(rs.Variant)); err != nil {
+				return err
+			}
+			if err := s.setStr(obj, "RulesetSetting", "Key", rs.Key); err != nil {
+				return err
+			}
+			return s.setStr(obj, "RulesetSetting", "Value", rs.Value)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seedModPresets 播模组预设行（lazer-baseline §2.11 全列 + Ruleset 关系；
+// 官方四集行恒播、ExtraRulesets 已播，解析面由 validateSeed 前置校验）。
+func seedModPresets(s *seeder, mps []SeedModPreset) error {
+	for _, mp := range mps {
+		if err := s.row("ModPreset", func(obj unsafe.Pointer) error {
+			if err := s.setGuid(obj, "ModPreset", "ID", mp.Guid); err != nil {
+				return err
+			}
+			strCols := []struct{ name, val string }{
+				{"Name", mp.Name}, {"Description", mp.Description}, {"Mods", mp.ModsJson},
+			}
+			for _, c := range strCols {
+				if err := s.setStr(obj, "ModPreset", c.name, c.val); err != nil {
+					return err
+				}
+			}
+			if err := s.setBool(obj, "ModPreset", "DeletePending", mp.DeletePending); err != nil {
+				return err
+			}
+			// Ruleset 链接（ShortName 行解析；空名留 null）。
+			if mp.RulesetShortName != "" {
+				rsObj, err := s.findRowByString("Ruleset", "ShortName", mp.RulesetShortName)
+				if err != nil {
+					return err
+				}
+				if rsObj == nil {
+					return fmt.Errorf("fixture: 模组预设 %q 引用规则集 %q 无行", mp.Name, mp.RulesetShortName)
+				}
+				rsKey, err := s.prop("ModPreset", "Ruleset")
+				if err != nil {
+					s.r.ReleaseObject(rsObj)
+					return err
+				}
+				err = s.r.SetLinkedObject(obj, rsKey, rsObj)
+				s.r.ReleaseObject(rsObj)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
 		}); err != nil {
 			return err
 		}

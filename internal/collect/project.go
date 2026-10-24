@@ -35,6 +35,7 @@ const (
 	skipOwnRuleset     = "fork 专有规则集成绩（OwnRulesets）"
 	skipMarketRuleset  = "规则集市场行成绩（OnlineID 超内置域，服务器市场产物不跨端）"
 	skipJudgedScore    = "fork 专有判定档成绩（判定语义列非 0，官方端重算会错）"
+	skipPresetSoftDel  = "软删模组预设（DeletePending）"
 )
 
 // reader 缓存一次读事务内的 class/prop 寻址，并把「列缺失 → 该列不进
@@ -101,7 +102,7 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 	extPrefix := prof.ExtSetHashPrefix
 
 	total := 0
-	for _, cls := range []string{"BeatmapSet", "BeatmapCollection", "Skin", "Score"} {
+	for _, cls := range []string{"BeatmapSet", "BeatmapCollection", "Skin", "Score", "KeyBinding", "RulesetSetting", "ModPreset"} {
 		if ck, ok := rd.class(cls); ok {
 			if n, err := r.ObjectCount(ck); err == nil {
 				total += int(n)
@@ -183,6 +184,42 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 				prof.MarketRulesetMinOnlineID, prof.ScoreJudgeColumns)
 		}); err != nil {
 			return hub.Snapshot{}, fmt.Errorf("投影 Score: %w", err)
+		}
+	}
+
+	// 设置类三面（§5.1-M3）：键位/规则集设置全收（hub 保留原文——D20 键位
+	// 枚举域、fork 专有规则集可解析性、D7 mod 名录全部在投放侧按目标端
+	// 过滤，与成绩 mods/Statistics 的哲学一致）；ModPreset 软删行跳过
+	//（S4：软删行在读取投影中当作不存在，§5.4）。
+	if kbKey, ok := rd.class("KeyBinding"); ok {
+		if err := r.ForEach(kbKey, func(obj unsafe.Pointer) error {
+			defer func() { current++; report() }()
+			snap.KeyBindings = append(snap.KeyBindings, projectKeyBinding(rd, obj))
+			return nil
+		}); err != nil {
+			return hub.Snapshot{}, fmt.Errorf("投影 KeyBinding: %w", err)
+		}
+	}
+	if rsKey, ok := rd.class("RulesetSetting"); ok {
+		if err := r.ForEach(rsKey, func(obj unsafe.Pointer) error {
+			defer func() { current++; report() }()
+			snap.RulesetSettings = append(snap.RulesetSettings, projectRulesetSetting(rd, obj))
+			return nil
+		}); err != nil {
+			return hub.Snapshot{}, fmt.Errorf("投影 RulesetSetting: %w", err)
+		}
+	}
+	if mpKey, ok := rd.class("ModPreset"); ok {
+		if err := r.ForEach(mpKey, func(obj unsafe.Pointer) error {
+			defer func() { current++; report() }()
+			if rd.boolOrFalse(obj, "ModPreset", mpKey, "DeletePending") {
+				count(skipPresetSoftDel)
+				return nil
+			}
+			snap.ModPresets = append(snap.ModPresets, projectModPreset(rd, obj))
+			return nil
+		}); err != nil {
+			return hub.Snapshot{}, fmt.Errorf("投影 ModPreset: %w", err)
 		}
 	}
 
@@ -332,6 +369,70 @@ func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func
 	}
 	snap.Scores = append(snap.Scores, sc)
 	return nil
+}
+
+// projectKeyBinding 投影单个键位行（lazer-baseline §2.12 全列）。可空键段
+// 用指针保真：RulesetName null = 全局键位、Variant null = 无变体（内容键
+// 的组成段，§4.2 第一层）。
+func projectKeyBinding(rd *reader, obj unsafe.Pointer) hub.KeyBinding {
+	const cls = "KeyBinding"
+	classKey, _ := rd.class(cls)
+	kb := hub.KeyBinding{
+		ID:        rd.guid(obj, cls, classKey, "ID"),
+		ActionInt: int(rd.intOrZero(obj, cls, classKey, "Action")),
+	}
+	if k, ok := rd.prop(cls, classKey, "RulesetName"); ok {
+		if null, err := rd.r.IsNull(obj, k); err == nil && !null {
+			if v, err := rd.r.GetString(obj, k); err == nil {
+				name := v
+				kb.RulesetName = &name
+			}
+		}
+	}
+	if k, ok := rd.prop(cls, classKey, "Variant"); ok {
+		if null, err := rd.r.IsNull(obj, k); err == nil && !null {
+			if v, err := rd.r.GetInt64(obj, k); err == nil {
+				variant := int(v)
+				kb.Variant = &variant
+			}
+		}
+	}
+	if k, ok := rd.prop(cls, classKey, "KeyCombination"); ok {
+		if null, err := rd.r.IsNull(obj, k); err == nil && !null {
+			kb.KeyCombination, _ = rd.r.GetString(obj, k)
+		}
+	}
+	return kb
+}
+
+// projectRulesetSetting 投影单个规则集设置行（lazer-baseline §2.13 全列，
+// 无主键表；内容键 = (RulesetName, Variant, Key)）。fork 专有规则集的行
+// 照收——hub 保留原文，投放侧按目标端可解析性跳过（§5.1-M3）。
+func projectRulesetSetting(rd *reader, obj unsafe.Pointer) hub.RulesetSetting {
+	const cls = "RulesetSetting"
+	classKey, _ := rd.class(cls)
+	return hub.RulesetSetting{
+		RulesetName: rd.objStr(obj, cls, "RulesetName"),
+		Variant:     int(rd.intOrZero(obj, cls, classKey, "Variant")),
+		Key:         rd.objStr(obj, cls, "Key"),
+		Value:       rd.objStr(obj, cls, "Value"),
+	}
+}
+
+// projectModPreset 投影单个模组预设行（lazer-baseline §2.11 全列）。
+// Ruleset 关系列投影为 ShortName（业务键的组成段）；关系为 null 时投影
+// 空串（源端数据形态，投放侧空名规则集不可解析自然跳过）。
+func projectModPreset(rd *reader, obj unsafe.Pointer) hub.ModPreset {
+	const cls = "ModPreset"
+	classKey, _ := rd.class(cls)
+	return hub.ModPreset{
+		ID:               rd.guid(obj, cls, classKey, "ID"),
+		RulesetShortName: rd.linkedShortName(obj, cls, "Ruleset"),
+		Name:             rd.objStr(obj, cls, "Name"),
+		Description:      rd.objStr(obj, cls, "Description"),
+		ModsJson:         rd.objStr(obj, cls, "Mods"),
+		DeletePending:    false, // 软删行已在调用侧跳过（S4）
+	}
 }
 
 // projectBeatmapSet 投影单个谱面集行（跳过规则前置，命中即计数返回）。
