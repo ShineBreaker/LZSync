@@ -4,7 +4,7 @@
 // 强/弱键标注、行级勾选、冲突字段展开）、底部统计条（N 条同步 / M 条
 // 跳过·k 类原因）、生成投放计划。
 
-import { CompareService, LibraryService } from "../mygo";
+import { CompareService, ExportService, LibraryService } from "../mygo";
 import { categoryClass, categoryLabel, clear, el, errText, fmtMillis, kindLabel, message, text } from "../ui";
 
 /** 行的运行态（勾选状态脱离 DefaultChecked 后由 UI 持有）。 */
@@ -33,6 +33,9 @@ const CAT_FILTERS = [
   { id: "restore", label: "恢复（已删除）" },
   { id: "target-only", label: "目标独有" },
 ] as const;
+
+/** 有容器形态的类型（§7-M3-5 路线④：谱面集 .osz / 皮肤 .osk / 成绩 .osr）。 */
+const EXPORTABLE_KINDS = new Set(["beatmap_set", "skin", "score"]);
 
 type DiffRowView = Awaited<ReturnType<typeof CompareService.previewDeploy>>[number];
 
@@ -155,6 +158,30 @@ export async function renderCompare(root: HTMLElement): Promise<void> {
     }
   });
 
+  /** 行级「导出容器」入口（§7-M3-5 路线④降级）：hub 真相 → 官方兼容
+   * 容器 → 系统默认打开方式交给目标 fork 客户端导入；不触碰目标 .realm。 */
+  function renderExportBtn(r: DiffRowView): HTMLElement {
+    const btn = el("button", {
+      class: "btn btn-ghost btn-sm",
+      title: "生成 .osz/.osk/.osr 到临时目录并按系统默认打开方式导入（路线④降级，不写目标库）",
+    }, [text("导出容器")]);
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const res = await ExportService.exportContainers(targetSel.value, String(r.Kind), [r.ContentKey]);
+        clear(statusLine);
+        const where = `已生成 ${res.Paths.length} 个容器（目标 ${targetSel.value}）：${res.Paths.join("；")}`;
+        statusLine.append(message(res.Note ? "info" : "ok", res.Note ? `${where}。拉起提示：${res.Note}` : `${where}，已交给系统默认程序导入。`));
+      } catch (err) {
+        clear(statusLine);
+        statusLine.append(message("error", errText(err)));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    return btn;
+  }
+
   function rowKey(r: DiffRowView): string {
     return `${r.Kind}\u0000${r.ContentKey}`;
   }
@@ -271,7 +298,11 @@ export async function renderCompare(root: HTMLElement): Promise<void> {
     const rowMain = el("div", { class: "row-main" }, [
       cb,
       el("div", { class: "row-body" }, [
-        el("div", { class: "row-title" }, [el("span", { class: "row-summary" }, [text(r.Summary)]), ...badges]),
+        el("div", { class: "row-title" }, [
+          el("span", { class: "row-summary" }, [text(r.Summary)]),
+          ...badges,
+          ...(EXPORTABLE_KINDS.has(String(r.Kind)) ? [renderExportBtn(r)] : []),
+        ]),
         el("div", { class: "row-key muted" }, [text(`${kindLabel(String(r.Kind))} · ${r.ContentKey}`)]),
       ]),
     ]);

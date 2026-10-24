@@ -53,6 +53,17 @@ export interface DiffRow {
 
 export type EntityKind = string;
 
+/**
+ * ExportResult 容器导出结果（§7-M3-5 路线④）。拉起失败不吞路径：容器
+ * 文件已生成，人话提示进 Note，用户总能手动导入。
+ */
+export interface ExportResult {
+  /** 生成的容器绝对路径（临时目录） */
+  Paths: string[];
+  /** 拉起结果人话提示；空 = 已全部交给系统默认程序 */
+  Note: string;
+}
+
 /** FieldDiff 冲突字段级对比（canonical vs 目标 fork presence）。 */
 export interface FieldDiff {
   Field: string;
@@ -292,6 +303,20 @@ export const SyncService = {
   /** Running 当前任务状态。 */
   running(): Promise<SyncStatus> {
     return call("SyncService.Running");
+  },
+} as const;
+
+/**
+ * realExport ExportService 真实实现。open 拉起函数可注入（测试替换为
+ * stub，避免自动化真的调 xdg-open；产品路径装 container.OpenWithDefaultApp）。
+ */
+export const ExportService = {
+  /**
+   * ExportContainers 生成容器到临时目录并逐个拉起。生成阶段失败走 error
+   * （坏数据宁失败不静默）；拉起失败只进 Note——容器已生成，用户可手动导入。
+   */
+  exportContainers(forkID: string, kind: EntityKind, contentKeys: string[]): Promise<ExportResult> {
+    return call("ExportService.ExportContainers", forkID, kind, contentKeys);
   },
 } as const;
 
