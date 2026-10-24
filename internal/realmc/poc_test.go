@@ -139,6 +139,7 @@ func TestPoCReadOnly(t *testing.T) {
 	// 拷贝到 TempDir 副本，只读打开的伴生文件落在副本旁，真实库零接触。
 	dir := t.TempDir()
 	clone := filepath.Join(dir, "client.realm")
+	// mimosa-ignore #nosec G305 -- 测试辅助：把本机真实库拷进 t.TempDir 副本再开库，路径由测试自身构造，无外部输入（已裁定误报）
 	if err := copyFile(src, clone); err != nil {
 		t.Fatalf("拷贝真实库到 %s: %v", clone, err)
 	}
@@ -249,8 +250,10 @@ func TestPoCReadOnly(t *testing.T) {
 	}
 }
 
+// copyFile 测试辅助拷贝：调用者均为本文件内测试（路径为 t.TempDir 或本机固定探测路径），无外部输入。
+// mimosa-ignore #nosec G304,G305 -- 见上，测试专用（已裁定误报）
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) // mimosa-ignore #nosec G304 -- 同上，测试专用
 	if err != nil {
 		return err
 	}
