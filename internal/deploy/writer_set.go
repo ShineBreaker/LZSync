@@ -57,8 +57,8 @@ var (
 		"LastPlayed", "BeatDivisor", "EditorTimestamp",
 	}
 	mdScalarCols = []string{
-		"Title", "TitleUnicode", "Artist", "ArtistUnicode", "Source", "Tags",
-		"UserTags", "PreviewTime", "AudioFile", "BackgroundFile",
+		"Title", "TitleUnicode", "Artist", "ArtistUnicode", "Author", "Source",
+		"Tags", "UserTags", "PreviewTime", "AudioFile", "BackgroundFile",
 	}
 	rulesetColsWanted = []string{"ShortName", "OnlineID", "Name", "InstantiationInfo", "Available"}
 )
@@ -67,13 +67,13 @@ var (
 type beatmapSetWriter struct {
 	r *realmc.Realm
 	// class key（embedded 类经列表/单值挂接，但其列仍按 class 寻址）。
-	setCK, bmCK, mdCK, fileCK, rulesetCK                             uint32
-	usageCK, userCK, diffCK, usCK                                    uint32
-	setCols, bmCols, mdCols, fileCols, rulesetCols                   map[string]int64
-	usageCols, userCols, diffCols, usCols                            map[string]int64
-	setPK, bmPK, filePK                                              bool
-	absent                                                            bool
-	absentWhy                                                         string
+	setCK, bmCK, mdCK, fileCK, rulesetCK           uint32
+	usageCK, userCK, diffCK, usCK                  uint32
+	setCols, bmCols, mdCols, fileCols, rulesetCols map[string]int64
+	usageCols, userCols, diffCols, usCols          map[string]int64
+	setPK, bmPK, filePK                            bool
+	absent                                         bool
+	absentWhy                                      string
 	// diffSkips 批内难度级跳过计数（fork 专有规则集不可解析等）——集本身
 	// 仍落地，计数由 Runner 在批末聚合（与整项 skip 分开的通道）。
 	diffSkips map[string]int
@@ -97,9 +97,12 @@ func prepareBeatmapSetWriter(r *realmc.Realm) (*beatmapSetWriter, error) {
 		cols map[string]int64
 		want []string
 	}{
-		{"BeatmapSet", &w.setCK, w.setCols, setScalarCols},
-		{"Beatmap", &w.bmCK, w.bmCols, bmScalarCols},
-		{"BeatmapMetadata", &w.mdCK, w.mdCols, mdScalarCols},
+		// 标量白名单 + 结构列一并寻址（结构列进必备检查；缺列计数只覆盖
+		// 标量白名单，见 missingColumns）。
+		{"BeatmapSet", &w.setCK, w.setCols, append(append([]string(nil), setScalarCols...), "Beatmaps", "Files")},
+		{"Beatmap", &w.bmCK, w.bmCols, append(append([]string(nil), bmScalarCols...),
+			"Ruleset", "Difficulty", "Metadata", "UserSettings", "BeatmapSet")},
+		{"BeatmapMetadata", &w.mdCK, w.mdCols, mdScalarCols}, // Author/UserTags 已在白名单
 		{"File", &w.fileCK, w.fileCols, []string{"Hash"}},
 		{"Ruleset", &w.rulesetCK, w.rulesetCols, rulesetColsWanted},
 		{"RealmNamedFileUsage", &w.usageCK, w.usageCols, []string{"File", "Filename"}},
