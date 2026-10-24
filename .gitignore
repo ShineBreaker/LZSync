@@ -3,5 +3,6 @@ node_modules/
 /build/
 /.mygo/
 mygo_windows_*.syso
+/lzsync
 
 reference
