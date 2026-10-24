@@ -3,7 +3,7 @@
 // 知识——全部「Ez 怎样、g0v0 怎样」的差异只存在于本包的 Profile 数据与
 // 运行时结构档案中：新增第五个 fork = 新增一份 Profile，不改内核。
 //
-// 全部静态数据固化自 docs/research/ 的字段级摘录（C-1：不依赖 reference/）：
+// 全部静态数据固化自 docs/research/ 的字段级摘录（C-1 自包含纪律）：
 // fork-comparison §0/§1（四端速览与总览矩阵）、fork-delta §1–§4、
 // fork-ez2lazer §1–§2/§5.2、fork-g0v0 §1–§3。
 package forks

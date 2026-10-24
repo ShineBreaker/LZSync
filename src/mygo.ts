@@ -196,18 +196,26 @@ export type VersionSource = string;
 // ---- Services ----
 
 export const LibraryService = {
+  /** AssignFork 用户指认 fork 身份（绝不猜，§6.1）；指认后按 Profile 解码版本。 */
   assignFork(path: string, forkID: string): Promise<LibraryRef> {
     return call("LibraryService.AssignFork", path, forkID);
   },
+  /** List 组装库卡片（状态灯数据，§6.1）。 */
   list(): Promise<LibraryCard[]> {
     return call("LibraryService.List");
   },
+  /**
+   * Register 手动注册：识别失败返回 ForkID 为空串的 ref（携带原始版本供
+   * UI 指认，§6.1）；只有路径不可访问等硬错误走 error。
+   */
   register(path: string): Promise<LibraryRef> {
     return call("LibraryService.Register", path);
   },
+  /** Remove 解除管理（不碰磁盘）。 */
   remove(forkID: string): Promise<void> {
     return call("LibraryService.Remove", forkID);
   },
+  /** Scan 扫描数据根（§6.1 自动发现），发现的库自动并入注册表。 */
   scan(): Promise<LibraryRef[]> {
     return call("LibraryService.Scan");
   },
@@ -215,50 +223,59 @@ export const LibraryService = {
 
 export const CompareService = {
   /**
-   * BuildPlan 勾选 → 计划（内存持久；M1 动作面与真实后端同构：仅收藏夹
-   * 产生 create/update，其余计 skip + 原因；走 deploy.NewPlan 校验）。
+   * BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。
+   * M1 实际动作面 = 收藏夹 create/update；其余类型与版本更新归入 skip 并
+   * 给出原因（谱面集/版本替换的写路径属 M2，§5.1 分阶段启用）。
    */
   buildPlan(target: string, sel: Selection[]): Promise<Plan> {
     return call("CompareService.BuildPlan", target, sel);
   },
+  /** CompareForks fork↔fork 快照对比（委托 diff 层：两份 presence 差集）。 */
   compareForks(source: string, target: string): Promise<DiffRow[]> {
     return call("CompareService.CompareForks", source, target);
   },
+  /** CurrentPlan 返回持久化的当前计划。 */
   currentPlan(): Promise<Plan> {
     return call("CompareService.CurrentPlan");
   },
+  /** DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 全量，HB2）。 */
   deletedEntries(target: string): Promise<DiffRow[]> {
     return call("CompareService.DeletedEntries", target);
   },
+  /** PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）。 */
   previewDeploy(target: string): Promise<DiffRow[]> {
     return call("CompareService.PreviewDeploy", target);
   },
 } as const;
 
 export const SyncService = {
+  /** Cancel 取消当前长任务（批间生效，批事务不可打断，§3.3）。 */
   cancel(): Promise<void> {
     return call("SyncService.Cancel");
   },
-  /** Collect 模拟收集两阶段进度（投影 → 收仓），g0v0 演示守卫拦截。 */
+  /**
+   * Collect 对单个 fork 执行收集（§6.3 收集阶段）。游戏运行中被守卫拦截；
+   * 编排主体委托 collect.Runner（桩未施工时如实上抛其错误）。
+   */
   collect(forkID: string): Promise<Report> {
     return call("SyncService.Collect", forkID);
   },
-  /**
-   * DeployCurrentPlan 模拟投放：守卫 → 备份（一次性）→ 4 批 ×（建链接 →
-   * 事务写入 → DriftGuard）；取消点在批间（§3.3）。
-   */
+  /** DeployCurrentPlan 执行当前计划（§6.3 投放执行：守卫 → 备份 → 批事务）。 */
   deployCurrentPlan(): Promise<DeployReport> {
     return call("SyncService.DeployCurrentPlan");
   },
+  /** RestoreBackup 从备份还原（guard.Backups 委托；还原前自动再备份）。 */
   restoreBackup(forkID: string, backupPath: string): Promise<void> {
     return call("SyncService.RestoreBackup", forkID, backupPath);
   },
+  /** Running 当前任务状态。 */
   running(): Promise<SyncStatus> {
     return call("SyncService.Running");
   },
 } as const;
 
 export const SettingsService = {
+  /** Get 组装设置页数据（§6.4 M1 骨架，只读显示）。 */
   get(): Promise<SettingsInfo> {
     return call("SettingsService.Get");
   },
