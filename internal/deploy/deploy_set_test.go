@@ -388,10 +388,12 @@ func namedFilesEqual(a, b []hub.NamedFile) bool {
 	return true
 }
 
-// assertSetDeepEqual 逐字段断言（wantOnlineID 独立传入：S8 异域时读回值
-// ≠ canonical 值；wantAuthorOnlineID 同理——Metadata.Author 的 RealmUser.
-// OnlineID 也是 S8 面）。
-func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID, wantAuthorOnlineID int64) {
+// assertSetDeepEqual 逐字段断言。wantOnlineID 是集行 OnlineID 的独立期望
+//（S8 异域/重续场景读回值 ≠ canonical 值）；crossRealmCreate 标记「本次
+// 写入是异域新建形态」——该形态下难度行 OnlineID 与 Metadata.Author 的
+// RealmUser.OnlineID（各难度 canonical 值不同/相同，故不取单值参数）期望
+// 均为 -1，其余场景期望各自 canonical 值。
+func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID int64, crossRealmCreate bool) {
 	t.Helper()
 	if got.ID != want.ID && !guidEqual(got.ID, want.ID) {
 		t.Errorf("集 Guid = %s，期望 %s", got.ID, want.ID)
@@ -430,11 +432,11 @@ func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID, wa
 			t.Errorf("多出难度 %s（Hash %s）", bm.DifficultyName, bm.Hash)
 			continue
 		}
-		assertBeatmapDeepEqual(t, bm, wantBM, wantAuthorOnlineID)
+		assertBeatmapDeepEqual(t, bm, wantBM, crossRealmCreate)
 	}
 }
 
-func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, wantAuthorOnlineID int64) {
+func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, crossRealmCreate bool) {
 	t.Helper()
 	if got.ID != want.ID && !guidEqual(got.ID, want.ID) {
 		t.Errorf("难度 %s Guid = %s，期望 %s", want.DifficultyName, got.ID, want.ID)
@@ -457,7 +459,6 @@ func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, wantAuthorOnlin
 		a, b int
 	}{
 		{"StatusInt", got.StatusInt, want.StatusInt},
-		{"OnlineID", got.OnlineID, want.OnlineID},
 		{"EndTimeObjectCount", got.EndTimeObjectCount, want.EndTimeObjectCount},
 		{"TotalObjectCount", got.TotalObjectCount, want.TotalObjectCount},
 		{"BeatDivisor", got.BeatDivisor, want.BeatDivisor},
@@ -465,6 +466,13 @@ func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, wantAuthorOnlin
 		if c.a != c.b {
 			t.Errorf("难度 %s %s = %d，期望 %d", want.DifficultyName, c.name, c.a, c.b)
 		}
+	}
+	wantOnlineID := int64(want.OnlineID)
+	if crossRealmCreate {
+		wantOnlineID = -1
+	}
+	if int64(got.OnlineID) != wantOnlineID {
+		t.Errorf("难度 %s OnlineID = %d，期望 %d", want.DifficultyName, got.OnlineID, wantOnlineID)
 	}
 	for _, c := range []struct {
 		name string
@@ -512,6 +520,10 @@ func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, wantAuthorOnlin
 	if got.Metadata.Author.Username != want.Metadata.Author.Username ||
 		got.Metadata.Author.CountryString != want.Metadata.Author.CountryString {
 		t.Errorf("难度 %s Author 标量 = %+v，期望 %+v", want.DifficultyName, got.Metadata.Author, want.Metadata.Author)
+	}
+	wantAuthorOnlineID := int64(want.Metadata.Author.OnlineID)
+	if crossRealmCreate {
+		wantAuthorOnlineID = -1
 	}
 	if int64(got.Metadata.Author.OnlineID) != wantAuthorOnlineID {
 		t.Errorf("难度 %s Author.OnlineID = %d，期望 %d", want.DifficultyName, got.Metadata.Author.OnlineID, wantAuthorOnlineID)
@@ -691,7 +703,7 @@ func TestDeployBeatmapSetFullChain(t *testing.T) {
 				t.Errorf("目标库缺谱面集 %s", want.Hash)
 				continue
 			}
-			assertSetDeepEqual(t, got, want, want.OnlineID, int64(want.Beatmaps[0].Metadata.Author.OnlineID))
+			assertSetDeepEqual(t, got, want, want.OnlineID, false)
 		}
 	})
 
@@ -769,7 +781,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !ok {
 			t.Fatal("同域投放后读回缺集")
 		}
-		assertSetDeepEqual(t, got, set, set.OnlineID, int64(set.Beatmaps[0].Metadata.Author.OnlineID))
+		assertSetDeepEqual(t, got, set, set.OnlineID, false)
 	})
 
 	// 目标 presence 建立（收集语义；投放不写 presence，§4.4）。
@@ -803,7 +815,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !ok {
 			t.Fatal("异域新行投放后读回缺集")
 		}
-		assertSetDeepEqual(t, got, set2, -1, -1) // S8：异域新行集 OnlineID 与 Author.OnlineID 均 -1
+		assertSetDeepEqual(t, got, set2, -1, true) // S8：异域新行集/难度/Author 三面 OnlineID 均 -1
 	})
 
 	// ③ 异域更新不触碰：g0v0 覆盖集 1 canonical（同 Hash、DateAdded/
@@ -848,7 +860,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !ok {
 			t.Fatal("异域更新后读回缺集 1")
 		}
-		assertSetDeepEqual(t, got, modified, set.OnlineID, int64(set.Beatmaps[0].Metadata.Author.OnlineID)) // OnlineID/Author.OnlineID 保持 7001/100042 不被触碰（就地更新不动难度）
+		assertSetDeepEqual(t, got, modified, set.OnlineID, false) // 集行 OnlineID 保持 7001 不被触碰；难度/Author 不动（读回①段同域投放值）
 		if got.DateAdded.Equal(set.DateAdded) {
 			t.Error("异域更新未覆盖 DateAdded（S8 只豁免 OnlineID 列）")
 		}
@@ -944,7 +956,7 @@ func TestDeployBeatmapSetMissingColumnsAndRulesetSeed(t *testing.T) {
 		want := set
 		want.DateRanked = nil
 		want.Beatmaps[0].EditorTimestamp = nil
-		assertSetDeepEqual(t, got, want, set.OnlineID, int64(set.Beatmaps[0].Metadata.Author.OnlineID))
+		assertSetDeepEqual(t, got, want, set.OnlineID, false)
 		// 官方规则集缺行按需新建：难度引用 osu → 只建 osu（Available=
 		// true、OnlineID 对号；不预播四集——按需解析语义）。
 		if got := classRowCount(t, sr, "Ruleset"); got != 1 {
@@ -1046,7 +1058,7 @@ func TestDeployBeatmapSetVersionReplace(t *testing.T) {
 		if !ok {
 			t.Fatal("版本替换后读回缺新版本集")
 		}
-		assertSetDeepEqual(t, gotV2, v2, v2.OnlineID, int64(v2.Beatmaps[0].Metadata.Author.OnlineID))
+		assertSetDeepEqual(t, gotV2, v2, v2.OnlineID, false)
 		gotV1, ok := sr.readSetProjection(v1.Hash)
 		if !ok {
 			t.Fatal("版本替换后旧版本行应保留（软删非物理删）")

@@ -765,7 +765,7 @@ func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObje
 		name string
 		val  int64
 	}{
-		{"Status", int64(bm.StatusInt)}, {"OnlineID", int64(bm.OnlineID)},
+		{"Status", int64(bm.StatusInt)},
 		{"EndTimeObjectCount", int64(bm.EndTimeObjectCount)},
 		{"TotalObjectCount", int64(bm.TotalObjectCount)},
 		{"BeatDivisor", int64(bm.BeatDivisor)},
@@ -774,6 +774,19 @@ func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObje
 			if err := w.r.SetInt64(bmObj, key, c.val); err != nil {
 				return fail(fmt.Errorf("deploy: 写难度 %s %s: %w", bm.DifficultyName, c.name, err))
 			}
+		}
+	}
+	// OnlineID（S8）：同域随行携带；异域新行置 -1。S8 条文字面未单列难度级
+	// OnlineID，但 rationale（fork-g0v0 §7.5「凡 OnlineID……不可跨侧对拷」）
+	// 对难度级同样成立，且同一新建链路里集行置 -1 而难度行携带原值自相
+	// 矛盾——统一受 S8 约束（本函数只服务新建链路，无「异域更新」态）。
+	if key, ok := w.bmCols["OnlineID"]; ok {
+		want := int64(bm.OnlineID)
+		if !sameRealm {
+			want = -1
+		}
+		if err := w.r.SetInt64(bmObj, key, want); err != nil {
+			return fail(fmt.Errorf("deploy: 写难度 %s OnlineID: %w", bm.DifficultyName, err))
 		}
 	}
 	for _, c := range []struct {
