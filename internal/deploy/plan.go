@@ -172,6 +172,18 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 				return Plan{}, fmt.Errorf("deploy: 未知对账分类 %q（键 %s）", ri.Category, ri.ContentKey)
 			}
 		case hub.KindBeatmapSet:
+			// §5.4-D5 预演：外部托管集 Hash（路径编码）不进默认计划——
+			// 与执行期 writer 防线共用 externalSetHash（§3.3 两处一致）。
+			if externalSetHash(ri.ContentKey) {
+				planItems = append(planItems, PlanItem{
+					Kind:       ri.Kind,
+					ContentKey: ri.ContentKey,
+					Action:     ActionSkip,
+					Summary:    beatmapSetSummary(ri.ContentKey),
+					SkipReason: "外部托管集（Hash 为路径编码而非内容哈希，files/ 无字节），不投放（D5）",
+				})
+				continue
+			}
 			switch ri.Category {
 			case hub.ReconcileCreate:
 				if ri.Restorable && !restore[ri.ContentKey] {
@@ -222,6 +234,18 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	// 皮肤 → 计划项（create/conflict 两分类；皮肤无版本链与谱面身份键，
 	// restore 语义与收藏夹一致——tombstone 命中默认排除，§6.2）。
 	for _, sr := range skins {
+		// §5.4-D21 预演：fork 专有皮肤指纹命中 → skip 项（与执行期
+		// skinWriter 防线共用 forkOwnSkinHit，§3.3 两处一致）。
+		if forkOwnSkinHit(forks.All(), sr.guid, sr.name, sr.creator) {
+			planItems = append(planItems, PlanItem{
+				Kind:       hub.KindSkin,
+				ContentKey: sr.contentKey,
+				Action:     ActionSkip,
+				Summary:    skinSummary(sr.name),
+				SkipReason: "皮肤命中 fork 专有皮肤指纹（OwnSkins），不跨端投放（D21）",
+			})
+			continue
+		}
 		switch sr.category {
 		case hub.ReconcileCreate:
 			if sr.restorable && !restore[sr.contentKey] {
@@ -283,6 +307,8 @@ func hashPrefix(contentHash string) string {
 type skinReconcile struct {
 	contentKey string
 	name       string
+	creator    string
+	guid       string // 行 Guid 的 hex（OwnSkins 指纹判定输入，D21）
 	category   hub.ReconcileCategory
 	restorable bool
 }
@@ -299,7 +325,7 @@ func reconcileSkins(ctx context.Context, h *hub.Store, forkID string) ([]skinRec
 		return nil, fmt.Errorf("deploy: 读皮肤 canonical: %w", err)
 	}
 	type canon struct {
-		key, name, payload string
+		key, name, creator, guid, payload string
 	}
 	var canonRows []canon
 	for rows.Next() {
@@ -313,7 +339,7 @@ func reconcileSkins(ctx context.Context, h *hub.Store, forkID string) ([]skinRec
 			rows.Close()
 			return nil, fmt.Errorf("deploy: 解码皮肤 %q payload: %w", k, err)
 		}
-		canonRows = append(canonRows, canon{k, sk.Name, v})
+		canonRows = append(canonRows, canon{k, sk.Name, sk.Creator, sk.ID, v})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -351,7 +377,7 @@ func reconcileSkins(ctx context.Context, h *hub.Store, forkID string) ([]skinRec
 	for _, c := range canonRows {
 		local, inPres := pres[c.key]
 		if !inPres {
-			it := skinReconcile{contentKey: c.key, name: c.name, category: hub.ReconcileCreate}
+			it := skinReconcile{contentKey: c.key, name: c.name, creator: c.creator, guid: c.guid, category: hub.ReconcileCreate}
 			if _, dead := tombKeys[c.key]; dead {
 				it.restorable = true
 			}

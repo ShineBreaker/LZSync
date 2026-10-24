@@ -1,8 +1,10 @@
 package deploy
 
-// 成绩写入器（M2，design.md §5.2 全部跳过分支）：目标无 Score 表 /
-// BeatmapHash 为空 / 目标缺对应难度 Hash / 规则集不可解析（fork 专有）
-// → 逐分支计数 + 人话原因，绝不落地悬空行（S7）。
+// 成绩写入器（M2，design.md §5.2 全部跳过分支 + §5.4 目标端兼容过滤）：
+// 目标无 Score 表 / BeatmapHash 为空 / 目标缺对应难度 Hash / 规则集不可
+// 解析（fork 专有，市场规则集行 D8 的兜底防线——目标端解析不了市场行
+// 同样走此分支）/ mod 名录外或 JSON 解析失败（D7）→ 逐分支计数 + 人话
+// 原因，绝不落地悬空行（S7）。
 //
 // 挂接成功：Score.BeatmapInfo 关系链到目标难度对象 + BeatmapHash 列存
 // 字符串 + Files=[.osr] usage + RealmFile 行同事务（S6；.osr 链接先行由
@@ -42,6 +44,9 @@ type scoreWriter struct {
 	scorePK, filePK                                               bool
 	absent                                                        bool
 	absentWhy                                                     string
+	// statKeyDrops 批内键级过滤计数（Statistics 未知 HitResult 键——整条
+	// 仍落地，被滤键逐个计数，§1.5-4；diffSkips 的成绩版先例）。
+	statKeyDrops map[string]int
 	// bmIndex 目标全部非隐藏难度 Hash 集合（惰性构建：首个成绩项执行时
 	// 全表扫一次，批内复用——谱面写入之后构建，本次刚同步的难度可挂，
 	// §5.2-3）。nil = 未构建；构建后即使空集也不再重建（??= 语义）。
@@ -49,7 +54,7 @@ type scoreWriter struct {
 }
 
 func prepareScoreWriter(r *realmc.Realm) (*scoreWriter, error) {
-	w := &scoreWriter{r: r}
+	w := &scoreWriter{r: r, statKeyDrops: map[string]int{}}
 	w.scoreCols, w.bmCols, w.rulesetCols = map[string]int64{}, map[string]int64{}, map[string]int64{}
 	w.fileCols, w.usageCols, w.userCols = map[string]int64{}, map[string]int64{}, map[string]int64{}
 	absent := func(why string) (*scoreWriter, error) {
@@ -126,12 +131,25 @@ func prepareScoreWriter(r *realmc.Realm) (*scoreWriter, error) {
 	return w, nil
 }
 
-// exec 执行单个成绩计划项（§5.2 分支序列 + §3.3 执行期现场复核）。
-// sameRealm 是 S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）。
-func (w *scoreWriter) exec(sc hub.Score, sameRealm bool, action Action) (applied, skipStat, string, error) {
+// exec 执行单个成绩计划项（§3.3 执行期现场复核 + §5.4 目标端兼容过滤）。
+// sameRealm 是 S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）；
+// targetFork 驱动 mod/HitResult 白名单（Profile 数据，D7）。
+func (w *scoreWriter) exec(sc hub.Score, sameRealm bool, targetFork string, action Action) (applied, skipStat, string, error) {
 	if w.absent {
 		// §5.2-1：目标库没有 Score 表。
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
+	}
+	// §5.4-D7：目标端 mod 名录与 HitResult 键白名单。整条拒绝 → 计数
+	// 跳过；键级过滤 → 替换 sc 后续读写共用（重续判定天然对偶），被滤
+	// 键累计入批报告。
+	var reject string
+	var dropped int
+	sc, dropped, reject = adaptScoreForTarget(sc, targetFork)
+	if reject != "" {
+		return applied{}, skipStat{reason: reject, count: 1}, "", nil
+	}
+	if dropped > 0 {
+		w.statKeyDrops[skipReasonStatsKeyDropped] += dropped
 	}
 	// §5.2-2：BeatmapHash 为空 → 跳过（无谱面锚点，落地即悬空行，S7）。
 	if sc.BeatmapHash == "" {

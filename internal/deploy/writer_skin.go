@@ -106,12 +106,16 @@ func prepareSkinWriter(r *realmc.Realm) (*skinWriter, error) {
 }
 
 // forkOwnSkinHit 判定皮肤指纹是否命中任一注册 fork 的专有皮肤声明
-// （§4.3：fork 知识只在 ForkProfile；投放侧泛化为全注册表判定——专有
+//（§4.3：fork 知识只在 ForkProfile；投放侧泛化为全注册表判定——专有
 // 皮肤属于其宿主 fork 自备，跨端落地无收益且可能覆盖目标端自备行）。
-func forkOwnSkinHit(profiles []forks.ForkProfile, name, creator string) bool {
+// 判定通道：Guid 等值（固定常量类，D21）或 Name+Creator 双等值。
+func forkOwnSkinHit(profiles []forks.ForkProfile, guid, name, creator string) bool {
 	for _, p := range profiles {
 		for _, fp := range p.OwnSkins {
-			if fp.Name == name && fp.Creator == creator {
+			if fp.Guid != "" && guid != "" && fp.Guid == guid {
+				return true
+			}
+			if fp.Name != "" && fp.Creator != "" && fp.Name == name && fp.Creator == creator {
 				return true
 			}
 		}
@@ -129,8 +133,8 @@ func (w *skinWriter) exec(sk hub.Skin, action Action, restore bool) (applied, sk
 	if sk.Protected {
 		return applied{}, skipStat{reason: fmt.Sprintf("皮肤 %q 是 Protected 内置皮肤（固定 Guid 四端自备，不投放）", sk.Name), count: 1}, "", nil
 	}
-	if forkOwnSkinHit(forks.All(), sk.Name, sk.Creator) {
-		return applied{}, skipStat{reason: fmt.Sprintf("皮肤 %q（作者 %q）命中 fork 专有皮肤指纹（OwnSkins），不跨端投放", sk.Name, sk.Creator), count: 1}, "", nil
+	if forkOwnSkinHit(forks.All(), sk.ID, sk.Name, sk.Creator) {
+		return applied{}, skipStat{reason: fmt.Sprintf("皮肤 %q（作者 %q，Guid %s）命中 fork 专有皮肤指纹（OwnSkins），不跨端投放", sk.Name, sk.Creator, hashPrefix(sk.ID)), count: 1}, "", nil
 	}
 	// 现场身份匹配：内容键 = Hash（§4.2 第一层）。
 	existing, err := w.r.FindFirstByString(w.skinCK, w.skinCols["Hash"], sk.Hash)

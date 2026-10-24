@@ -275,7 +275,8 @@ func TestDeploySkinFullChain(t *testing.T) {
 
 // TestDeploySkinSkipProtectedAndOwnSkin 跳过防线：hub 出现 Protected 皮肤
 // 或 fork 专有指纹皮肤（异常路径——投影端 §4.1 已跳过，正常不进 hub）时
-// 写入器侧宁可不写：逐条计数 + 人话原因，目标库零落地。
+// 预演（BuildPlan skip 项，§5.4-D21）与写入器防线（执行期复核，§3.3）
+// 两处一致：逐条计数 + 人话原因，目标库零落地。
 func TestDeploySkinSkipProtectedAndOwnSkin(t *testing.T) {
 	lib := mustLib(t)
 	ctx := context.Background()
@@ -283,6 +284,22 @@ func TestDeploySkinSkipProtectedAndOwnSkin(t *testing.T) {
 	files, skins := buildSkinFixture(t)
 	protected := skins[0]
 	protected.Protected = true // 异常路径夹具：Protected 行混入 hub
+	// Ez 专有皮肤指纹行（Guid 通道，D21）：Guid 用 hub 规范形态（无连
+	// 字符 hex，收集投影 rd.guid 的输出形态）。
+	ownSeed, err := fixture.MaterializeSkin("Ez Default", "Ez2Lazer", []fixture.SkinFileMaterial{
+		{Filename: "ez-default.ini", Bytes: []byte("[General]\nName:Ez Default\n")},
+	}, files)
+	if err != nil {
+		t.Fatalf("MaterializeSkin(ez): %v", err)
+	}
+	ownSkin := hub.Skin{
+		ID:                "fc372386381d4f8e897ac1d89ef39f9c",
+		Hash:              ownSeed.Hash,
+		Name:              ownSeed.Name,
+		Creator:           ownSeed.Creator,
+		InstantiationInfo: ownSeed.InstantiationInfo,
+		Files:             ownSeed.Files,
+	}
 
 	refB, err := fixture.Build(ctx, fixture.Spec{
 		ForkID: fixture.ForkLazer, SchemaVersion: fixture.VersionLazer,
@@ -292,14 +309,29 @@ func TestDeploySkinSkipProtectedAndOwnSkin(t *testing.T) {
 		t.Fatalf("fixture.Build(B): %v", err)
 	}
 	h := openMemHub(t)
-	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkDelta, CollectedAt: t0, Skins: []hub.Skin{protected, skins[1]}})
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkDelta, CollectedAt: t0,
+		Skins: []hub.Skin{protected, skins[1], ownSkin}})
 
 	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	if len(plan.Items) != 2 {
-		t.Fatalf("计划项 = %d（期望 2——防线在写入器侧，计划面不预判）", len(plan.Items))
+	// 预演：指纹皮肤在计划面即判 skip（ActionSkip + 人话原因，§6.2）；
+	// Protected 皮肤 hub 正常收录（collect 侧才滤），计划面为 create。
+	planSkips := 0
+	for _, it := range plan.Items {
+		if it.Action == ActionSkip {
+			planSkips++
+			if it.ContentKey != ownSkin.Hash || !strings.Contains(it.SkipReason, "fork 专有皮肤指纹") {
+				t.Errorf("预演 skip 项 = {%s %s %q}，期望指纹皮肤（D21）", it.Kind, it.ContentKey, it.SkipReason)
+			}
+		}
+	}
+	if planSkips != 1 {
+		t.Fatalf("计划面 skip 项 = %d（期望 1——指纹皮肤预演拒绝），plan=%+v", planSkips, plan.Items)
+	}
+	if len(plan.Items) != 3 {
+		t.Fatalf("计划项 = %d（期望 3：Protected create + 正常 create + 指纹 skip）", len(plan.Items))
 	}
 	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
 	if err != nil {
@@ -313,18 +345,27 @@ func TestDeploySkinSkipProtectedAndOwnSkin(t *testing.T) {
 	if len(report.Applied) != 1 {
 		t.Fatalf("Applied = %+v（期望仅正常皮肤落地）", report.Applied)
 	}
-	protectedSkipped := 0
+	protectedSkipped, ownSkipped := 0, 0
 	for _, st := range report.Skipped {
 		if strings.Contains(st.Reason, "Protected 内置皮肤") {
 			protectedSkipped += st.Count
+		}
+		if strings.Contains(st.Reason, "fork 专有皮肤指纹") {
+			ownSkipped += st.Count
 		}
 	}
 	if protectedSkipped != 1 {
 		t.Errorf("Protected 跳过计数 = %d（期望 1），Skipped=%+v", protectedSkipped, report.Skipped)
 	}
+	if ownSkipped != 1 {
+		t.Errorf("指纹皮肤跳过计数 = %d（期望 1：skip 项如实计数），Skipped=%+v", ownSkipped, report.Skipped)
+	}
 	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
 		if _, ok := readSkinRow(t, sr, protected.Hash); ok {
 			t.Error("Protected 皮肤不应落地目标库")
+		}
+		if _, ok := readSkinRow(t, sr, ownSkin.Hash); ok {
+			t.Error("fork 专有皮肤不应落地目标库（D21）")
 		}
 		if _, ok := readSkinRow(t, sr, skins[1].Hash); !ok {
 			t.Error("正常皮肤应落地目标库")
@@ -332,26 +373,34 @@ func TestDeploySkinSkipProtectedAndOwnSkin(t *testing.T) {
 	})
 }
 
-// TestForkOwnSkinHit fork 专有皮肤指纹判定（注册表演进后的防线输入）：
-// (Name, Creator) 对命中即真；当前注册表 OwnSkins 为空是数据现状而非
-// 逻辑豁免——单测直接验证判定语义。
+// TestForkOwnSkinHit fork 专有皮肤指纹判定（Guid / Name+Creator 双通道）：
+// 任一通道命中即真——单测直接验证判定语义（注册表数据属 forks 包）。
 func TestForkOwnSkinHit(t *testing.T) {
 	profiles := []forks.ForkProfile{
 		{ID: "lazer"},
-		{ID: "ez2lazer", OwnSkins: []forks.SkinFingerprint{{Name: "Ez Default", Creator: "Ez2Lazer"}}},
+		{ID: "ez2lazer", OwnSkins: []forks.SkinFingerprint{
+			{Name: "Ez Default", Creator: "Ez2Lazer"},
+			{Guid: "fc372386381d4f8e897ac1d89ef39f9c"},
+		}},
 	}
-	if !forkOwnSkinHit(profiles, "Ez Default", "Ez2Lazer") {
-		t.Error("命中指纹的皮肤应判为 fork 专有")
+	if !forkOwnSkinHit(profiles, "", "Ez Default", "Ez2Lazer") {
+		t.Error("命中 Name+Creator 指纹的皮肤应判为 fork 专有")
 	}
-	if forkOwnSkinHit(profiles, "Ez Default", "someone-else") {
+	if forkOwnSkinHit(profiles, "", "Ez Default", "someone-else") {
 		t.Error("Creator 不符不应命中（指纹 = Name+Creator 对）")
 	}
-	if forkOwnSkinHit(profiles, "普通皮肤", "普通作者") {
+	if forkOwnSkinHit(profiles, "", "普通皮肤", "普通作者") {
 		t.Error("未登记指纹不应命中")
 	}
-	// 真实注册表现状：OwnSkins 未登记 → 恒不命中（防线待注册表数据演进）。
-	if forkOwnSkinHit(forks.All(), "anything", "anyone") {
-		t.Error("当前注册表 OwnSkins 为空，不应命中任何指纹")
+	if !forkOwnSkinHit(profiles, "fc372386381d4f8e897ac1d89ef39f9c", "any", "any") {
+		t.Error("命中 Guid 指纹的皮肤应判为 fork 专有（D21 通道）")
+	}
+	if forkOwnSkinHit(profiles, "deadbeefdeadbeefdeadbeefdeadbeef", "Not Ez", "anyone") {
+		t.Error("Guid 与 Name+Creator 均不符不应命中")
+	}
+	// 真实注册表现状：正常用户皮肤不命中任何指纹。
+	if forkOwnSkinHit(forks.All(), "0123456789abcdef0123456789abcdef", "anything", "anyone") {
+		t.Error("普通用户皮肤不应命中注册表指纹")
 	}
 }
 

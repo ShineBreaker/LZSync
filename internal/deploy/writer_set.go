@@ -171,6 +171,16 @@ func prepareBeatmapSetWriter(r *realmc.Realm) (*beatmapSetWriter, error) {
 // 恢复项（用户显式勾选「恢复（已删除）」）：现场同键行已软删时唯有恢复
 // 项才允许写回 DeletePending=false（HB2 删除不复活）。
 func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool, action Action, restore bool) (applied, skipStat, string, error) {
+	// §5.4-D5 投放防线：外部托管集 Hash（路径编码而非内容哈希，files/
+	// 无字节）不投放。收集侧已滤（§4.1），此处拦 M2 旧数据/手工构造的
+	// hub 已收行——判定走全注册表 ExtSetHashPrefix（§4.3 数据化，
+	// forkOwnSkinHit 的同款泛化）。
+	if externalSetHash(bs.Hash) {
+		return applied{}, skipStat{
+			reason: fmt.Sprintf("谱面集 %s 是外部托管集（Hash 为路径编码而非内容哈希，files/ 无字节），不投放（D5）", hashPrefix(bs.Hash)),
+			count:  1,
+		}, "", nil
+	}
 	if action == ActionVersionReplace {
 		return w.execVersionReplace(bs, oldKey, sameRealm)
 	}

@@ -380,7 +380,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此成绩（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), item.Action)
+			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), targetFork, item.Action)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}
@@ -401,6 +401,12 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 	// 难度级跳过聚合（集落地但个别难度被拒：fork 专有规则集等）。
 	if setW != nil {
 		for reason, n := range setW.diffSkips {
+			skips[reason] += n
+		}
+	}
+	// 成绩键级过滤聚合（行落地但 Statistics 未知键被滤，D7）。
+	if scoreW != nil {
+		for reason, n := range scoreW.statKeyDrops {
 			skips[reason] += n
 		}
 	}

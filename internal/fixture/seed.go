@@ -384,7 +384,10 @@ func EzDiffSeed(externalRoot string) (Seed, error) {
 	judge.RankInt = 1 // SS
 	judge.JudgeMode = 31
 	judge.HealthMode = 34 // Ez2Ac
-	judge.StatisticsJson = `{"great":900,"ez_unknown_result":42,"legacy_combo_increment":7}`
+	// StatisticsJson：官方已知键 great/legacy_combo_increase（HitResult
+	// 枚举成员 LegacyComboIncrease 的 snake_case 键形）+ 未知键
+	// ez_unknown_result（BMS 自定义判定名，D7 过滤夹具）。
+	judge.StatisticsJson = `{"great":900,"ez_unknown_result":42,"legacy_combo_increase":7}`
 	judge.ModsJson = `[{"acronym":"EZX","settings":{}}]`
 	seed.Scores = append([]SeedScore{judge}, seed.Scores...)
 
