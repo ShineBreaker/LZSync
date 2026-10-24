@@ -6,10 +6,12 @@ package fixture
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"lzsync/internal/forks"
 	"lzsync/internal/realmc"
@@ -41,6 +43,8 @@ func TestSchemaForLazer52(t *testing.T) {
 		"File", "BeatmapSet", "Beatmap", "BeatmapMetadata", "Score",
 		"BeatmapCollection", "Ruleset", "Skin", "ModPreset", "KeyBinding",
 		"RulesetSetting", "RealmOnlineAsset",
+		// 4 个 EmbeddedObject（lazer-baseline §2.2/§2.3/§2.5.1/§2.5.2）。
+		"RealmNamedFileUsage", "RealmUser", "BeatmapDifficulty", "BeatmapUserSettings",
 	}
 	if len(m) != len(wantClasses) {
 		t.Fatalf("lazer 52 class 数 = %d，期望 %d（多出/缺少: %v）", len(m), len(wantClasses), diffKeys(m, wantClasses))
@@ -62,6 +66,7 @@ func TestSchemaForLazer52(t *testing.T) {
 	for col, want := range map[string]realmc.PropType{
 		"MD5Hash": realmc.PropTypeString, "StarRating": PropTypeDouble,
 		"EditorTimestamp": PropTypeDouble, "LastPlayed": realmc.PropTypeTimestamp,
+		"Ruleset": realmc.PropTypeObject, "Metadata": realmc.PropTypeObject,
 	} {
 		if got := m["Beatmap"][col]; got != want {
 			t.Errorf("Beatmap.%s 类型 = %d，期望 %d", col, got, want)
@@ -71,9 +76,17 @@ func TestSchemaForLazer52(t *testing.T) {
 		"BeatmapHash": realmc.PropTypeString, "Mods": realmc.PropTypeString,
 		"Statistics": realmc.PropTypeString, "Rank": realmc.PropTypeInt,
 		"PP": PropTypeDouble, "Accuracy": PropTypeDouble,
+		"User": realmc.PropTypeObject,
 	} {
 		if got := m["Score"][col]; got != want {
 			t.Errorf("Score.%s 类型 = %d，期望 %d", col, got, want)
+		}
+	}
+	for col, want := range map[string]realmc.PropType{
+		"DrainRate": PropTypeFloat, "SliderMultiplier": PropTypeDouble,
+	} {
+		if got := m["BeatmapDifficulty"][col]; got != want {
+			t.Errorf("BeatmapDifficulty.%s 类型 = %d，期望 %d", col, got, want)
 		}
 	}
 }
@@ -105,15 +118,15 @@ func TestSchemaForDelta51(t *testing.T) {
 	if _, ok := m["RealmOnlineAsset"]; ok {
 		t.Error("delta 51 不应有 RealmOnlineAsset（fork-delta §2.2：v52 唯一新增表）")
 	}
-	if len(m) != 11 {
-		t.Fatalf("delta 51 class 数 = %d，期望 11", len(m))
+	if len(m) != 15 {
+		t.Fatalf("delta 51 class 数 = %d，期望 15（12 RealmObject − RealmOnlineAsset + 4 embedded）", len(m))
 	}
 }
 
 func TestSchemaForG0v0(t *testing.T) {
 	m := classMap(t, ForkG0v0, VersionG0v0)
-	if len(m) != 12 {
-		t.Fatalf("g0v0 52 class 数 = %d，期望 12（与官方全等，fork-g0v0 §2）", len(m))
+	if len(m) != 16 {
+		t.Fatalf("g0v0 52 class 数 = %d，期望 16（与官方全等，fork-g0v0 §2）", len(m))
 	}
 	if _, ok := m["Score"]["JudgeMode"]; ok {
 		t.Error("g0v0 52 不应含 Ez 扩展列 JudgeMode")
@@ -122,8 +135,8 @@ func TestSchemaForG0v0(t *testing.T) {
 
 func TestSchemaForEz52011(t *testing.T) {
 	m := classMap(t, ForkEz2Lazer, VersionEzDisk)
-	if len(m) != 19 {
-		t.Fatalf("ez 52011 class 数 = %d，期望 19（官方 12 + Ez 7 表）", len(m))
+	if len(m) != 23 {
+		t.Fatalf("ez 52011 class 数 = %d，期望 23（官方 16 含 embedded + Ez 7 表）", len(m))
 	}
 	// 10 扩展列（fork-ez2lazer §2.4）。
 	for _, tc := range []struct{ class, col string }{
@@ -330,6 +343,144 @@ func TestBuildStandardLazer(t *testing.T) {
 	if got := o.firstInt("Score", "TotalScoreVersion"); got != 30000019 {
 		t.Errorf("Score.TotalScoreVersion = %d，期望 30000019（LATEST_VERSION）", got)
 	}
+}
+
+// TestBuildFullColumns 全列播种可读回（M2 §8.2-3）：皮肤固定 Guid + Files
+// usage、成绩 User embedded/Pauses/PP、难度 Difficulty/Metadata/Ruleset
+// 结构关系经动态只读重开逐点读回。
+func TestBuildFullColumns(t *testing.T) {
+	seed, err := StandardSeed()
+	if err != nil {
+		t.Fatalf("StandardSeed: %v", err)
+	}
+	files := seed.Files
+	skin, err := MaterializeSkin("Full Skin", "maker", []SkinFileMaterial{
+		{Filename: "skin.ini", Bytes: []byte("[General]\nName:Full Skin\n")},
+		{Filename: "cursor.png", Bytes: []byte("full-skin-cursor-bytes")},
+	}, files)
+	if err != nil {
+		t.Fatalf("MaterializeSkin: %v", err)
+	}
+	seed.Skins = []SeedSkin{skin}
+	seed.Files = files
+
+	ref := mustBuild(t, ForkLazer, VersionLazer, seed)
+	o := mustOpenDyn(t, ref.RealmPath)
+
+	// 内置皮肤固定 Guid 逐个可寻（Protected 内置，lazer-baseline §2.10）。
+	for _, b := range builtinSkins {
+		if b.guid == "" {
+			t.Fatal("内置皮肤 Guid 常量为空")
+		}
+	}
+	skinCk := mustClassKeyRO(o, "Skin")
+	skinHashKey := mustPropKeyRO(o, skinCk, "Hash")
+	skinGuidKey := mustPropKeyRO(o, skinCk, "ID")
+	guidSeen := map[string]bool{}
+	if err := o.r.ForEach(skinCk, func(obj unsafe.Pointer) error {
+		g, err := o.r.GetGuid(obj, skinGuidKey)
+		if err != nil {
+			return err
+		}
+		guidSeen[strings.ToLower(hex.EncodeToString(g[:]))] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("遍历 Skin: %v", err)
+	}
+	for _, b := range builtinSkins {
+		want := strings.ToLower(strings.ReplaceAll(b.guid, "-", ""))
+		if !guidSeen[want] {
+			t.Errorf("内置皮肤固定 Guid %s 未播（实播集含 %d 个）", b.guid, len(guidSeen))
+		}
+	}
+
+	// 用户皮肤行：Hash/Name 可寻（usage 列表细节由收集集成测试往返断言）。
+	skinObj, err := o.r.FindFirstByString(skinCk, skinHashKey, skin.Hash)
+	if err != nil {
+		t.Fatalf("寻用户皮肤 %s: %v", skin.Hash, err)
+	}
+	if skinObj == nil {
+		t.Fatalf("用户皮肤 Hash=%s 未播种", skin.Hash)
+	}
+	o.r.ReleaseObject(skinObj)
+
+	// 难度结构列：StarRating（double）+ Ruleset 链接 → ShortName。
+	bmCk := mustClassKeyRO(o, "Beatmap")
+	bm := seed.BeatmapSets[0].Beatmaps[0]
+	bmHashKey := mustPropKeyRO(o, bmCk, "Hash")
+	bmObj, err := o.r.FindFirstByString(bmCk, bmHashKey, bm.Hash)
+	if err != nil {
+		t.Fatalf("寻难度: %v", err)
+	}
+	defer o.r.ReleaseObject(bmObj)
+	srKey := mustPropKeyRO(o, bmCk, "StarRating")
+	if got, err := o.r.GetFloat64(bmObj, srKey); err != nil || got != bm.StarRating {
+		t.Errorf("Beatmap.StarRating = %v(%v)，期望 %v", got, err, bm.StarRating)
+	}
+	rsKey := mustPropKeyRO(o, bmCk, "Ruleset")
+	rs, err := o.r.GetLinkedObject(bmObj, rsKey)
+	if err != nil || rs == nil {
+		t.Fatalf("Beatmap.Ruleset 链接 = (%v,%v)，期望挂接", rs != nil, err)
+	}
+	defer o.r.ReleaseObject(rs)
+	rsCk := mustClassKeyRO(o, "Ruleset")
+	snKey := mustPropKeyRO(o, rsCk, "ShortName")
+	if got, err := o.r.GetString(rs, snKey); err != nil || got != "osu" {
+		t.Errorf("难度 Ruleset.ShortName = %q(%v)，期望 osu", got, err)
+	}
+
+	// 成绩结构列：User embedded Username + PP（nullable double 已写值）。
+	scCk := mustClassKeyRO(o, "Score")
+	scObj, err := o.r.FirstObject(scCk)
+	if err != nil {
+		t.Fatalf("FirstObject(Score): %v", err)
+	}
+	defer o.r.ReleaseObject(scObj)
+	userKey := mustPropKeyRO(o, scCk, "User")
+	user, err := o.r.GetLinkedObject(scObj, userKey)
+	if err != nil || user == nil {
+		t.Fatalf("Score.User embedded = (%v,%v)，期望挂接", user != nil, err)
+	}
+	defer o.r.ReleaseObject(user)
+	ruCk := mustClassKeyRO(o, "RealmUser")
+	unKey := mustPropKeyRO(o, ruCk, "Username")
+	if got, err := o.r.GetString(user, unKey); err != nil || got != seed.Scores[0].User.Username {
+		t.Errorf("Score.User.Username = %q(%v)，期望 %q", got, err, seed.Scores[0].User.Username)
+	}
+	ppKey := mustPropKeyRO(o, scCk, "PP")
+	if seed.Scores[0].PP == nil {
+		t.Fatal("布置失败：标准种子 PP 应非空（MaterializeScore 默认）")
+	}
+	if got, err := o.r.GetFloat64(scObj, ppKey); err != nil || got != *seed.Scores[0].PP {
+		t.Errorf("Score.PP = %v(%v)，期望 %v", got, err, *seed.Scores[0].PP)
+	}
+	pausesKey := mustPropKeyRO(o, scCk, "Pauses")
+	pauses, err := o.r.GetList(scObj, pausesKey)
+	if err != nil {
+		t.Fatalf("GetList(Pauses): %v", err)
+	}
+	defer pauses.Close()
+	if n, err := pauses.Size(); err != nil || int(n) != len(seed.Scores[0].Pauses) {
+		t.Errorf("Score.Pauses 长度 = %d(%v)，期望 %d", n, err, len(seed.Scores[0].Pauses))
+	}
+}
+
+func mustClassKeyRO(o *openedRO, class string) uint32 {
+	o.t.Helper()
+	ck, err := o.r.FindClass(class)
+	if err != nil {
+		o.t.Fatalf("FindClass(%s): %v", class, err)
+	}
+	return ck
+}
+
+func mustPropKeyRO(o *openedRO, classKey uint32, prop string) int64 {
+	o.t.Helper()
+	key, err := o.r.FindProperty(classKey, prop)
+	if err != nil {
+		o.t.Fatalf("FindProperty(%d, %s): %v", classKey, prop, err)
+	}
+	return key
 }
 
 func TestBuildDeltaGimmick(t *testing.T) {

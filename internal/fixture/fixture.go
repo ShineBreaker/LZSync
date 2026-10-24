@@ -3,21 +3,20 @@
 // 并播种行（该能力已由 PoC 第二道验收线实证）；产品路径仍严格钉死动态
 // 打开（S3 不因测试破例）。
 //
-// 写入能力边界（施工期对 realmc 绑定面的实测结论，见 probe 历史）：
-//   - realm_set_value 仅 SetInt64/SetString 可用——bool/timestamp/double
-//     列声明类型忠实但值留 realm 默认（SetBool/SetTimestamp 是 realmc
-//     契约桩，double 无导出构造面）；
-//   - realm_object_create 仅适用无主键类（errno=3005），realmc 未绑定
-//     realm_object_create_with_primary_key——镜像一律不声明主键，行身份
-//     走内容哈希列（与本工具的对账键一致，design §4.2）；
-//   - 集合列（BeatmapMD5Hashes/Pauses/UserTags 等）无法声明——收藏夹
-//     成员、成绩暂停列表暂不落库，留待 realmc 扩展构造面。
+// 写入能力边界（M2 起 realmc 完整写面下的现状）：
+//   - 标量列（int/string/bool/timestamp/double/UUID）全量可写；
+//   - 镜像不声明主键——行身份走内容哈希列（与对账键一致，design §4.2），
+//     Guid 列作普通 UUID 列写值（内置皮肤固定 Guid 等）；
+//   - M2 实体面（BeatmapSet/Beatmap/Metadata/Score/Skin）的链接列、
+//     embedded 列与集合列随镜像升级可写；BeatmapCollection 的
+//     BeatmapMD5Hashes 列仍不进镜像（M1 已知边界，见 builder 注释）。
 package fixture
 
 import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"lzsync/internal/forks"
 	"lzsync/internal/hub"
@@ -51,29 +50,39 @@ type Seed struct {
 	// 仅 ez2lazer 镜像可载。
 	EzSkillRows bool
 
-	// Skins 追加皮肤行（Ez 专有皮肤指纹等；内置六皮肤恒播不走此）。
+	// Skins 追加皮肤行（用户皮肤全列 / Ez 专有皮肤指纹 / 软删与空 Hash
+	// 跳过夹具）；内置六皮肤恒播不走此。
 	Skins []SeedSkin
 }
 
-// SeedScore 成绩种子（可写列子集：int/string；bool/double/timestamp 列
-// 在镜像中声明但当前不可写值）。
+// SeedScore 成绩种子（C2 白名单全列；跳过夹具行：DeletePending=true 或
+// BeatmapHash 为空，由投影端按 §4.1 计数丢弃）。
 type SeedScore struct {
-	BeatmapHash           string // 强锚点：打分时难度的 Hash（lazer-baseline §6.3）
+	BeatmapHash           string // 强锚点：打分时难度的 Hash（lazer-baseline §6.3）；空 = 无锚点跳过夹具
 	RulesetShortName      string
 	ClientVersion         string
 	Hash                  string // 全部 .osr 内容拼接 SHA-256
+	DeletePending         bool   // 软删跳过夹具
 	TotalScore            int64
 	TotalScoreWithoutMods int64
 	TotalScoreVersion     int64
+	LegacyTotalScore      *int64 // stable 原始总分；lazer 成绩为 null
+	BackgroundReprocessingFailed bool
 	MaxCombo              int64
+	Accuracy              float64
+	Date                  time.Time
+	PP                    *float64
 	OnlineID              int64
 	LegacyOnlineID        int64
-	RankInt               int64
-	Combo                 int64
+	User                  hub.RealmUser // embedded 归属用户
 	ModsJson              string
 	StatisticsJson        string
 	MaximumStatisticsJson string
-	ReplayHashes          []string // 回放文件哈希（字节在 Seed.Files）
+	Pauses                []int32  // 暂停时间点（毫秒）
+	RankInt               int64
+	Combo                 int64
+	IsLegacyScore         bool
+	ReplayHashes          []string // 回放文件哈希（字节在 Seed.Files；Files 列表逐条 .osr usage）
 
 	// Ez 专有列（仅 ez2lazer 镜像落库；非 0 值在其他端触发构造错误）。
 	JudgeMode  int64
@@ -95,10 +104,17 @@ type ExternalSetSpec struct {
 	ContentRoot string
 }
 
-// SeedSkin 追加皮肤行。
+// SeedSkin 追加皮肤行（C2 白名单全列）。内置六皮肤恒播不走此（固定
+// Guid + Protected，lazer-baseline §2.10）；Hash 为空的行 = 投影跳过夹具。
 type SeedSkin struct {
-	Name    string
-	Creator string
+	Guid              string // 行 Guid（内置皮肤固定常量；空 = 全零）
+	Name              string
+	Creator           string
+	InstantiationInfo string
+	Hash              string // 内容键（.ini+.json 拼接 SHA-256）；空 = 无身份跳过夹具
+	Files             []hub.NamedFile
+	Protected         bool
+	DeletePending     bool
 }
 
 // Spec 建库规格。
@@ -172,8 +188,8 @@ func Build(ctx context.Context, spec Spec) (forks.LibraryRef, error) {
 }
 
 // validateSeed 校验种子自洽（§8.2-3 关系一致的构造期前置）：
-// Files 键 == SHA-256(值)；集引用的文件哈希有字节；score.BeatmapHash
-// 命中某难度；Ez 专有值不落在非 Ez 端。
+// Files 键 == SHA-256(值)；集/皮肤引用的文件哈希有字节；score.BeatmapHash
+// 命中某难度（空 = 无锚点跳过夹具，放行）；Ez 专有值不落在非 Ez 端。
 func validateSeed(forkID string, seed Seed) error {
 	for h, b := range seed.Files {
 		if got := sha256Hex(b); got != h {
@@ -195,7 +211,7 @@ func validateSeed(forkID string, seed Seed) error {
 		}
 	}
 	for i, s := range seed.Scores {
-		if !beatmapHashes[s.BeatmapHash] {
+		if s.BeatmapHash != "" && !beatmapHashes[s.BeatmapHash] {
 			return fmt.Errorf("Scores[%d].BeatmapHash %s 未命中任何难度 Hash", i, s.BeatmapHash)
 		}
 		for _, h := range s.ReplayHashes {
@@ -205,6 +221,13 @@ func validateSeed(forkID string, seed Seed) error {
 		}
 		if (s.JudgeMode != 0 || s.HealthMode != 0) && forkID != ForkEz2Lazer {
 			return fmt.Errorf("Scores[%d] 携带 Ez 专有 JudgeMode/HealthMode 但 fork=%s 无此列", i, forkID)
+		}
+	}
+	for i, sk := range seed.Skins {
+		for _, f := range sk.Files {
+			if _, ok := seed.Files[f.Hash]; !ok {
+				return fmt.Errorf("Skins[%d] 引用文件哈希 %s 无字节（不在 Files）", i, f.Hash)
+			}
 		}
 	}
 	if len(seed.ExternalSets) > 0 && forkID != ForkEz2Lazer {

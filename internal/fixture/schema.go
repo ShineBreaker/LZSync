@@ -8,12 +8,16 @@ package fixture
 //
 // 镜像忠实度受 realmc 构造面（realmc.Schema/PropertyDef）约束的边界：
 //   - 列名与类型逐列忠实（磁盘名 = MapTo 名，如 StatusInt→"Status"）；
-//   - 链接列 / 嵌入对象列 / 集合列（IList）不进镜像——realmc.buildSchema
-//     硬编码 collectionNone + 空 link_target，无法表达；
-//   - 主键不声明——realmc 未绑定 realm_object_create_with_primary_key，
-//     声明主键的类经 realm_object_create 播种会被拒（errno=3005，
-//     本包施工期探针实测）；
-//   - 可空标志不表达（realmc.PropertyDef 无 nullable 位）。
+//   - M2 起结构列进镜像：M2 实体面（BeatmapSet/Beatmap/BeatmapMetadata/
+//     Score/Skin）的链接列、embedded 列（RealmNamedFileUsage/RealmUser/
+//     BeatmapDifficulty/BeatmapUserSettings）与集合列（IList）按
+//     realmc.PropertyDef 的 LinkTarget/Collection/IsNullable 表达；
+//     ModPreset.Ruleset 等非 M2 载体的结构列维持省略；
+//   - 主键不声明——镜像行身份走内容哈希列（design §4.2，与对账键一致），
+//     Guid 列作普通 UUID 列写值；
+//   - 可空标志只对投影端需要区分 NULL/零值的列声明（BeatmapSet 的
+//     DateSubmitted/DateRanked、Beatmap 的 LastLocalUpdate 等四个时间列
+//     与 EditorTimestamp、Score 的 LegacyTotalScore/PP）。
 
 import (
 	"fmt"
@@ -24,6 +28,7 @@ import (
 // realmc 未导出的属性类型常量，按 realm.h:260-275 补齐镜像所需：
 // RLM_PROPERTY_TYPE_FLOAT=9 / DOUBLE=10 / UUID=17。
 const (
+	PropTypeFloat  realmc.PropType = 9
 	PropTypeDouble realmc.PropType = 10
 	PropTypeUUID   realmc.PropType = 17
 )
@@ -51,6 +56,47 @@ func ps(name string) p { return p{Name: name, Type: realmc.PropTypeString} }
 func pt(name string) p { return p{Name: name, Type: realmc.PropTypeTimestamp} }
 func pd(name string) p { return p{Name: name, Type: PropTypeDouble} }
 func pu(name string) p { return p{Name: name, Type: PropTypeUUID} }
+func pf(name string) p { return p{Name: name, Type: PropTypeFloat} }
+
+// 可空标量列（投影端需区分 NULL 与零值，realmc 契约：typed getter 对
+// NULL 报错、调用方先 IsNull）。
+func ptn(name string) p { return p{Name: name, Type: realmc.PropTypeTimestamp, IsNullable: true} }
+func pdn(name string) p { return p{Name: name, Type: PropTypeDouble, IsNullable: true} }
+func pin(name string) p { return p{Name: name, Type: realmc.PropTypeInt, IsNullable: true} }
+
+// 对象链接列（单值链接一律 nullable——realm-core Schema::validate 硬约束，
+// realmc.buildSchema 已自动补位）与集合列。
+func plink(name, target string) p {
+	return p{Name: name, Type: realmc.PropTypeObject, LinkTarget: target}
+}
+func plist(name string, typ realmc.PropType) p {
+	return p{Name: name, Type: typ, Collection: realmc.CollectionList}
+}
+func plinklist(name, target string) p {
+	return p{Name: name, Type: realmc.PropTypeObject, Collection: realmc.CollectionList, LinkTarget: target}
+}
+
+// embeddedClasses 是官方基线的 4 个 EmbeddedObject（lazer-baseline §2.2/
+// §2.3/§2.5.1/§2.5.2）。集合列（UserTags 之外的 backlink 计算属性）与
+// 可空性按 §2 原文；RealmNamedFileUsage.File 的目标 File 类在各镜像中
+// 恒存在（所有端共用本组定义且 File 是基线表）。
+func embeddedClasses() []cl {
+	return []cl{
+		{Name: "RealmNamedFileUsage", Embedded: true, Properties: []p{ // §2.2
+			plink("File", "File"), ps("Filename"),
+		}},
+		{Name: "RealmUser", Embedded: true, Properties: []p{ // §2.3
+			pi("OnlineID"), ps("Username"), ps("CountryString"),
+		}},
+		{Name: "BeatmapDifficulty", Embedded: true, Properties: []p{ // §2.5.1
+			pf("DrainRate"), pf("CircleSize"), pf("OverallDifficulty"), pf("ApproachRate"),
+			pd("SliderMultiplier"), pd("SliderTickRate"),
+		}},
+		{Name: "BeatmapUserSettings", Embedded: true, Properties: []p{ // §2.5.2
+			pd("Offset"),
+		}},
+	}
+}
 
 // officialClasses 返回官方基线的表定义（lazer-baseline §2 逐列抄录；
 // 磁盘列名 = MapTo 名）。withOnlineAsset 控制仅 v52 存在的 RealmOnlineAsset。
@@ -58,28 +104,36 @@ func officialClasses(withOnlineAsset bool) []cl {
 	classes := []cl{
 		{Name: "File", Properties: []p{ps("Hash")}}, // §2.1 RealmFile
 		{Name: "BeatmapSet", Properties: []p{ // §2.4
-			pu("ID"), pi("OnlineID"), pt("DateAdded"), pt("DateSubmitted"), pt("DateRanked"),
+			pu("ID"), pi("OnlineID"), pt("DateAdded"), ptn("DateSubmitted"), ptn("DateRanked"),
 			pi("Status"), pb("DeletePending"), ps("Hash"), pb("Protected"),
+			plinklist("Beatmaps", "Beatmap"), plinklist("Files", "RealmNamedFileUsage"),
 		}},
 		{Name: "Beatmap", Properties: []p{ // §2.5
 			pu("ID"), ps("DifficultyName"), pi("Status"), pi("OnlineID"),
 			pd("Length"), pd("BPM"), ps("Hash"), pd("StarRating"), ps("MD5Hash"), ps("OnlineMD5Hash"),
-			pt("LastLocalUpdate"), pt("LastOnlineUpdate"), pb("Hidden"),
-			pi("EndTimeObjectCount"), pi("TotalObjectCount"), pt("LastPlayed"),
-			pi("BeatDivisor"), pd("EditorTimestamp"),
+			ptn("LastLocalUpdate"), ptn("LastOnlineUpdate"), pb("Hidden"),
+			pi("EndTimeObjectCount"), pi("TotalObjectCount"), ptn("LastPlayed"),
+			pi("BeatDivisor"), pdn("EditorTimestamp"),
+			plink("Ruleset", "Ruleset"), plink("Difficulty", "BeatmapDifficulty"),
+			plink("Metadata", "BeatmapMetadata"), plink("UserSettings", "BeatmapUserSettings"),
+			plink("BeatmapSet", "BeatmapSet"),
 		}},
-		{Name: "BeatmapMetadata", Properties: []p{ // §2.6（UserTags 是集合列不进镜像）
+		{Name: "BeatmapMetadata", Properties: []p{ // §2.6
 			ps("Title"), ps("TitleUnicode"), ps("Artist"), ps("ArtistUnicode"),
-			ps("Source"), ps("Tags"), pi("PreviewTime"), ps("AudioFile"), ps("BackgroundFile"),
+			plink("Author", "RealmUser"),
+			ps("Source"), ps("Tags"), plist("UserTags", realmc.PropTypeString),
+			pi("PreviewTime"), ps("AudioFile"), ps("BackgroundFile"),
 		}},
-		{Name: "Score", Properties: []p{ // §2.7（Pauses 是集合列不进镜像）
+		{Name: "Score", Properties: []p{ // §2.7
 			pu("ID"), ps("ClientVersion"), ps("BeatmapHash"), ps("Hash"), pb("DeletePending"),
-			pi("TotalScore"), pi("TotalScoreWithoutMods"), pi("TotalScoreVersion"), pi("LegacyTotalScore"),
-			pb("BackgroundReprocessingFailed"), pi("MaxCombo"), pd("Accuracy"), pt("Date"), pd("PP"),
+			pi("TotalScore"), pi("TotalScoreWithoutMods"), pi("TotalScoreVersion"), pin("LegacyTotalScore"),
+			pb("BackgroundReprocessingFailed"), pi("MaxCombo"), pd("Accuracy"), pt("Date"), pdn("PP"),
 			pi("OnlineID"), pi("LegacyOnlineID"), ps("Mods"), ps("Statistics"), ps("MaximumStatistics"),
+			plink("BeatmapInfo", "Beatmap"), plink("Ruleset", "Ruleset"), plink("User", "RealmUser"),
+			plist("Pauses", realmc.PropTypeInt), plinklist("Files", "RealmNamedFileUsage"),
 			pi("Rank"), pi("Combo"), pb("IsLegacyScore"),
 		}},
-		{Name: "BeatmapCollection", Properties: []p{ // §2.8（BeatmapMD5Hashes 集合列不进镜像）
+		{Name: "BeatmapCollection", Properties: []p{ // §2.8（BeatmapMD5Hashes 是 M1 已知边界：不进镜像，deploy 冲突链路依赖此形态）
 			pu("ID"), ps("Name"), pt("LastModified"),
 		}},
 		{Name: "Ruleset", Properties: []p{ // §2.9
@@ -88,9 +142,9 @@ func officialClasses(withOnlineAsset bool) []cl {
 		}},
 		{Name: "Skin", Properties: []p{ // §2.10
 			pu("ID"), ps("Name"), ps("Creator"), ps("InstantiationInfo"), ps("Hash"),
-			pb("Protected"), pb("DeletePending"),
+			pb("Protected"), pb("DeletePending"), plinklist("Files", "RealmNamedFileUsage"),
 		}},
-		{Name: "ModPreset", Properties: []p{ // §2.11
+		{Name: "ModPreset", Properties: []p{ // §2.11（Ruleset 关系列非 M2 载体，维持省略）
 			pu("ID"), ps("Name"), ps("Description"), ps("Mods"), pb("DeletePending"),
 		}},
 		{Name: "KeyBinding", Properties: []p{ // §2.12
@@ -100,8 +154,9 @@ func officialClasses(withOnlineAsset bool) []cl {
 			ps("RulesetName"), pi("Variant"), ps("Key"), ps("Value"),
 		}},
 	}
+	classes = append(classes, embeddedClasses()...)
 	if withOnlineAsset {
-		classes = append(classes, cl{Name: "RealmOnlineAsset", Properties: []p{ // §2.14（v52；File 列是嵌入不进镜像）
+		classes = append(classes, cl{Name: "RealmOnlineAsset", Properties: []p{ // §2.14（v52；File 列非 M2 载体，维持省略）
 			pt("LastAccessed"),
 		}})
 	}

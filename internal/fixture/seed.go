@@ -11,6 +11,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
+	"time"
 
 	"lzsync/internal/hub"
 )
@@ -54,6 +56,15 @@ const scoreTotalScoreVersionLatest = int64(30000019)
 // extSetHashPrefix 是 Ez 外部托管集 Hash 前缀（fork-ez2lazer §5.1）。
 const extSetHashPrefix = "ext:set:"
 
+// seedTimeBase 种子时间基准（确定性常量，避开本地时钟差异；全列时间列
+// 由此派生，逐字段断言可复现）。
+var seedTimeBase = time.UnixMilli(1770000000000).UTC()
+
+// skinInstantiationInfoLegacySkin 用户皮肤默认 InstantiationInfo（空则
+// lazer 按 LegacySkin 实例化，lazer-baseline §2.10——取显式值便于逐字段
+// 断言非零）。
+const skinInstantiationInfoLegacySkin = "osu.Game.Skinning.DefaultLegacySkin, osu.Game"
+
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -71,19 +82,27 @@ type DiffMaterial struct {
 	OsuBytes []byte
 }
 
-// MaterializeSet 把原料固化为自洽 DTO：难度 Hash = .osu SHA-256、MD5Hash =
-// .osu 原始字节 MD5、集 Hash = 集内全部 .osu 按文件名排序拼接的 SHA-256
-// （lazer-baseline §6.1）。新文件字节并入 files（哈希 → 字节）。
+// MaterializeSet 把原料固化为自洽 DTO（C2 白名单全列，§8.2-3）：难度
+// Hash = .osu SHA-256、MD5Hash = .osu 原始字节 MD5、集 Hash = 集内全部
+// .osu 按文件名排序拼接的 SHA-256（lazer-baseline §6.1）。全列取确定性
+// 派生值（seedTimeBase 基准 + 难度序号偏移，float 取二进制可精确表示的
+// 离散值），收集往返逐字段断言据此可复现。新文件字节并入 files（哈希 →
+// 字节）。
 func MaterializeSet(onlineID int64, artist, title, author string, diffs []DiffMaterial, audio []byte, files map[string][]byte) (hub.BeatmapSet, error) {
 	if len(diffs) == 0 {
 		return hub.BeatmapSet{}, fmt.Errorf("fixture: 谱面集至少需要一个难度")
 	}
+	submitted := seedTimeBase.Add(12 * time.Hour)
+	ranked := seedTimeBase.Add(30 * 24 * time.Hour)
 	set := hub.BeatmapSet{
-		OnlineID:       onlineID,
-		Artist:         artist,
-		Title:          title,
+		OnlineID:      onlineID,
+		Artist:        artist,
+		Title:         title,
 		AuthorUsername: author,
-		StatusInt:      1, // BeatmapOnlineStatus.Ranked（lazer-baseline §5）
+		StatusInt:     1, // BeatmapOnlineStatus.Ranked（lazer-baseline §5）
+		DateAdded:     seedTimeBase,
+		DateSubmitted: &submitted,
+		DateRanked:    &ranked,
 	}
 	// 集哈希 = 全部 .osu 按文件名排序后顺序拼接的 SHA-256
 	// （RealmArchiveModelImporter.ComputeHash 语义，lazer-baseline §6.1）。
@@ -96,12 +115,52 @@ func MaterializeSet(onlineID int64, artist, title, author string, diffs []DiffMa
 	}
 	set.Hash = sha256Hex(concat)
 
-	for _, d := range diffs {
+	for i, d := range diffs {
+		md5 := md5Hex(d.OsuBytes)
+		localUpdate := seedTimeBase.Add(time.Duration(i) * 24 * time.Hour)
+		onlineUpdate := seedTimeBase.Add(time.Duration(i)*24*time.Hour + time.Hour)
+		played := seedTimeBase.Add(time.Duration(i) * 48 * time.Hour)
+		editorTS := 5000.5 + float64(i)
 		bm := hub.Beatmap{
 			Hash:             sha256Hex(d.OsuBytes),
-			MD5Hash:          md5Hex(d.OsuBytes),
+			MD5Hash:          md5,
+			OnlineMD5Hash:    md5, // 本地与在线版本一致（MatchesOnlineVersion）
 			DifficultyName:   d.Name,
 			RulesetShortName: "osu",
+			StatusInt:        1, // Ranked（lazer-baseline §5）
+			OnlineID:         int(onlineID)*10 + i,
+			Length:           62000.5 + float64(i)*1000,
+			BPM:              174.25 + float64(i)*7.5,
+			StarRating:       2.75 + float64(i)*1.25,
+			LastLocalUpdate:  &localUpdate,
+			LastOnlineUpdate: &onlineUpdate,
+			EndTimeObjectCount: 100 + i,
+			TotalObjectCount:   620 + i,
+			LastPlayed:         &played,
+			BeatDivisor:        4,
+			EditorTimestamp:    &editorTS,
+			Difficulty: hub.Difficulty{
+				DrainRate:         4.5 + float32(i)*0.25,
+				CircleSize:        3.5 + float32(i)*0.5,
+				OverallDifficulty: 7.25 + float32(i)*0.25,
+				ApproachRate:      8.5 - float32(i)*0.25,
+				SliderMultiplier:  1.64,
+				SliderTickRate:    1.9,
+			},
+			Metadata: hub.Metadata{
+				Title:          title,
+				TitleUnicode:   title,
+				Artist:         artist,
+				ArtistUnicode:  artist,
+				Author:         hub.RealmUser{OnlineID: 100042, Username: author, CountryString: "JP"},
+				Source:         "LZSync Fixture Source",
+				Tags:           "lzsync fixture tags",
+				UserTags:       []string{"tag-a", "tag-b"},
+				PreviewTime:    12345,
+				AudioFile:      "audio.mp3",
+				BackgroundFile: "bg.jpg",
+			},
+			UserSettingsOffset: -12.5 + float64(i)*2.5,
 		}
 		set.Beatmaps = append(set.Beatmaps, bm)
 		set.Files = append(set.Files, hub.NamedFile{Hash: bm.Hash, Filename: fmt.Sprintf("%s.osu", d.Name)})
@@ -113,6 +172,40 @@ func MaterializeSet(onlineID int64, artist, title, author string, diffs []DiffMa
 		files[audioHash] = audio
 	}
 	return set, nil
+}
+
+// SkinFileMaterial 皮肤文件原料：文件名 + 任意字节。哈希只并入
+// HashableFileTypes（.ini/.json，lazer-baseline §2.10）的文件。
+type SkinFileMaterial struct {
+	Filename string
+	Bytes    []byte
+}
+
+// MaterializeSkin 把皮肤原料固化为自洽种子行：Hash = 全部 .ini/.json 文件
+// 按文件名排序拼接的 SHA-256（SkinImporter 语义，lazer-baseline §2.10）；
+// 全部文件（含非哈希型，如 .png）进 Files 与字节池。
+func MaterializeSkin(name, creator string, mats []SkinFileMaterial, files map[string][]byte) (SeedSkin, error) {
+	if len(mats) == 0 {
+		return SeedSkin{}, fmt.Errorf("fixture: 皮肤至少需要一个文件")
+	}
+	byName := make([]SkinFileMaterial, len(mats))
+	copy(byName, mats)
+	sort.Slice(byName, func(i, j int) bool { return byName[i].Filename < byName[j].Filename })
+	concat := make([]byte, 0)
+	sk := SeedSkin{
+		Name:              name,
+		Creator:           creator,
+		InstantiationInfo: skinInstantiationInfoLegacySkin,
+	}
+	for _, m := range byName {
+		sk.Files = append(sk.Files, hub.NamedFile{Hash: sha256Hex(m.Bytes), Filename: m.Filename})
+		if strings.HasSuffix(m.Filename, ".ini") || strings.HasSuffix(m.Filename, ".json") {
+			concat = append(concat, m.Bytes...)
+		}
+		files[sha256Hex(m.Bytes)] = m.Bytes
+	}
+	sk.Hash = sha256Hex(concat)
+	return sk, nil
 }
 
 // EncodeExtSetHash 计算 Ez 外部托管集 Hash："ext:set:" + Base64(UTF-8(规范化
@@ -137,8 +230,10 @@ func toLowerNormalized(p string) string {
 	return string(b)
 }
 
-// StandardSeed 四端共底种子：1 个谱面集（2 难度 + 音频）+ 1 个收藏夹
-// （按 MD5 追踪，lazer-baseline §2.8）+ 1 条本地成绩。
+// StandardSeed 四端共底种子：1 个谱面集（2 难度 + 音频，全列）+ 1 个收藏夹
+//（按 MD5 追踪，lazer-baseline §2.8）+ 1 条本地成绩（全列）。皮肤不入
+// 共底种子——deploy 等既有用例以 Files=nil 收敛夹具面，皮肤种子由收集
+// 用例自带（MaterializeSkin）。
 func StandardSeed() (Seed, error) {
 	files := map[string][]byte{}
 	set, err := MaterializeSet(1001, "Fixture Artist", "Fixture Title", "mapper",
@@ -276,13 +371,20 @@ func EzDiffSeed(externalRoot string) (Seed, error) {
 		ContentRoot: externalRoot,
 	}}
 	seed.EzSkillRows = true
-	seed.Skins = append(seed.Skins, SeedSkin{Name: "Ez Default", Creator: "Ez2Lazer"})
+	// Ez 专有皮肤指纹行（Name/Creator 指纹是 forks.OwnSkins 的判定输入；
+	// 当前注册表未登记 Ez 指纹，本行按普通用户皮肤全列成形）。
+	ezSkin, err := MaterializeSkin("Ez Default", "Ez2Lazer", []SkinFileMaterial{
+		{Filename: "ez-default.ini", Bytes: []byte("[General]\nName:Ez Default\n")},
+	}, seed.Files)
+	if err != nil {
+		return Seed{}, err
+	}
+	seed.Skins = append(seed.Skins, ezSkin)
 	return seed, nil
 }
 
 // G0v0DiffSeed g0v0 差异夹具（design §8.2-4）：市场规则集行（OnlineID≥10，
-// fork-g0v0 §2.1）+ 指向它的成绩 + 带 PP 列占位（double 列当前不可写非默认
-// 值，PP 断言待 realmc 写入面补齐，见包 notes）。
+// fork-g0v0 §2.1）+ 指向它的成绩（PP 等 double 列已随 M2 全列播种生效）。
 func G0v0DiffSeed() (Seed, error) {
 	seed, err := StandardSeed()
 	if err != nil {
@@ -308,14 +410,18 @@ func G0v0DiffSeed() (Seed, error) {
 	return seed, nil
 }
 
-// MaterializeScore 把回放字节固化为自洽成绩行：Hash = 全部 .osr 内容拼接
-// SHA-256（lazer-baseline §6.1）、BeatmapHash = 打分时难度的 Hash。
+// MaterializeScore 把回放字节固化为自洽成绩行（C2 白名单全列）：Hash =
+// 全部 .osr 内容拼接 SHA-256（lazer-baseline §6.1/§6.2）、BeatmapHash =
+// 打分时难度的 Hash。User/Pauses/Accuracy/PP 取确定性默认（PP 非空 +
+// LegacyTotalScore 空，一次覆盖 nullable 两态）；调用方覆盖业务列
+// （TotalScore/RankInt 等）。Files = 每个 ReplayHashes 一条 .osr usage。
 func MaterializeScore(bm hub.Beatmap, clientVersion string, replay []byte, files map[string][]byte) (SeedScore, error) {
 	if bm.Hash == "" {
 		return SeedScore{}, fmt.Errorf("fixture: 成绩挂接的难度缺 Hash")
 	}
 	replayHash := sha256Hex(replay)
 	files[replayHash] = replay
+	pp := 271.828
 	return SeedScore{
 		BeatmapHash:       bm.Hash,
 		RulesetShortName:  bm.RulesetShortName,
@@ -324,6 +430,11 @@ func MaterializeScore(bm hub.Beatmap, clientVersion string, replay []byte, files
 		TotalScoreVersion: scoreTotalScoreVersionLatest,
 		OnlineID:          -1,
 		LegacyOnlineID:    -1,
+		Accuracy:          0.9825,
+		Date:              seedTimeBase.Add(3 * time.Hour),
+		PP:                &pp,
+		User:              hub.RealmUser{OnlineID: 1, Username: "fixture-player", CountryString: "JP"},
+		Pauses:            []int32{1500, 61500},
 		ReplayHashes:      []string{replayHash},
 	}, nil
 }
