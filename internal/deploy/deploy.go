@@ -61,12 +61,13 @@ type RepointedItem struct {
 
 // Report 投放执行报告（三段式 + 改判 + 备份，§3.3/§6.3）。
 type Report struct {
-	Applied       []ItemResult    // 已提交批的 applied 计数明细
-	Skipped       []hub.SkipStat  // 跳过计数（原因分组：列缺失 / 重续已一致 / 目标无表等）
-	FailedBatches []BatchFailure  // 失败批（整批回滚 + 原因）
-	NotRun        []PlanItem      // 未执行批清单（「从失败处重续」入口的输入）
-	Repointed     []RepointedItem // 执行期改判
-	BackupPath    string          // 本次共用的写前备份路径
+	Applied         []ItemResult    // 已提交批的 applied 计数明细
+	Skipped         []hub.SkipStat  // 跳过计数（原因分组：列缺失 / 重续已一致 / 目标无表等）
+	FailedBatches   []BatchFailure  // 失败批（整批回滚 + 原因）
+	NotRun          []PlanItem      // 未执行批清单（「从失败处重续」入口的输入）
+	Repointed       []RepointedItem // 执行期改判
+	GimmickWarnings []PlanItem      // 已提交的告警项（R6：delta gimmick 谱面流出告警，与预演一致呈现）
+	BackupPath      string          // 本次共用的写前备份路径
 }
 
 // batchCollectionSize 收藏夹批大小上限（§3.3：收藏 ≤ 500 行/批）。
@@ -201,6 +202,7 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	for bi, batch := range batches {
 		if err := ctx.Err(); err != nil { // 批间取消点
 			report.NotRun = flatten(batches[bi:])
+			report.GimmickWarnings = appliedGimmickWarnings(plan, report.Applied)
 			return report, err
 		}
 		applied, repointed, batchSkips, err := r.runBatch(ctx, realm, plan.TargetFork, batch, func(cur, n int) {
@@ -218,6 +220,7 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 			})
 			report.NotRun = flatten(batches[bi+1:])
 			report.Skipped = sortedSkips(skipped)
+			report.GimmickWarnings = appliedGimmickWarnings(plan, report.Applied)
 			return report, err
 		}
 		report.Applied = append(report.Applied, applied...)
@@ -226,6 +229,7 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 		}
 	}
 	report.Skipped = sortedSkips(skipped)
+	report.GimmickWarnings = appliedGimmickWarnings(plan, report.Applied)
 
 	// 恢复项投放成功 → 清除对应 tombstone（§5.4 删除不复活：确认动作即
 	// 清除）。清失败不回滚 realm（已提交批保留）；下次收集的「同键重现」

@@ -635,7 +635,15 @@ func TestDeployBeatmapSetFullChain(t *testing.T) {
 		t.Fatalf("fixture.Build(B): %v", err)
 	}
 
-	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	// 仓入字节（模拟收集方向收仓后的形态；CopyMissing 的源，gimmick 头
+	// 扫描的读取面）。
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, seedA.Files)
+
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -647,13 +655,6 @@ func TestDeployBeatmapSetFullChain(t *testing.T) {
 			t.Errorf("计划项 = %+v，期望 beatmap_set create 非 Restore", it)
 		}
 	}
-
-	// 仓入字节（模拟收集方向收仓后的形态；CopyMissing 的源）。
-	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
-	if err != nil {
-		t.Fatalf("filestore.Open: %v", err)
-	}
-	fillStore(t, store, seedA.Files)
 
 	snapBefore := schemaSnapshotOf(t, lib, refB.RealmPath)
 	runner := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)})
@@ -769,7 +770,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 
 	// ① 同域（lazer → delta，均 "ppy"）：OnlineID 随行携带。
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0, BeatmapSets: []hub.BeatmapSet{set}})
-	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -800,7 +801,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 	fillStore(t, store, files) // 补 set2 的实体哈希入仓
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkG0v0, CollectedAt: t0.Add(2 * time.Hour),
 		BeatmapSets: []hub.BeatmapSet{set2}})
-	plan2, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	plan2, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan(异域新行): %v", err)
 	}
@@ -828,7 +829,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 	modified.StatusInt = 3 // Qualified
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkG0v0, CollectedAt: t0.Add(4 * time.Hour),
 		BeatmapSets: []hub.BeatmapSet{modified}})
-	plan3, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	plan3, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan(异域更新): %v", err)
 	}
@@ -917,15 +918,15 @@ func TestDeployBeatmapSetMissingColumnsAndRulesetSeed(t *testing.T) {
 	// S8 影响；且避免与目标 fork 的 presence 撞库——对账按 fork_id 分键）。
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkDelta, CollectedAt: t0,
 		BeatmapSets: []hub.BeatmapSet{set}})
-	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
 	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
 	if err != nil {
 		t.Fatalf("filestore.Open: %v", err)
 	}
 	fillStore(t, store, files)
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
 	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
 	if err != nil {
 		t.Fatalf("Deploy(缺列库): %v（report=%+v）", err, report)
@@ -1040,15 +1041,15 @@ func TestDeployBeatmapSetRulesetMissingScalarCols(t *testing.T) {
 	// canonical 来源取 delta（与目标 lazer 同域 "ppy"，S8 面不干扰）。
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkDelta, CollectedAt: t0,
 		BeatmapSets: []hub.BeatmapSet{set}})
-	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
 	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
 	if err != nil {
 		t.Fatalf("filestore.Open: %v", err)
 	}
 	fillStore(t, store, files)
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
 	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
 	if err != nil {
 		t.Fatalf("Deploy(Ruleset 缺列库): %v（report=%+v）", err, report)
@@ -1119,7 +1120,13 @@ func TestDeployBeatmapSetVersionReplace(t *testing.T) {
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0.Add(time.Hour),
 		BeatmapSets: []hub.BeatmapSet{v2}})
 
-	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, seedV2.Files)
+
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -1135,11 +1142,6 @@ func TestDeployBeatmapSetVersionReplace(t *testing.T) {
 			it.ContentKey, it.OldContentKey, v2.Hash, v1.Hash)
 	}
 
-	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
-	if err != nil {
-		t.Fatalf("filestore.Open: %v", err)
-	}
-	fillStore(t, store, seedV2.Files)
 	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v（report=%+v）", err, report)
@@ -1214,9 +1216,14 @@ func TestBuildPlanVersionReplaceWeakEvidence(t *testing.T) {
 	applySnap(t, h, hub.Snapshot{ForkID: "fork-s", CollectedAt: t0.Add(time.Hour),
 		BeatmapSets: []hub.BeatmapSet{wNew}})
 	ref := forks.LibraryRef{ForkID: "fork-t", RealmPath: "/tmp/weak-plan.client.realm", DiskVersion: 52}
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
 
 	// 默认计划：弱键项不进（不得以任何动作静默投放——三选一未拍板）。
-	planDefault, err := BuildPlan(ctx, h, ref, BuildOptions{})
+	planDefault, err := BuildPlan(ctx, h, ref, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan(默认): %v", err)
 	}
@@ -1225,7 +1232,7 @@ func TestBuildPlanVersionReplaceWeakEvidence(t *testing.T) {
 	}
 
 	// 显式确认（以 hub 链尾键为锚）→ version-replace 进入。
-	plan, err := BuildPlan(ctx, h, ref, BuildOptions{ConfirmVersionReplaceKeys: []string{wNew.Hash}})
+	plan, err := BuildPlan(ctx, h, ref, BuildOptions{Files: store, ConfirmVersionReplaceKeys: []string{wNew.Hash}})
 	if err != nil {
 		t.Fatalf("BuildPlan(确认): %v", err)
 	}
@@ -1323,16 +1330,17 @@ func TestDeployBeatmapSetRepointed(t *testing.T) {
 	h := openMemHub(t)
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0,
 		BeatmapSets: []hub.BeatmapSet{set}})
-	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 	if len(plan.Items) != 1 || plan.Items[0].Action != ActionCreate {
 		t.Fatalf("计划 = %+v（期望 1 create——改判发生在执行期）", plan.Items)
-	}
-	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
-	if err != nil {
-		t.Fatalf("filestore.Open: %v", err)
 	}
 	fillStore(t, store, files)
 
@@ -1393,18 +1401,18 @@ func TestDeployBeatmapSetSoftDeleteGuard(t *testing.T) {
 	h := openMemHub(t)
 	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0,
 		BeatmapSets: []hub.BeatmapSet{set}})
-	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 	if len(plan.Items) != 1 || plan.Items[0].Action != ActionCreate {
 		t.Fatalf("计划 = %+v（期望 1 create）", plan.Items)
 	}
-	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
-	if err != nil {
-		t.Fatalf("filestore.Open: %v", err)
-	}
-	fillStore(t, store, files)
 	runner := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)})
 
 	// 计划后、投放前：游戏内软删（S4 写 DeletePending=true，行保留）。

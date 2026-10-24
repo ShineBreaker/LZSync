@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"lzsync/internal/filestore"
 	"lzsync/internal/forks"
 	"lzsync/internal/hub"
 )
@@ -46,6 +47,9 @@ type PlanItem struct {
 	// 重寻址旧行（§3.3 现场复核）。ContentKey 则是 hub 链尾新版本键
 	//（写入面 canonical payload 的读取键）。
 	OldContentKey string
+	// Warning 非空 = 告警标记（动作照常执行，§5.4 R6：delta gimmick 谱面
+	// 流出告警）。预演、执行报告与 UI 一致呈现；默认动作不变。
+	Warning string
 }
 
 // Plan 投放计划：预览页勾选结果的快照（计划项按内容键幂等，§3.3——重跑
@@ -104,6 +108,10 @@ type BuildOptions struct {
 	// 计划（NeedsConfirm 语义——§5.4 三选一：替换/并存/忽略），出现在本
 	// 名单才以 version-replace 进入（「并存」走普通 create 链路，不经本名单）。
 	ConfirmVersionReplaceKeys []string
+	// Files 内容寻址仓（gimmick 头扫描的只读依赖，R6）：计划含谱面集
+	// 动作项时必填——缺仓 = 告警面缺失，BuildPlan 如实报错而非静默
+	// 跳过检测（§1.5-4 不静默吞）。
+	Files *filestore.Store
 }
 
 // BuildPlan 从 hub 对账结果构建默认投放计划（§3.2 计划 / §6.2 默认勾选）：
@@ -303,12 +311,33 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 			return Plan{}, fmt.Errorf("deploy: %s 对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.kind, sr.category, sr.contentKey)
 		}
 	}
+	// §5.4 R6 预演：delta gimmick 谱面流出告警——计划含谱面集动作项时
+	// 扫描仓内 .osu section 头并标记 Warning（skip 项不投放不检测）；
+	// 仓未注入 = 告警面缺失，如实报错（不静默吞，§1.5-4）。
+	if planHasSetAction(planItems) {
+		if opts.Files == nil {
+			return Plan{}, errors.New("deploy: BuildOptions.Files 未配置（谱面集计划需要仓做 gimmick 头扫描，R6）")
+		}
+		if err := markGimmickWarnings(ctx, h, opts.Files, planItems); err != nil {
+			return Plan{}, err
+		}
+	}
 	plan, err := NewPlan(target.ForkID, planItems)
 	if err != nil {
 		return Plan{}, err
 	}
 	plan.Target = target
 	return plan, nil
+}
+
+// planHasSetAction 计划是否含谱面集动作项（gimmick 检测的触发条件）。
+func planHasSetAction(items []PlanItem) bool {
+	for _, it := range items {
+		if it.Kind == hub.KindBeatmapSet && it.Action != ActionSkip {
+			return true
+		}
+	}
+	return false
 }
 
 func collectionSummary(name string) string {
