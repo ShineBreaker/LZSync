@@ -167,8 +167,10 @@ func prepareBeatmapSetWriter(r *realmc.Realm) (*beatmapSetWriter, error) {
 
 // exec 执行单个谱面集计划项（§3.3 执行期现场复核 + 写入）。oldKey 是
 // version-replace 项的目标旧版本集内容键（其他动作空串）。sameRealm 是
-// S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）。
-func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool, action Action) (applied, skipStat, string, error) {
+// S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）。restore 标记
+// 恢复项（用户显式勾选「恢复（已删除）」）：现场同键行已软删时唯有恢复
+// 项才允许写回 DeletePending=false（HB2 删除不复活）。
+func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool, action Action, restore bool) (applied, skipStat, string, error) {
 	if action == ActionVersionReplace {
 		return w.execVersionReplace(bs, oldKey, sameRealm)
 	}
@@ -193,6 +195,23 @@ func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool
 
 	if existing != nil {
 		defer w.r.ReleaseObject(existing)
+		// HB2 删除不复活（执行面闭环）：计划构建后、执行前用户可能在游戏内
+		// 删除该谱面——现场行已 DeletePending=true 而 tombstone 尚未产生
+		//（收集才产 tombstone，计划侧锚拦不住该窗口）。就地更新会把
+		// DeletePending 写回 canonical false 静默复活删除，故现场软删行除
+		// 非恢复项（复活是用户显式意图）一律跳过并计数。
+		if dpKey, ok := w.setCols["DeletePending"]; ok {
+			dp, err := w.r.GetBool(existing, dpKey)
+			if err != nil {
+				return applied{}, skipStat{}, "", fmt.Errorf("deploy: 读现场集 %s DeletePending: %w", bs.Hash, err)
+			}
+			if dp && !restore {
+				return applied{}, skipStat{
+					reason: "目标已软删（计划后删除），跳过防复活（§5.4 删除不复活）",
+					count:  1,
+				}, repoint, nil
+			}
+		}
 		// 重续安全：已一致 → 跳过。判定面 = 写面的对偶（写面不写的字段
 		// 不比：难度 / Files 列表在同 Hash 语义下内容等价，§4.2）。
 		same, err := w.matchesCanonical(existing, bs, sameRealm)

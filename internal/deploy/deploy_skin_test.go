@@ -430,3 +430,150 @@ func TestDeploySkinMissingColumns(t *testing.T) {
 		}
 	})
 }
+
+// insertSoftDeletedSkin 向目标库现场插入一行软删皮肤（Hash + Name +
+// DeletePending=true，S4），模拟计划构建后、投放前用户在游戏内删除该
+// 皮肤（tombstone 尚未产生——收集才产 tombstone）。
+func insertSoftDeletedSkin(t *testing.T, lib *realmc.Library, realmPath, hash, name string) {
+	t.Helper()
+	r, err := lib.OpenDynamicReadWrite(realmPath)
+	if err != nil {
+		t.Fatalf("写会话打开 %s: %v", realmPath, err)
+	}
+	defer r.Close()
+	if err := r.BeginWrite(); err != nil {
+		t.Fatalf("BeginWrite: %v", err)
+	}
+	ck, err := r.FindClass("Skin")
+	if err != nil {
+		t.Fatalf("FindClass(Skin): %v", err)
+	}
+	obj, err := r.CreateObject(ck)
+	if err != nil {
+		r.Rollback() //nolint:errcheck
+		t.Fatalf("建行: %v", err)
+	}
+	defer r.ReleaseObject(obj)
+	writes := []func() error{}
+	for _, c := range []struct{ name, val string }{
+		{"Hash", hash}, {"Name", name},
+	} {
+		key, err := r.FindProperty(ck, c.name)
+		if err != nil {
+			t.Fatalf("FindProperty(%s): %v", c.name, err)
+		}
+		val := c.val
+		writes = append(writes, func() error { return r.SetString(obj, key, val) })
+	}
+	dpKey, err := r.FindProperty(ck, "DeletePending")
+	if err != nil {
+		t.Fatalf("FindProperty(DeletePending): %v", err)
+	}
+	writes = append(writes, func() error { return r.SetBool(obj, dpKey, true) })
+	for _, w := range writes {
+		if err := w(); err != nil {
+			r.Rollback() //nolint:errcheck
+			t.Fatalf("现场注入写入: %v", err)
+		}
+	}
+	if err := r.Commit(); err != nil {
+		t.Fatalf("提交注入: %v", err)
+	}
+}
+
+// skinDeletePendingOf 读回皮肤行 DeletePending（软删防复活断言面）。
+func skinDeletePendingOf(t *testing.T, sr *setReader, contentHash string) bool {
+	t.Helper()
+	ck := sr.class("Skin")
+	obj, err := sr.r.FindFirstByString(ck, sr.prop("Skin", "Hash"), contentHash)
+	if err != nil || obj == nil {
+		t.Fatalf("查皮肤 %s: %v", contentHash, err)
+	}
+	defer sr.r.ReleaseObject(obj)
+	return sr.boolOf(obj, "Skin", "DeletePending")
+}
+
+// TestDeploySkinSoftDeleteGuard HB2 执行面闭环（皮肤侧，谱面集写入器同款）：
+// 计划后游戏内删除的现场软删行不被就地更新复活；恢复项（用户显式勾选）
+// 才允许写回 DeletePending=false。
+func TestDeploySkinSoftDeleteGuard(t *testing.T) {
+	lib := mustLib(t)
+	ctx := context.Background()
+
+	files, skins := buildSkinFixture(t)
+	refB, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkDelta, SchemaVersion: fixture.VersionDelta,
+		DataDir: t.TempDir(), Seed: fixture.Seed{},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build(B): %v", err)
+	}
+	h := openMemHub(t)
+	applySnap(t, h, hub.Snapshot{ForkID: refB.ForkID, CollectedAt: t0})
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0.Add(time.Hour),
+		Skins: skins[:1]})
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Items) != 1 || plan.Items[0].Action != ActionCreate {
+		t.Fatalf("计划 = %+v（期望 1 skin create）", plan.Items)
+	}
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	runner := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)})
+
+	// 计划后、投放前：游戏内软删该皮肤（S4）。
+	insertSoftDeletedSkin(t, lib, refB.RealmPath, skins[0].Hash, skins[0].Name)
+
+	report, err := runner.Deploy(ctx, plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy(现场软删): %v（report=%+v）", err, report)
+	}
+	if len(report.Applied) != 0 {
+		t.Errorf("applied = %+v（期望 0——软删行不复活）", report.Applied)
+	}
+	if len(report.Skipped) != 1 || report.Skipped[0].Count != 1 ||
+		!strings.Contains(report.Skipped[0].Reason, "防复活") {
+		t.Errorf("Skipped = %+v（期望 1 条防复活计数）", report.Skipped)
+	}
+	if len(report.Repointed) != 1 || report.Repointed[0].Reason != "目标已出现同键行：新建 → 就地更新" {
+		t.Errorf("Repointed = %+v（期望 1 条新建→就地更新改判）", report.Repointed)
+	}
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		if !skinDeletePendingOf(t, sr, skins[0].Hash) {
+			t.Error("现场软删皮肤被复活：DeletePending = false，期望保持 true（HB2）")
+		}
+	})
+
+	// 恢复项（用户显式勾选）：写回 DeletePending=false 是明确意图。
+	restorePlan, err := NewPlan(refB.ForkID, []PlanItem{{
+		Kind: hub.KindSkin, ContentKey: skins[0].Hash, Action: ActionCreate, Restore: true,
+	}})
+	if err != nil {
+		t.Fatalf("NewPlan(恢复): %v", err)
+	}
+	restorePlan.Target = refB
+	report2, err := runner.Deploy(ctx, restorePlan, nil)
+	if err != nil {
+		t.Fatalf("Deploy(恢复): %v（report=%+v）", err, report2)
+	}
+	if len(report2.Applied) != 1 || report2.Applied[0].Action != ActionUpdate {
+		t.Errorf("恢复 applied = %+v（期望 1 项 update——软删行现场命中改判）", report2.Applied)
+	}
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		if skinDeletePendingOf(t, sr, skins[0].Hash) {
+			t.Error("恢复后 DeletePending = true（期望 false——复活是用户显式意图）")
+		}
+		got, ok := readSkinRow(t, sr, skins[0].Hash)
+		if !ok {
+			t.Fatal("恢复后读回缺皮肤")
+		}
+		if got.Name != skins[0].Name {
+			t.Errorf("恢复后 Name = %q，期望 canonical %q", got.Name, skins[0].Name)
+		}
+	})
+}

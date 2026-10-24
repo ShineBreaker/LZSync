@@ -325,7 +325,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此谱面集当前版本（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := setW.exec(bs, item.OldContentKey, s8SameRealm(origin.Fork, targetFork), item.Action)
+			ap, skip, rep, err := setW.exec(bs, item.OldContentKey, s8SameRealm(origin.Fork, targetFork), item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}
@@ -350,7 +350,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此皮肤（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := skinW.exec(sk, item.Action)
+			ap, skip, rep, err := skinW.exec(sk, item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}

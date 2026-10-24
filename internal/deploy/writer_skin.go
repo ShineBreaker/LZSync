@@ -119,8 +119,10 @@ func forkOwnSkinHit(profiles []forks.ForkProfile, name, creator string) bool {
 	return false
 }
 
-// exec 执行单个皮肤计划项（§3.3 执行期现场复核 + 写入）。
-func (w *skinWriter) exec(sk hub.Skin, action Action) (applied, skipStat, string, error) {
+// exec 执行单个皮肤计划项（§3.3 执行期现场复核 + 写入）。restore 标记
+// 恢复项：现场同键行已软删时唯有恢复项才允许写回 DeletePending=false
+//（HB2 删除不复活，谱面集写入器同款）。
+func (w *skinWriter) exec(sk hub.Skin, action Action, restore bool) (applied, skipStat, string, error) {
 	if w.absent {
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
 	}
@@ -148,6 +150,21 @@ func (w *skinWriter) exec(sk hub.Skin, action Action) (applied, skipStat, string
 
 	if existing != nil {
 		defer w.r.ReleaseObject(existing)
+		// HB2 删除不复活（执行面闭环，谱面集写入器同款）：计划后删除的
+		// 现场软删行跳过防复活——就地更新会把 DeletePending 写回 false；
+		// 恢复项的复活是用户显式意图，放行。
+		if dpKey, ok := w.skinCols["DeletePending"]; ok {
+			dp, err := w.r.GetBool(existing, dpKey)
+			if err != nil {
+				return applied{}, skipStat{}, "", fmt.Errorf("deploy: 读现场皮肤 %s DeletePending: %w", sk.Hash, err)
+			}
+			if dp && !restore {
+				return applied{}, skipStat{
+					reason: "目标已软删（计划后删除），跳过防复活（§5.4 删除不复活）",
+					count:  1,
+				}, repoint, nil
+			}
+		}
 		// 重续安全：已一致 → 跳过。判定面 = 写面的对偶（Files 列表在同
 		// Hash 语义下哈希型内容等价，不比，§4.2）。
 		same, err := w.matchesCanonical(existing, sk)

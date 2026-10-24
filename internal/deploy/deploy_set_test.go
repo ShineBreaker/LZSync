@@ -1239,9 +1239,10 @@ func TestBuildPlanVersionReplaceWeakEvidence(t *testing.T) {
 }
 
 // insertBareSet 向目标库现场插入一行最小形态集（Hash + DateAdded +
-// Status），模拟计划构建后第三方向目标写入同键行（§3.3 执行期现场复核
-// 夹具；值刻意异于 canonical → 走 update 写面）。
-func insertBareSet(t *testing.T, lib *realmc.Library, realmPath, hash string, dateAdded time.Time, status int64) {
+// Status；deletePending=true 时模拟软删行），模拟计划构建后第三方向目标
+// 写入同键行 / 用户游戏内删除（§3.3 执行期现场复核夹具；值刻意异于
+// canonical → 走 update 写面）。
+func insertBareSet(t *testing.T, lib *realmc.Library, realmPath, hash string, dateAdded time.Time, status int64, deletePending bool) {
 	t.Helper()
 	r, err := lib.OpenDynamicReadWrite(realmPath)
 	if err != nil {
@@ -1273,11 +1274,19 @@ func insertBareSet(t *testing.T, lib *realmc.Library, realmPath, hash string, da
 	if err != nil {
 		t.Fatalf("FindProperty(Status): %v", err)
 	}
-	for _, w := range []func() error{
+	writes := []func() error{
 		func() error { return r.SetString(obj, hashKey, hash) },
 		func() error { return r.SetTimestamp(obj, dateKey, dateAdded) },
 		func() error { return r.SetInt64(obj, statusKey, status) },
-	} {
+	}
+	if deletePending {
+		dpKey, err := r.FindProperty(ck, "DeletePending")
+		if err != nil {
+			t.Fatalf("FindProperty(DeletePending): %v", err)
+		}
+		writes = append(writes, func() error { return r.SetBool(obj, dpKey, true) })
+	}
+	for _, w := range writes {
 		if err := w(); err != nil {
 			r.Rollback() //nolint:errcheck
 			t.Fatalf("现场注入写入: %v", err)
@@ -1329,7 +1338,7 @@ func TestDeployBeatmapSetRepointed(t *testing.T) {
 
 	// 计划后、投放前：第三方写入同 Hash 裸行（DateAdded/Status 异于
 	// canonical）。
-	insertBareSet(t, lib, refB.RealmPath, set.Hash, set.DateAdded.Add(72*time.Hour), 4)
+	insertBareSet(t, lib, refB.RealmPath, set.Hash, set.DateAdded.Add(72*time.Hour), 4, false)
 
 	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
 	if err != nil {
@@ -1352,6 +1361,108 @@ func TestDeployBeatmapSetRepointed(t *testing.T) {
 		}
 		if !got.DateAdded.Equal(set.DateAdded) {
 			t.Errorf("改判后 DateAdded = %v，期望覆盖回 canonical %v", got.DateAdded, set.DateAdded)
+		}
+	})
+}
+
+// TestDeployBeatmapSetSoftDeleteGuard HB2 执行面闭环：计划构建后、执行前
+// 用户在游戏内删除该谱面（现场同键行 DeletePending=true，tombstone 尚未
+// 产生——收集才产 tombstone，计划侧锚拦不住该窗口）。非恢复项遇现场
+// 软删行必须跳过防复活（就地更新会把 DeletePending 写回 false 静默复活
+// 删除）；恢复项（用户显式勾选「恢复（已删除）」）的复活才是合法意图。
+func TestDeployBeatmapSetSoftDeleteGuard(t *testing.T) {
+	lib := mustLib(t)
+	ctx := context.Background()
+
+	files := map[string][]byte{}
+	set, err := fixture.MaterializeSet(9201, "SG Artist", "SG Title", "mapperSG",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("softdelete guard osu bytes")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet: %v", err)
+	}
+	set.ID = "92333333-3333-4333-8333-333333333393"
+	set.Beatmaps[0].ID = "92444444-4444-4444-8444-444444444494"
+
+	refB, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkDelta, SchemaVersion: fixture.VersionDelta,
+		DataDir: t.TempDir(), Seed: fixture.Seed{},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build(B): %v", err)
+	}
+	h := openMemHub(t)
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0,
+		BeatmapSets: []hub.BeatmapSet{set}})
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Items) != 1 || plan.Items[0].Action != ActionCreate {
+		t.Fatalf("计划 = %+v（期望 1 create）", plan.Items)
+	}
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	runner := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)})
+
+	// 计划后、投放前：游戏内软删（S4 写 DeletePending=true，行保留）。
+	goneAt := set.DateAdded.Add(96 * time.Hour)
+	insertBareSet(t, lib, refB.RealmPath, set.Hash, goneAt, 1, true)
+
+	report, err := runner.Deploy(ctx, plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy(现场软删): %v（report=%+v）", err, report)
+	}
+	if len(report.Applied) != 0 {
+		t.Errorf("applied = %+v（期望 0——软删行不复活）", report.Applied)
+	}
+	if len(report.Skipped) != 1 || report.Skipped[0].Count != 1 ||
+		!contains(report.Skipped[0].Reason, "防复活") {
+		t.Errorf("Skipped = %+v（期望 1 条防复活计数）", report.Skipped)
+	}
+	if len(report.Repointed) != 1 || report.Repointed[0].Reason != "目标已出现同键行：新建 → 就地更新" {
+		t.Errorf("Repointed = %+v（期望 1 条新建→就地更新改判）", report.Repointed)
+	}
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		got, ok := sr.readSetProjection(set.Hash)
+		if !ok {
+			t.Fatal("防复活动断后读回缺集行（软删行应保留）")
+		}
+		if !got.DeletePending {
+			t.Error("现场软删集被复活：DeletePending = false，期望保持 true（HB2）")
+		}
+		if !got.DateAdded.Equal(goneAt) {
+			t.Errorf("软删行 DateAdded = %v，期望未被触碰 %v", got.DateAdded, goneAt)
+		}
+	})
+
+	// 恢复项（用户显式勾选）：软删行写回 DeletePending=false 是明确意图。
+	restorePlan, err := NewPlan(refB.ForkID, []PlanItem{{
+		Kind: hub.KindBeatmapSet, ContentKey: set.Hash, Action: ActionCreate, Restore: true,
+	}})
+	if err != nil {
+		t.Fatalf("NewPlan(恢复): %v", err)
+	}
+	restorePlan.Target = refB
+	report2, err := runner.Deploy(ctx, restorePlan, nil)
+	if err != nil {
+		t.Fatalf("Deploy(恢复): %v（report=%+v）", err, report2)
+	}
+	if len(report2.Applied) != 1 || report2.Applied[0].Action != ActionUpdate {
+		t.Errorf("恢复 applied = %+v（期望 1 项 update——软删行现场命中改判）", report2.Applied)
+	}
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		got, ok := sr.readSetProjection(set.Hash)
+		if !ok {
+			t.Fatal("恢复后读回缺集行")
+		}
+		if got.DeletePending {
+			t.Error("恢复后 DeletePending = true（期望 false——复活是用户显式意图）")
+		}
+		if !got.DateAdded.Equal(set.DateAdded) {
+			t.Errorf("恢复后 DateAdded = %v，期望 canonical %v", got.DateAdded, set.DateAdded)
 		}
 	})
 }
