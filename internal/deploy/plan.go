@@ -132,6 +132,12 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	if err != nil {
 		return Plan{}, err
 	}
+	// M3 设置类三类对账（同上过渡承载）：key_binding / ruleset_setting /
+	// mod_preset 全部行 vs 目标 presence。
+	settings, err := reconcileSettings(ctx, h, target.ForkID)
+	if err != nil {
+		return Plan{}, err
+	}
 	restore := make(map[string]bool, len(opts.RestoreKeys))
 	for _, k := range opts.RestoreKeys {
 		restore[k] = true
@@ -270,6 +276,33 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 			return Plan{}, fmt.Errorf("deploy: 皮肤对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.category, sr.contentKey)
 		}
 	}
+	// M3 设置类三类 → 计划项（create/conflict 两分类；无版本链，restore
+	// 语义与皮肤一致）。D20/D7/规则集可解析性不预演——执行期现场复核是
+	// 唯一防线（域数据待激活态 + 目标库现场才可判定的规则集行）。
+	for _, sr := range settings {
+		switch sr.category {
+		case hub.ReconcileCreate:
+			if sr.restorable && !restore[sr.contentKey] {
+				continue // 恢复组默认排除（HB2：需用户显式勾选）
+			}
+			planItems = append(planItems, PlanItem{
+				Kind:       sr.kind,
+				ContentKey: sr.contentKey,
+				Action:     ActionCreate,
+				Summary:    sr.summary,
+				Restore:    sr.restorable,
+			})
+		case hub.ReconcileConflict:
+			planItems = append(planItems, PlanItem{
+				Kind:       sr.kind,
+				ContentKey: sr.contentKey,
+				Action:     ActionUpdate,
+				Summary:    sr.summary,
+			})
+		default:
+			return Plan{}, fmt.Errorf("deploy: %s 对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.kind, sr.category, sr.contentKey)
+		}
+	}
 	plan, err := NewPlan(target.ForkID, planItems)
 	if err != nil {
 		return Plan{}, err
@@ -401,4 +434,193 @@ func reconcileSkins(ctx context.Context, h *hub.Store, forkID string) ([]skinRec
 
 func skinSummary(name string) string {
 	return "皮肤 " + strconv.Quote(name)
+}
+
+// settingsReconcile M3 设置类对账行（deploy 内过渡承载：与 skinReconcile
+// 同构；三类共用的形态）。
+type settingsReconcile struct {
+	kind       hub.EntityKind
+	contentKey string
+	summary    string
+	category   hub.ReconcileCategory
+	restorable bool
+}
+
+// reconcileSettings M3 设置类三类对账（hub 真相 → 目标 fork，纯 SQL 只读，
+// reconcileSkins 的同款过渡承载）：三类全部行（无版本链）vs 目标 presence
+// 差集 → create（命中 tombstone 归恢复组）；presence 有键则比冲突字段
+// （§4.2：键位比 KeyCombination、设置比 Value、预设比 Description/ModsJson
+// ——内容键段本身不比），有差异 → conflict。
+func reconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]settingsReconcile, error) {
+	presOf := func(kind hub.EntityKind) (map[string]string, error) {
+		rows, err := h.DB().QueryContext(ctx,
+			`SELECT content_key, local_values FROM presence WHERE fork_id=? AND kind=?`, forkID, kind)
+		if err != nil {
+			return nil, fmt.Errorf("deploy: 读 presence(%s): %w", kind, err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var k, v string
+			if err := rows.Scan(&k, &v); err != nil {
+				return nil, fmt.Errorf("deploy: 读 presence(%s) 行: %w", kind, err)
+			}
+			out[k] = v
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("deploy: 遍历 presence(%s): %w", kind, err)
+		}
+		return out, nil
+	}
+	tombs, err := h.Tombstones(ctx, forkID)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []settingsReconcile
+	// 每类：键提取（canonical 行 → 编码内容键 + 摘要）+ 冲突判据。
+	type spec struct {
+		kind     hub.EntityKind
+		query    string                                       // 取全部 canonical 行（content_key 列 + payload 列）
+		keyOf    func(payload string) (string, string, error) // 编码键 + 摘要
+		conflict func(hubJSON, forkJSON string) (bool, error)
+	}
+	specs := []spec{
+		{hub.KindKeyBinding,
+			`SELECT payload FROM key_binding`,
+			func(p string) (string, string, error) {
+				var kb hub.KeyBinding
+				if err := json.Unmarshal([]byte(p), &kb); err != nil {
+					return "", "", err
+				}
+				return hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt),
+					keyBindingSummary(kb), nil
+			},
+			func(a, b string) (bool, error) {
+				var x, y hub.KeyBinding
+				if err := decodeSettingPair(a, b, &x, &y); err != nil {
+					return false, err
+				}
+				return x.KeyCombination != y.KeyCombination, nil
+			}},
+		{hub.KindRulesetSetting,
+			`SELECT payload FROM ruleset_setting`,
+			func(p string) (string, string, error) {
+				var rs hub.RulesetSetting
+				if err := json.Unmarshal([]byte(p), &rs); err != nil {
+					return "", "", err
+				}
+				return hub.RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key),
+					rulesetSettingSummary(rs), nil
+			},
+			func(a, b string) (bool, error) {
+				var x, y hub.RulesetSetting
+				if err := decodeSettingPair(a, b, &x, &y); err != nil {
+					return false, err
+				}
+				return x.Value != y.Value, nil
+			}},
+		{hub.KindModPreset,
+			`SELECT payload FROM mod_preset`,
+			func(p string) (string, string, error) {
+				var mp hub.ModPreset
+				if err := json.Unmarshal([]byte(p), &mp); err != nil {
+					return "", "", err
+				}
+				return hub.ModPresetContentKey(mp.RulesetShortName, mp.Name),
+					modPresetSummary(mp), nil
+			},
+			func(a, b string) (bool, error) {
+				var x, y hub.ModPreset
+				if err := decodeSettingPair(a, b, &x, &y); err != nil {
+					return false, err
+				}
+				return x.Description != y.Description || x.ModsJson != y.ModsJson, nil
+			}},
+	}
+	for _, sp := range specs {
+		pres, err := presOf(sp.kind)
+		if err != nil {
+			return nil, err
+		}
+		tombKeys := tombs[sp.kind]
+		rows, err := h.DB().QueryContext(ctx, sp.query)
+		if err != nil {
+			return nil, fmt.Errorf("deploy: 读 %s canonical: %w", sp.kind, err)
+		}
+		type canon struct{ key, payload, summary string }
+		var canonRows []canon
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("deploy: 读 %s canonical 行: %w", sp.kind, err)
+			}
+			key, summary, kErr := sp.keyOf(v)
+			if kErr != nil {
+				rows.Close()
+				return nil, fmt.Errorf("deploy: 解码 %s payload: %w", sp.kind, kErr)
+			}
+			canonRows = append(canonRows, canon{key, v, summary})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("deploy: 遍历 %s canonical: %w", sp.kind, err)
+		}
+		rows.Close()
+
+		for _, c := range canonRows {
+			local, inPres := pres[c.key]
+			if !inPres {
+				it := settingsReconcile{kind: sp.kind, contentKey: c.key, summary: c.summary, category: hub.ReconcileCreate}
+				if _, dead := tombKeys[c.key]; dead {
+					it.restorable = true
+				}
+				out = append(out, it)
+				continue
+			}
+			conflict, err := sp.conflict(c.payload, local)
+			if err != nil {
+				return nil, err
+			}
+			if conflict {
+				out = append(out, settingsReconcile{kind: sp.kind, contentKey: c.key, summary: c.summary, category: hub.ReconcileConflict})
+			}
+		}
+	}
+	return out, nil
+}
+
+// decodeSettingPair 解码 canonical payload 与 presence local_values（同构
+// DTO JSON；hub.decodeBoth 的 deploy 侧同款）。
+func decodeSettingPair(canonJSON, localJSON string, canon, fork any) error {
+	if err := json.Unmarshal([]byte(canonJSON), canon); err != nil {
+		return fmt.Errorf("解码 canonical: %w", err)
+	}
+	if err := json.Unmarshal([]byte(localJSON), fork); err != nil {
+		return fmt.Errorf("解码 presence: %w", err)
+	}
+	return nil
+}
+
+// keyBindingSummary 键位摘要（预览页人类可读锚点）。
+func keyBindingSummary(kb hub.KeyBinding) string {
+	scope := "全局"
+	if kb.RulesetName != nil && *kb.RulesetName != "" {
+		scope = *kb.RulesetName
+		if kb.Variant != nil {
+			scope += fmt.Sprintf(" %dK", *kb.Variant)
+		}
+	}
+	return "键位 " + scope + " 动作 " + strconv.Itoa(kb.ActionInt) + " = " + kb.KeyCombination
+}
+
+// rulesetSettingSummary 规则集设置摘要。
+func rulesetSettingSummary(rs hub.RulesetSetting) string {
+	return "规则集设置 " + rs.RulesetName + " · " + rs.Key + " = " + rs.Value
+}
+
+// modPresetSummary 模组预设摘要。
+func modPresetSummary(mp hub.ModPreset) string {
+	return "模组预设 " + strconv.Quote(mp.Name) + "（" + mp.RulesetShortName + "）"
 }

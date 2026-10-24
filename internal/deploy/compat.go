@@ -34,6 +34,85 @@ type apiMod struct {
 	Acronym string `json:"acronym"`
 }
 
+// ---- 键位 ActionInt 枚举域（D20，§5.4） ----
+
+// keyBindingActionDomain 声明一端可解析的键位 ActionInt 值域。ActionInt
+// 是裸 int（全局 GlobalAction 或规则集 Action 枚举值），枚举随官方版本
+// 尾部追加演进（fork-comparison D20：官方 2026-07/08 后新增 13 个编辑器
+// 键位、delta 基线没有）——域建模为值域上界（开区间 [0, max)，枚举值域
+// 非负且新增值只出现在尾部）。0 = 该域未取样。
+type keyBindingActionDomain struct {
+	globalMax  int // 全局键位（RulesetName = null）的 GlobalAction 值域上界
+	rulesetMax int // 规则集键位的 Action 值域上界（各规则集共享一个保守上界）
+}
+
+// keyBindingActionDomains 各端 ActionInt 值域数据。数值成员清单不在
+// docs/research 摘录内（调研只给出「delta 缺 13 个新键位」的差异事实），
+// 无法确证任何一端的上界数值——按 C-1 纪律不凭空落数值，规则处于待
+// 数据激活态（ownSkinsOf 先例）：空表使全部判定自然放行，forks 包增补
+// 域数据（Profile 字段）后此处切换为 Profile 读取，无需改写入器。
+var keyBindingActionDomains = map[string]keyBindingActionDomain{}
+
+// keyBindingActionAllowed D20：键位行投放前按源端（origin_fork）与目标
+// 端的枚举域交集过滤，越域跳过（宁少勿错——高版本端的新增动作在低版本
+// 端可能指向错误动作或越界）。任一端域未取样 → 放行（交集不可判定的
+// 待激活态；结构一致（C10）下放行不产生坏库，仅语义可能错位）。
+// ActionInt 为负恒拒（枚举值域非负，负值是坏数据）。
+func keyBindingActionAllowed(originFork, targetFork string, kb hub.KeyBinding) (bool, string) {
+	if kb.ActionInt < 0 {
+		return false, fmt.Sprintf("键位 ActionInt=%d 为负（枚举值域非负，坏数据）", kb.ActionInt)
+	}
+	src, srcOK := keyBindingActionDomains[originFork]
+	dst, dstOK := keyBindingActionDomains[targetFork]
+	if !srcOK || !dstOK {
+		return true, ""
+	}
+	domainMax := func(d keyBindingActionDomain) int {
+		if kb.RulesetName == nil {
+			return d.globalMax
+		}
+		return d.rulesetMax
+	}
+	if m := domainMax(src); m > 0 && kb.ActionInt >= m {
+		return false, fmt.Sprintf("键位 ActionInt=%d 超出源端 %s 枚举域 [0,%d)（D20 越域跳过）",
+			kb.ActionInt, originFork, m)
+	}
+	if m := domainMax(dst); m > 0 && kb.ActionInt >= m {
+		return false, fmt.Sprintf("键位 ActionInt=%d 超出目标端 %s 枚举域 [0,%d)（D20 越域跳过）",
+			kb.ActionInt, targetFork, m)
+	}
+	return true, ""
+}
+
+// adaptModPresetModsForTarget D7：ModPreset 的 ModsJson（APIMod[] JSON）
+// 过目标端 mod 白名录，名录外（或解析失败）整条拒绝——白名单制宁拒勿杀
+// （§5.4 任意端行，与成绩 mods 同一规则面）。targetFork 未注册时保守拒绝。
+// 空串（无 mod 的预设）放行。
+func adaptModPresetModsForTarget(mp hub.ModPreset, targetFork string) (rejectReason string) {
+	p, ok := forks.Profile(targetFork)
+	if !ok {
+		return fmt.Sprintf("目标 fork %q 未注册，无法判定模组预设兼容性（跳过）", targetFork)
+	}
+	if mp.ModsJson == "" {
+		return ""
+	}
+	allowed := make(map[string]bool, len(p.ModAcronyms))
+	for _, a := range p.ModAcronyms {
+		allowed[a] = true
+	}
+	var mods []apiMod
+	if err := json.Unmarshal([]byte(mp.ModsJson), &mods); err != nil {
+		return fmt.Sprintf("模组预设 %q 的 ModsJson 无法解析（整条跳过，D7）: %v", mp.Name, err)
+	}
+	for _, m := range mods {
+		if !allowed[m.Acronym] {
+			return fmt.Sprintf("模组预设 %q 含目标端不认识的 mod %q（白名单制宁拒勿杀，整条跳过，D7）",
+				mp.Name, m.Acronym)
+		}
+	}
+	return ""
+}
+
 // skipReasonStatsKeyDropped 是键级过滤（整条仍落地）的计数原因——被
 // 过滤的每个未知 HitResult 键计 1 次（§1.5-4 不静默吞）。
 const skipReasonStatsKeyDropped = "成绩 Statistics 含目标端不认识的 HitResult 键（过滤后写入，D7）"

@@ -78,6 +78,15 @@ const batchSkinSize = 500
 // batchScoreSize 成绩批大小上限（§3.3：成绩 ≤ 500 行/批）。
 const batchScoreSize = 500
 
+// batchKeyBindingSize 键位批大小上限（§3.3：键位 ≤ 500 行/批）。
+const batchKeyBindingSize = 500
+
+// batchRulesetSettingSize 规则集设置批大小上限（§3.3：≤ 500 行/批）。
+const batchRulesetSettingSize = 500
+
+// batchModPresetSize 模组预设批大小上限（§3.3：ModPreset ≤ 500 行/批）。
+const batchModPresetSize = 500
+
 // batchBeatmapSetSize 谱面集批大小上限（§3.3：谱面集 ≤ 50 集/批——含
 // 难度、Metadata、RealmNamedFileUsage 与对应 RealmFile 行的事务内存预算）。
 const batchBeatmapSetSize = 50
@@ -121,9 +130,10 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	}
 	for _, it := range plan.Items {
 		switch it.Kind {
-		case hub.KindCollection, hub.KindBeatmapSet, hub.KindSkin, hub.KindScore:
+		case hub.KindCollection, hub.KindBeatmapSet, hub.KindSkin, hub.KindScore,
+			hub.KindKeyBinding, hub.KindRulesetSetting, hub.KindModPreset:
 		default:
-			return report, fmt.Errorf("deploy: 写入面暂支持收藏夹、谱面集、皮肤与成绩，计划含 %q（后续块扩面）", it.Kind)
+			return report, fmt.Errorf("deploy: 写入面暂支持收藏夹、谱面集、皮肤、成绩与设置类三类（键位/规则集设置/模组预设），计划含 %q（后续块扩面）", it.Kind)
 		}
 	}
 	batches := splitKindBatches(plan.Items)
@@ -250,9 +260,12 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 		setW   *beatmapSetWriter
 		skinW  *skinWriter
 		scoreW *scoreWriter
+		kbW    *keyBindingWriter
+		rsW    *rulesetSettingWriter
+		mpW    *modPresetWriter
 	)
 	// 白名单 ∩ 目标实际列的缺列预演（人话原因，§1.5-4：不静默吞）。
-	var colMissing, setMissing, skinMissing, scoreMissing []string
+	var colMissing, setMissing, skinMissing, scoreMissing, settingsMissing []string
 	switch batch[0].Kind {
 	case hub.KindCollection:
 		if colW, err = prepareCollectionWriter(realm); err != nil {
@@ -274,6 +287,21 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 			return nil, nil, nil, err
 		}
 		scoreMissing = scoreW.missingColumns()
+	case hub.KindKeyBinding:
+		if kbW, err = prepareKeyBindingWriter(realm); err != nil {
+			return nil, nil, nil, err
+		}
+		settingsMissing = kbW.missingColumns()
+	case hub.KindRulesetSetting:
+		if rsW, err = prepareRulesetSettingWriter(realm); err != nil {
+			return nil, nil, nil, err
+		}
+		settingsMissing = rsW.missingColumns()
+	case hub.KindModPreset:
+		if mpW, err = prepareModPresetWriter(realm); err != nil {
+			return nil, nil, nil, err
+		}
+		settingsMissing = mpW.missingColumns()
 	}
 
 	var applied []ItemResult
@@ -389,6 +417,79 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 			} else {
 				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
 				for _, col := range scoreMissing {
+					skips["目标库缺列 "+col+"（该列值未写入）"]++
+				}
+			}
+			if rep != "" {
+				repointed[i] = rep
+			}
+		case hub.KindKeyBinding:
+			// D20 枚举域交集需要源端身份：origin_fork 随 Load 返回。
+			kb, origin, ok, err := r.deps.Hub.LoadKeyBinding(ctx, item.ContentKey)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !ok {
+				skips["hub 实体表中无此键位（计划与真相源不符，跳过）"]++
+				continue
+			}
+			ap, skip, rep, err := kbW.exec(kb, origin.Fork, targetFork, item.Action)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
+			}
+			if skip.count > 0 {
+				skips[skip.reason] += skip.count
+			} else {
+				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
+				for _, col := range settingsMissing {
+					skips["目标库缺列 "+col+"（该列值未写入）"]++
+				}
+			}
+			if rep != "" {
+				repointed[i] = rep
+			}
+		case hub.KindRulesetSetting:
+			rs, _, ok, err := r.deps.Hub.LoadRulesetSetting(ctx, item.ContentKey)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !ok {
+				skips["hub 实体表中无此规则集设置（计划与真相源不符，跳过）"]++
+				continue
+			}
+			ap, skip, rep, err := rsW.exec(rs, item.Action)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
+			}
+			if skip.count > 0 {
+				skips[skip.reason] += skip.count
+			} else {
+				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
+				for _, col := range settingsMissing {
+					skips["目标库缺列 "+col+"（该列值未写入）"]++
+				}
+			}
+			if rep != "" {
+				repointed[i] = rep
+			}
+		case hub.KindModPreset:
+			mp, _, ok, err := r.deps.Hub.LoadModPreset(ctx, item.ContentKey)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !ok {
+				skips["hub 实体表中无此模组预设（计划与真相源不符，跳过）"]++
+				continue
+			}
+			ap, skip, rep, err := mpW.exec(mp, targetFork, item.Action, item.Restore)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
+			}
+			if skip.count > 0 {
+				skips[skip.reason] += skip.count
+			} else {
+				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
+				for _, col := range settingsMissing {
 					skips["目标库缺列 "+col+"（该列值未写入）"]++
 				}
 			}
@@ -592,12 +693,13 @@ func planFileHashes(ctx context.Context, h *hub.Store, plan Plan) ([]string, err
 }
 
 // splitKindBatches 按对象类型分组切批（§3.3 批切分策略：收藏 ≤500 行/批、
-// 谱面集 ≤50 集/批、皮肤/成绩 ≤500 行/批）；批内 kind 单一（runBatch 按
-// 首项 kind 准备写入器）。批序 = 收藏 → 谱面集 → 皮肤 → 成绩：成绩挂接
+// 谱面集 ≤50 集/批、皮肤/成绩/键位/规则集设置/模组预设 ≤500 行/批）；批内
+// kind 单一（runBatch 按首项 kind 准备写入器）。批序 = 收藏 → 谱面集 →
+// 皮肤 → 成绩 → 设置类三类（键位 → 规则集设置 → 模组预设）：成绩挂接
 // 的难度索引惰性构建于谱面写入之后（§5.2-3 ??= 语义，本次刚同步进来的
-// 难度也能挂上）。
+// 难度也能挂上）；设置类三类间无顺序依赖，恒定序便于报告断言。
 func splitKindBatches(items []PlanItem) [][]PlanItem {
-	var cols, sets, skins, scores []PlanItem
+	var cols, sets, skins, scores, kbs, rsettings, presets []PlanItem
 	for _, it := range items {
 		switch it.Kind {
 		case hub.KindBeatmapSet:
@@ -606,14 +708,23 @@ func splitKindBatches(items []PlanItem) [][]PlanItem {
 			skins = append(skins, it)
 		case hub.KindScore:
 			scores = append(scores, it)
+		case hub.KindKeyBinding:
+			kbs = append(kbs, it)
+		case hub.KindRulesetSetting:
+			rsettings = append(rsettings, it)
+		case hub.KindModPreset:
+			presets = append(presets, it)
 		default:
 			cols = append(cols, it)
 		}
 	}
-	return append(append(append(splitBatches(cols, batchCollectionSize),
+	return append(append(append(append(splitBatches(cols, batchCollectionSize),
 		splitBatches(sets, batchBeatmapSetSize)...),
 		splitBatches(skins, batchSkinSize)...),
-		splitBatches(scores, batchScoreSize)...)
+		splitBatches(scores, batchScoreSize)...),
+		append(append(splitBatches(kbs, batchKeyBindingSize),
+			splitBatches(rsettings, batchRulesetSettingSize)...),
+			splitBatches(presets, batchModPresetSize)...)...)
 }
 
 func splitBatches(items []PlanItem, size int) [][]PlanItem {

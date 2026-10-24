@@ -308,3 +308,27 @@ func TestDeployS8CrossRealmG0v0Bidirectional(t *testing.T) {
 		}
 	})
 }
+
+// TestAdaptModPresetModsForTarget ModPreset 的 D7 mod 白名单纯函数分支：
+// 未注册目标 fork / 空 ModsJson / 名录外 / 解析失败。
+func TestAdaptModPresetModsForTarget(t *testing.T) {
+	mp := hub.ModPreset{Name: "P", RulesetShortName: "osu"}
+	if r := adaptModPresetModsForTarget(mp, "lazer"); r != "" {
+		t.Errorf("空 ModsJson 应放行，got %q", r)
+	}
+	if r := adaptModPresetModsForTarget(mp, "unknown-fork"); r == "" {
+		t.Errorf("未注册目标 fork 应保守拒绝")
+	}
+	mp.ModsJson = `[{"acronym":"HD"},{"acronym":"CL"}]`
+	if r := adaptModPresetModsForTarget(mp, "lazer"); r != "" {
+		t.Errorf("名录内 mods 应放行，got %q", r)
+	}
+	mp.ModsJson = `[{"acronym":"HD"},{"acronym":"EZX"}]`
+	if r := adaptModPresetModsForTarget(mp, "lazer"); r == "" || !strings.Contains(r, "EZX") {
+		t.Errorf("名录外 mod 应整条拒绝（got %q）", r)
+	}
+	mp.ModsJson = `not-json`
+	if r := adaptModPresetModsForTarget(mp, "lazer"); r == "" {
+		t.Errorf("ModsJson 解析失败应整条拒绝")
+	}
+}
