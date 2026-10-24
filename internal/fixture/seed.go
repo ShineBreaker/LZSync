@@ -60,6 +60,7 @@ func sha256Hex(b []byte) string {
 }
 
 func md5Hex(b []byte) string {
+	// mimosa-ignore -- osu! 谱面格式规定 MD5 内容哈希（与 Realm 列值逐字节一致），非安全用途，已裁定误报
 	sum := md5.Sum(b)
 	return hex.EncodeToString(sum[:])
 }

@@ -351,6 +351,7 @@ func TestDeployOccupiedRejected(t *testing.T) {
 	}})
 
 	// 子进程持有写会话（realm 会话存在即占 .lock flock——本包施工探针实证）。
+	// mimosa-ignore -- go test 自进程重执行构造「子进程持有 realm 写会话」夹具，参数全字面量，已裁定误报
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHoldRealmHelper$", "-test.v", "-test.timeout=90s")
 	cmd.Env = append(os.Environ(), "LZSYNC_HOLD_REALM="+ref.RealmPath)
 	stdout, err := cmd.StdoutPipe()
