@@ -349,15 +349,37 @@ func EzDiffSeed(externalRoot string) (Seed, error) {
 	if err != nil {
 		return Seed{}, err
 	}
+	// bms 集难度走 bms 规则集（难度级 OwnRulesets 过滤夹具，D6）。
+	bms.Beatmaps[0].RulesetShortName = "bms"
 	seed.BeatmapSets = append(seed.BeatmapSets, bms)
 	seed.Files = files
 
+	// bms Ruleset 行（Ez 允许外部规则集取 -1，fork-ez2lazer §5.3）+
+	// 指向它的成绩（成绩级过滤夹具）。
+	seed.ExtraRulesets = []SeedRuleset{{
+		ShortName:         "bms",
+		OnlineID:          -1,
+		Name:              "Beatmap Spectrum",
+		InstantiationInfo: "osu.Game.Rulesets.BMS.BMSRuleset, osu.Game.Rulesets.BMS",
+	}}
+	bmsScore, err := MaterializeScore(seed.BeatmapSets[0].Beatmaps[0], "ez2lazer 52011",
+		[]byte("bms replay bytes"), seed.Files)
+	if err != nil {
+		return Seed{}, err
+	}
+	bmsScore.RulesetShortName = "bms"
+	bmsScore.TotalScore = 888888
+	seed.Scores = append(seed.Scores, bmsScore)
+
 	// JudgeMode≠0（EZ2AC=31，fork-ez2lazer §2.7）+ 未知键 + 非官方 mod。
-	// 排在首位：动态重开断言经 FirstObject 取行。
+	// 排在首位：动态重开断言经 FirstObject 取行。规则集显式归官方 osu
+	//（宿主难度是 bms——R7 夹具要求「官方规则集 × 非 Lazer 判定」形态，
+	// 与 bms 规则集夹具（D6）互不遮蔽）。
 	judge, err := MaterializeScore(bms.Beatmaps[0], "ez2lazer 52011", []byte("ez judge replay"), seed.Files)
 	if err != nil {
 		return Seed{}, err
 	}
+	judge.RulesetShortName = "osu"
 	judge.TotalScore = 1234567
 	judge.RankInt = 1 // SS
 	judge.JudgeMode = 31
@@ -371,14 +393,16 @@ func EzDiffSeed(externalRoot string) (Seed, error) {
 		ContentRoot: externalRoot,
 	}}
 	seed.EzSkillRows = true
-	// Ez 专有皮肤指纹行（Name/Creator 指纹是 forks.OwnSkins 的判定输入；
-	// 当前注册表未登记 Ez 指纹，本行按普通用户皮肤全列成形）。
+	// Ez 专有皮肤指纹行：Guid 固定为 EZRealmSync IsEzOnlySkin 的专有皮肤
+	// 常量（fork-comparison D21），Name/Creator 只是行内容——判定走
+	// forks.OwnSkins 的 Guid 通道。
 	ezSkin, err := MaterializeSkin("Ez Default", "Ez2Lazer", []SkinFileMaterial{
 		{Filename: "ez-default.ini", Bytes: []byte("[General]\nName:Ez Default\n")},
 	}, seed.Files)
 	if err != nil {
 		return Seed{}, err
 	}
+	ezSkin.Guid = "fc372386-381d-4f8e-897a-c1d89ef39f9c"
 	seed.Skins = append(seed.Skins, ezSkin)
 	return seed, nil
 }

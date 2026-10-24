@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -24,16 +25,17 @@ const (
 	skipProtectedSet   = "Protected 系统谱面集"
 	skipExternalSet    = "Ez 外部托管谱面集"
 	skipHiddenDiff     = "Hidden 难度"
+	skipOwnRulesetDiff = "fork 专有规则集难度（OwnRulesets）"
 	skipSkinSoftDel    = "软删皮肤（DeletePending）"
 	skipProtectedSkin  = "Protected 内置皮肤"
 	skipOwnSkin        = "fork 专有皮肤（OwnSkins 指纹）"
 	skipSkinNoHash     = "皮肤 Hash 为空（无法判定身份）"
 	skipScoreSoftDel   = "软删成绩（DeletePending）"
 	skipScoreNoBeatmap = "成绩 BeatmapHash 为空（无谱面锚点）"
+	skipOwnRuleset     = "fork 专有规则集成绩（OwnRulesets）"
+	skipMarketRuleset  = "规则集市场行成绩（OnlineID 超内置域，服务器市场产物不跨端）"
+	skipJudgedScore    = "fork 专有判定档成绩（判定语义列非 0，官方端重算会错）"
 )
-
-// ezExtSetHashPrefix 是 Ez 外部托管集 Hash 前缀（fork-ez2lazer §5.1）。
-const ezExtSetHashPrefix = "ext:set:"
 
 // reader 缓存一次读事务内的 class/prop 寻址，并把「列缺失 → 该列不进
 // DTO」的降级收敛到唯一入口。
@@ -88,6 +90,16 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 	skips := map[string]int{}
 	count := func(reason string) { skips[reason]++ }
 
+	// §5.4 收集侧兼容过滤的规则数据（§4.3：fork 知识只在 Profile——
+	// 专有规则集/市场规则集下界/判定档列/外部集前缀/专有皮肤指纹）。
+	// 未注册 fork 的零值 Profile 使全部判定自然放行（投放侧仍有防线）。
+	prof, _ := forks.Profile(target.ForkID)
+	ownRulesets := map[string]bool{}
+	for _, s := range prof.OwnRulesets {
+		ownRulesets[s] = true
+	}
+	extPrefix := prof.ExtSetHashPrefix
+
 	total := 0
 	for _, cls := range []string{"BeatmapSet", "BeatmapCollection", "Skin", "Score"} {
 		if ck, ok := rd.class(cls); ok {
@@ -105,11 +117,10 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 
 	// 谱面集（含难度归属与文件清单；链接列表列缺列时自然为空——
 	// 真实库与 M2 镜像走列表）。
-	isEz := target.ForkID == "ez2lazer"
 	if setKey, ok := rd.class("BeatmapSet"); ok {
 		if err := r.ForEach(setKey, func(obj unsafe.Pointer) error {
 			defer func() { current++; report() }()
-			return projectBeatmapSet(rd, obj, &snap, count, isEz)
+			return projectBeatmapSet(rd, obj, &snap, count, extPrefix, ownRulesets)
 		}); err != nil {
 			return hub.Snapshot{}, fmt.Errorf("投影 BeatmapSet: %w", err)
 		}
@@ -161,12 +172,15 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 		}
 	}
 
-	// 成绩（跳过规则 §4.1：软删 / 空 BeatmapHash；User embedded、Mods/
-	// Statistics 原样字符串、Files=.osr usage）。
+	// 成绩（跳过规则 §4.1 + §5.4 兼容过滤：软删 / 空 BeatmapHash /
+	// fork 专有规则集 / 市场规则集行（D8）/ 判定档（R7）；User embedded、
+	// Mods/Statistics 原样字符串、Files=.osr usage——mods/Statistics 的
+	// 目标端白名单过滤在投放侧转换（D7，hub 保留原文）。
 	if scoreKey, ok := rd.class("Score"); ok {
 		if err := r.ForEach(scoreKey, func(obj unsafe.Pointer) error {
 			defer func() { current++; report() }()
-			return projectScore(rd, obj, &snap, count)
+			return projectScore(rd, obj, &snap, count, ownRulesets,
+				prof.MarketRulesetMinOnlineID, prof.ScoreJudgeColumns)
 		}); err != nil {
 			return hub.Snapshot{}, fmt.Errorf("投影 Score: %w", err)
 		}
@@ -190,10 +204,14 @@ func ownSkinsOf(forkID string) []forks.SkinFingerprint {
 	return nil
 }
 
-// skinIsOwn 判定皮肤是否命中 fork 专有指纹（Name+Creator 等值，§4.1）。
-func skinIsOwn(own []forks.SkinFingerprint, name, creator string) bool {
+// skinIsOwn 判定皮肤是否命中 fork 专有指纹（§4.1）：Guid 等值（固定
+// 常量类专有皮肤，D21）或 Name+Creator 双等值，任一通道命中即专有。
+func skinIsOwn(own []forks.SkinFingerprint, guid, name, creator string) bool {
 	for _, f := range own {
-		if f.Name == name && f.Creator == creator {
+		if f.Guid != "" && guid != "" && f.Guid == guid {
+			return true
+		}
+		if f.Name != "" && f.Creator != "" && f.Name == name && f.Creator == creator {
 			return true
 		}
 	}
@@ -214,7 +232,7 @@ func projectSkin(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(
 		return nil
 	}
 	name, creator := rd.objStr(obj, cls, "Name"), rd.objStr(obj, cls, "Creator")
-	if skinIsOwn(own, name, creator) {
+	if skinIsOwn(own, rd.guid(obj, cls, classKey, "ID"), name, creator) {
 		count(skipOwnSkin)
 		return nil
 	}
@@ -234,9 +252,11 @@ func projectSkin(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(
 	return nil
 }
 
-// projectScore 投影单个成绩行（跳过规则前置；全列含 User embedded、
-// Pauses 列表、Files=.osr usage 与 nullable 的 LegacyTotalScore/PP）。
-func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(string)) error {
+// projectScore 投影单个成绩行（跳过规则前置 + §5.4 兼容过滤；全列含
+// User embedded、Pauses 列表、Files=.osr usage 与 nullable 的
+// LegacyTotalScore/PP）。
+func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(string),
+	ownRulesets map[string]bool, marketRulesetMin int64, judgeCols []string) error {
 	const cls = "Score"
 	classKey, _ := rd.class(cls)
 	if rd.boolOrFalse(obj, cls, classKey, "DeletePending") {
@@ -247,6 +267,28 @@ func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func
 	if beatmapHash == "" {
 		count(skipScoreNoBeatmap)
 		return nil
+	}
+	rulesetName := rd.linkedShortName(obj, cls, "Ruleset")
+	// §5.4 D6：fork 专有规则集（OwnRulesets）的成绩——目标端无
+	// InstantiationInfo 可解析，整条不入 hub。
+	if ownRulesets[rulesetName] {
+		count(skipOwnRuleset)
+		return nil
+	}
+	// §5.4 D8：指向规则集市场行（OnlineID ≥ 注册下界）的成绩——市场
+	// 产物属宿主服务器，跨端无意义。下界 0 = 本 fork 无市场机制。
+	if marketRulesetMin > 0 &&
+		rd.linkedRulesetOnlineID(obj, cls, "Ruleset") >= marketRulesetMin {
+		count(skipMarketRuleset)
+		return nil
+	}
+	// §5.4 R7：判定档成绩（判定语义列任一非 0）——官方端重算会错，
+	//「能少不能错」。列缺省自然 0（非宿主 fork 不触发）。
+	for _, col := range judgeCols {
+		if rd.intOrZero(obj, cls, classKey, col) != 0 {
+			count(skipJudgedScore)
+			return nil
+		}
 	}
 	date := time.Time{}
 	if k, ok := rd.prop(cls, classKey, "Date"); ok {
@@ -259,7 +301,7 @@ func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func
 		ID:                           rd.guid(obj, cls, classKey, "ID"),
 		BeatmapHash:                  beatmapHash,
 		Hash:                         rd.objStr(obj, cls, "Hash"),
-		RulesetShortName:             rd.linkedShortName(obj, cls, "Ruleset"),
+		RulesetShortName:             rulesetName,
 		ClientVersion:                rd.objStr(obj, cls, "ClientVersion"),
 		TotalScore:                   rd.intOrZero(obj, cls, classKey, "TotalScore"),
 		TotalScoreWithoutMods:        rd.intOrZero(obj, cls, classKey, "TotalScoreWithoutMods"),
@@ -293,7 +335,10 @@ func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func
 }
 
 // projectBeatmapSet 投影单个谱面集行（跳过规则前置，命中即计数返回）。
-func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(string), isEz bool) error {
+// extPrefix 是本 fork 的外部托管集 Hash 前缀（Profile 数据化，D5——
+// 空 = 无此机制）；ownRulesets 供难度级过滤（D6）。
+func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(string),
+	extPrefix string, ownRulesets map[string]bool) error {
 	const cls = "BeatmapSet"
 	classKey, _ := rd.class(cls)
 
@@ -306,8 +351,8 @@ func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count
 		return nil
 	}
 	hash, _ := rd.str(obj, cls, classKey, "Hash")
-	if isEz && (len(hash) >= len(ezExtSetHashPrefix) && hash[:len(ezExtSetHashPrefix)] == ezExtSetHashPrefix ||
-		rd.intOrZero(obj, cls, classKey, "HostingKind") == 1) {
+	if extPrefix != "" && strings.HasPrefix(hash, extPrefix) ||
+		rd.intOrZero(obj, cls, classKey, "HostingKind") == 1 {
 		count(skipExternalSet)
 		return nil
 	}
@@ -344,7 +389,7 @@ func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count
 					if err != nil || bm == nil {
 						continue
 					}
-					if b, ok := projectBeatmap(rd, bm, count); ok {
+					if b, ok := projectBeatmap(rd, bm, count, ownRulesets); ok {
 						bs.Beatmaps = append(bs.Beatmaps, b)
 						if len(bs.Beatmaps) == 1 {
 							bs.Artist = b.Metadata.Artist
@@ -366,9 +411,10 @@ func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count
 	return nil
 }
 
-// projectBeatmap 投影单个难度行（C2 白名单全列：Hidden 跳过；父集跳过时
-// 难度随集消失，不重复计数）。
-func projectBeatmap(rd *reader, obj unsafe.Pointer, count func(string)) (hub.Beatmap, bool) {
+// projectBeatmap 投影单个难度行（C2 白名单全列：Hidden 跳过、fork 专有
+// 规则集难度跳过（D6，机制与成绩同源）；父集跳过时难度随集消失，
+// 不重复计数）。
+func projectBeatmap(rd *reader, obj unsafe.Pointer, count func(string), ownRulesets map[string]bool) (hub.Beatmap, bool) {
 	const cls = "Beatmap"
 	classKey, _ := rd.class(cls)
 	if rd.boolOrFalse(obj, cls, classKey, "Hidden") {
@@ -406,6 +452,10 @@ func projectBeatmap(rd *reader, obj unsafe.Pointer, count func(string)) (hub.Bea
 	bm.Difficulty = readEmbeddedDifficulty(rd, obj, cls)
 	bm.Metadata = readMetadata(rd, obj, cls)
 	bm.UserSettingsOffset = readUserSettingsOffset(rd, obj, cls)
+	if ownRulesets[bm.RulesetShortName] {
+		count(skipOwnRulesetDiff)
+		return hub.Beatmap{}, false
+	}
 	return bm, true
 }
 
@@ -734,6 +784,17 @@ func (rd *reader) linkedShortName(obj unsafe.Pointer, cls, linkProp string) stri
 	}
 	defer rd.r.ReleaseObject(target)
 	return rd.objStr(target, "Ruleset", "ShortName")
+}
+
+// linkedRulesetOnlineID 读链接列指向的 Ruleset 行 OnlineID（市场规则集
+// 判定输入，D8；空链接/缺列/缺目标列为 0——官方四规则集 0–3 不会触界）。
+func (rd *reader) linkedRulesetOnlineID(obj unsafe.Pointer, cls, linkProp string) int64 {
+	target, ok := rd.linked(obj, cls, linkProp)
+	if !ok {
+		return 0
+	}
+	defer rd.r.ReleaseObject(target)
+	return rd.objInt64OrZero(target, "Ruleset", "OnlineID")
 }
 
 func (rd *reader) guid(obj unsafe.Pointer, cls string, classKey uint32, name string) string {

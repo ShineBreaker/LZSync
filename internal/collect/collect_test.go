@@ -326,24 +326,30 @@ func skipCount(report Report, reason string) int {
 	return -1
 }
 
-// TestSkinIsOwnFingerprint fork 专有皮肤指纹规则单测（Name+Creator 双等值；
-// 注册表数据属 forks 包，越界不补——规则语义在此独立验证）。
+// TestSkinIsOwnFingerprint fork 专有皮肤指纹规则单测（Name+Creator 双等值
+// 或 Guid 等值二通道；注册表数据属 forks 包，越界不补——规则语义在此
+// 独立验证）。
 func TestSkinIsOwnFingerprint(t *testing.T) {
-	own := []forks.SkinFingerprint{{Name: "Ez Default", Creator: "Ez2Lazer"}}
+	own := []forks.SkinFingerprint{
+		{Name: "Ez Default", Creator: "Ez2Lazer"},
+		{Guid: "fc372386381d4f8e897ac1d89ef39f9c"},
+	}
 	for _, tc := range []struct {
-		name, creator string
-		want          bool
+		guid, name, creator string
+		want                bool
 	}{
-		{"Ez Default", "Ez2Lazer", true},
-		{"Ez Default", "someone", false}, // 仅 Name 命中不算
-		{"other", "Ez2Lazer", false},     // 仅 Creator 命中不算
-		{"My Skin", "maker", false},
+		{"", "Ez Default", "Ez2Lazer", true},
+		{"", "Ez Default", "someone", false}, // 仅 Name 命中不算
+		{"", "other", "Ez2Lazer", false},     // 仅 Creator 命中不算
+		{"", "My Skin", "maker", false},
+		{"fc372386381d4f8e897ac1d89ef39f9c", "any", "any", true},   // Guid 通道
+		{"deadbeefdeadbeefdeadbeefdeadbeef", "Not Ez", "anyone", false}, // 两通道均不命中
 	} {
-		if got := skinIsOwn(own, tc.name, tc.creator); got != tc.want {
-			t.Errorf("skinIsOwn(%q,%q) = %v，期望 %v", tc.name, tc.creator, got, tc.want)
+		if got := skinIsOwn(own, tc.guid, tc.name, tc.creator); got != tc.want {
+			t.Errorf("skinIsOwn(%q,%q,%q) = %v，期望 %v", tc.guid, tc.name, tc.creator, got, tc.want)
 		}
 	}
-	if skinIsOwn(nil, "Ez Default", "Ez2Lazer") {
+	if skinIsOwn(nil, "", "Ez Default", "Ez2Lazer") {
 		t.Error("空指纹清单不应命中")
 	}
 }
@@ -617,5 +623,116 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 	}
 	if tombs != 0 {
 		t.Errorf("无删除场景 tombstone = %d，期望 0", tombs)
+	}
+}
+
+// TestCollectEzCompatFilters §5.4 收集侧兼容过滤（Ez 库，块 2/7 验收）：
+// bms 规则集成绩与难度（D6）、判定档成绩（R7）、Ez 专有皮肤（D21）、
+// 外部托管集（D5，M2 已有）逐条断言计数与人话原因；被滤行不入 hub。
+func TestCollectEzCompatFilters(t *testing.T) {
+	extRoot := filepath.Join(t.TempDir(), "external", "bms-lib")
+	seed, err := fixture.EzDiffSeed(extRoot)
+	if err != nil {
+		t.Fatalf("EzDiffSeed: %v", err)
+	}
+	ref, err := fixture.Build(context.Background(), fixture.Spec{
+		ForkID: fixture.ForkEz2Lazer, SchemaVersion: fixture.VersionEzDisk,
+		DataDir: t.TempDir(), Seed: seed,
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build(ez): %v", err)
+	}
+
+	h := newHarness(t, nil)
+	report, err := h.runner.Collect(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	// 跳过逐条：计数与原因（内置六皮肤 Protected 是 fixture 恒播底噪）。
+	for reason, want := range map[string]int{
+		skipExternalSet:    1, // ExternalSets（D5）
+		skipOwnRulesetDiff: 1, // bms 集的 bms 难度（D6）
+		skipOwnRuleset:     1, // bms 规则集成绩（D6）
+		skipJudgedScore:    1, // JudgeMode=31/HealthMode=34（R7）
+		skipOwnSkin:        1, // Ez 专有皮肤 GUID 指纹（D21）
+		skipProtectedSkin:  6, // 内置六皮肤恒播
+	} {
+		if got := skipCount(report, reason); got != want {
+			t.Errorf("跳过[%s] = %d，期望 %d（Skips=%+v）", reason, got, want, report.Skips)
+		}
+	}
+
+	// 被滤行不入 hub：成绩仅剩标准行；皮肤无用户行（ezSkin 被滤）；
+	// 难度仅标准集 2 个（bms 难度被滤——beatmap 无 presence 面，实体入仓
+	// 计数断言）；集 = 标准 + bms 集壳。
+	for kind, want := range map[hub.EntityKind]int{
+		hub.KindCollection: 1, hub.KindBeatmapSet: 2,
+		hub.KindSkin: 0, hub.KindScore: 1,
+	} {
+		if got := h.presenceCount(fixture.ForkEz2Lazer, kind); got != want {
+			t.Errorf("presence(%s) = %d，期望 %d", kind, got, want)
+		}
+	}
+	if got := report.Entities[hub.KindBeatmap]; got != 2 {
+		t.Errorf("Entities[beatmap] = %d，期望 2（bms 难度被滤）", got)
+	}
+
+	// 幂等重跑：同一批跳过计数稳定（非首跑独有行为）。
+	report2, err := h.runner.Collect(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatalf("二次 Collect: %v", err)
+	}
+	for _, reason := range []string{skipOwnRuleset, skipJudgedScore, skipOwnSkin, skipOwnRulesetDiff} {
+		if got := skipCount(report2, reason); got != 1 {
+			t.Errorf("二次收集跳过[%s] = %d，期望 1", reason, got)
+		}
+	}
+}
+
+// TestCollectG0v0MarketRulesetScore §5.4-D8 收集侧：指向市场规则集行
+//（OnlineID ≥ 10）的成绩跳过并计数；正常官方规则集成绩照常入 hub。
+func TestCollectG0v0MarketRulesetScore(t *testing.T) {
+	seed, err := fixture.G0v0DiffSeed()
+	if err != nil {
+		t.Fatalf("G0v0DiffSeed: %v", err)
+	}
+	ref, err := fixture.Build(context.Background(), fixture.Spec{
+		ForkID: fixture.ForkG0v0, SchemaVersion: fixture.VersionG0v0,
+		DataDir: t.TempDir(), Seed: seed,
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build(g0v0): %v", err)
+	}
+
+	h := newHarness(t, nil)
+	report, err := h.runner.Collect(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := skipCount(report, skipMarketRuleset); got != 1 {
+		t.Errorf("跳过[%s] = %d，期望 1（Skips=%+v）", skipMarketRuleset, got, report.Skips)
+	}
+	// market 成绩（OnlineID=99001）不进 hub；标准行照常。
+	if got := h.presenceCount(fixture.ForkG0v0, hub.KindScore); got != 1 {
+		t.Errorf("presence(score) = %d，期望 1（market 行被滤）", got)
+	}
+	var onlineIDs []int64
+	rows, err := h.hub.DB().Query(
+		`SELECT json_extract(payload,'$.OnlineID') FROM score ORDER BY 1`)
+	if err != nil {
+		t.Fatalf("查 score payload: %v", err)
+	}
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			t.Fatalf("读 score OnlineID: %v", err)
+		}
+		onlineIDs = append(onlineIDs, v)
+	}
+	rows.Close()
+	if len(onlineIDs) != 1 || onlineIDs[0] == 99001 {
+		t.Errorf("hub score OnlineID = %v，期望仅标准行（-1），market 99001 不入", onlineIDs)
 	}
 }
