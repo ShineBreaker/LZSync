@@ -558,3 +558,98 @@ func TestApplySnapshotRejectsEmptyFork(t *testing.T) {
 		t.Fatal("空 fork_id 应报错")
 	}
 }
+
+// --- v2 版本化迁移：v1 旧库补齐、幂等、越界拒绝 ---
+
+// buildV1DB 手工构造一个 v1 时代的库文件（v1 DDL + meta=1 + 一行既有数据），
+// 模拟 schema v2 发布前落盘的合法中间态。
+func buildV1DB(t *testing.T, path string) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("开 v1 库: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		t.Fatalf("建 v1 表: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO meta(key,value) VALUES('schema_version',?)`, "1"); err != nil {
+		t.Fatalf("写 v1 版本号: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO collection(content_key, payload, origin_guid, origin_fork, first_seen, updated_at)
+VALUES(?,?,?,?,?,?)`, "Fav", `{"Name":"Fav"}`, "g1", "A", 111, 222); err != nil {
+		t.Fatalf("插 v1 收藏行: %v", err)
+	}
+}
+
+func TestMigrateV1ToV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.db")
+	buildV1DB(t, path)
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开 v1 库触发迁移: %v", err)
+	}
+	defer s.Close()
+	if v, err := s.SchemaVersion(); err != nil || v != SchemaVersion {
+		t.Fatalf("迁移后 schema 版本 = (%d,%v)，期望 (%d,nil)", v, err, SchemaVersion)
+	}
+	// v1 数据存活。
+	if _, _, ok, err := s.LoadCollection(context.Background(), "Fav"); err != nil || !ok {
+		t.Fatalf("迁移后收藏 = (%v,%v)，期望存在", ok, err)
+	}
+	// v2 新表就位：skin/score 可写可读（参数绑定直插验证）。
+	if _, err := s.DB().Exec(
+		`INSERT INTO skin(content_hash,payload,origin_guid,origin_fork,first_seen,updated_at)
+VALUES(?,?,?,?,?,?)`, "sk1", "{}", "g", "A", 0, 0); err != nil {
+		t.Fatalf("迁移后写 skin: %v", err)
+	}
+	if _, err := s.DB().Exec(
+		`INSERT INTO score(beatmap_hash,content_hash,payload,origin_guid,origin_fork,first_seen,updated_at)
+VALUES(?,?,?,?,?,?,?)`, "bh1", "sc1", "{}", "g", "A", 0, 0); err != nil {
+		t.Fatalf("迁移后写 score: %v", err)
+	}
+	if n := countRows(t, s,
+		`SELECT COUNT(*) FROM score WHERE beatmap_hash=? AND content_hash=?`, "bh1", "sc1"); n != 1 {
+		t.Errorf("score 组合键行数 = %d，期望 1", n)
+	}
+
+	// 幂等：重开不再迁移、数据全部存活。
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("重开已迁移库: %v", err)
+	}
+	defer s2.Close()
+	if v, err := s2.SchemaVersion(); err != nil || v != SchemaVersion {
+		t.Fatalf("重开后 schema 版本 = (%d,%v)", v, err)
+	}
+	if n := countRows(t, s2, `SELECT COUNT(*) FROM collection`); n != 1 {
+		t.Errorf("重开后 collection 行数 = %d，期望 1", n)
+	}
+	if n := countRows(t, s2, `SELECT COUNT(*) FROM skin`); n != 1 {
+		t.Errorf("重开后 skin 行数 = %d，期望 1", n)
+	}
+}
+
+func TestMigrateRejectsFutureVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.db")
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("开库: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		t.Fatalf("建 v1 表: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO meta(key,value) VALUES('schema_version',?)`, "99"); err != nil {
+		t.Fatalf("写版本号: %v", err)
+	}
+	db.Close()
+	if _, err := Open(path); err == nil {
+		t.Fatal("高于本程序支持的 schema 版本应拒绝打开")
+	}
+}

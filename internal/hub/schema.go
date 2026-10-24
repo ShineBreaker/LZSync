@@ -2,7 +2,7 @@ package hub
 
 // SchemaVersion 当前 hub.db schema 版本（版本化迁移自管，§3.4；hub 是
 // LZSync 自有格式，与游戏库 schema 完全无关，S3 不受影响）。
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // ddl 是 schema v1 全部建表语句（§4.4 表族）。时间戳一律 Unix 毫秒。
 // 契约要点：
@@ -99,3 +99,38 @@ CREATE TABLE IF NOT EXISTS collect_log(
   tombstone_added INTEGER NOT NULL
 );
 `
+
+// ddlV2 是 schema v2 增量（M2 实体扩面）：新表 skin 与 score。只做加法，
+// v1 语句一字不改——已落盘的 v1 库是合法中间态，由迁移链补齐到 v2。
+// 全部 IF NOT EXISTS，中断重跑幂等。实体 Files 沿用 v1 形态内联进 payload
+// JSON（不做 skin_file 关联表：与 beatmap_set 的 Files 载荷形态一致）。
+// presence/tombstone 天然按 kind 泛化，无需新表——skin 按内容键 Hash、
+// score 按组合内容键（ScoreContentKey 编码）各占一席。
+const ddlV2 = `
+CREATE TABLE IF NOT EXISTS skin(
+  content_hash TEXT PRIMARY KEY,
+  payload      TEXT NOT NULL,
+  origin_guid  TEXT NOT NULL,
+  origin_fork  TEXT NOT NULL,
+  first_seen   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+
+-- score 内容键 = (BeatmapHash, Hash) 组合键列（§4.2 第一层），不做单列
+-- 拼接主键。
+CREATE TABLE IF NOT EXISTS score(
+  beatmap_hash TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  payload      TEXT NOT NULL,
+  origin_guid  TEXT NOT NULL,
+  origin_fork  TEXT NOT NULL,
+  first_seen   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY(beatmap_hash, content_hash)
+);
+`
+
+// migrations 是版本化迁移链：migrations[i] 把库从 schema 版本 i+1 升到
+// i+2（migrations[0] = v1→v2）。新增版本 = 追加一段 DDL 并抬高
+// SchemaVersion；禁止改写既有条目（旧库可能已按其落盘）。
+var migrations = []string{ddlV2}

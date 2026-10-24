@@ -47,7 +47,9 @@ func Open(path string) (*Store, error) {
 }
 
 // migrate 在单事务内执行版本化迁移（§3.4：hub 是 LZSync 自有格式，与游戏
-// 库 schema 无关）。ddl 全部 IF NOT EXISTS，重开/中断重跑天然幂等。
+// 库 schema 无关）：先落 v1 基础表（ddl 全 IF NOT EXISTS，新库需要、旧库
+// 无害），再沿 migrations 链逐级升到 SchemaVersion。链上 DDL 全幂等，
+// 重开/中断重跑安全。
 func (s *Store) migrate() error {
 	ctx := context.Background()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -61,24 +63,31 @@ func (s *Store) migrate() error {
 	var v string
 	err = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&v)
 	switch {
-	case errors.Is(err, sql.ErrNoRows): // 新库：落初始版本号
+	case errors.Is(err, sql.ErrNoRows): // 新库：v1 基础表已建，从初始版本起走链
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO meta(key,value) VALUES('schema_version',?)`,
-			strconv.Itoa(SchemaVersion)); err != nil {
+			`INSERT INTO meta(key,value) VALUES('schema_version','1')`); err != nil {
 			return fmt.Errorf("hub: 写 schema 版本: %w", err)
 		}
+		v = "1"
 	case err != nil:
 		return fmt.Errorf("hub: 读 schema 版本: %w", err)
 	}
-	if v != "" {
-		cur, convErr := strconv.Atoi(v)
-		if convErr != nil {
-			return fmt.Errorf("hub: schema 版本值 %q 非法: %w", v, convErr)
+	cur, convErr := strconv.Atoi(v)
+	if convErr != nil {
+		return fmt.Errorf("hub: schema 版本值 %q 非法: %w", v, convErr)
+	}
+	if cur < 1 || cur > SchemaVersion {
+		return fmt.Errorf("hub: 库 schema 版本 %d 超出本程序支持范围 [1,%d]，请升级 LZSync", cur, SchemaVersion)
+	}
+	for cur < SchemaVersion {
+		if _, err := tx.ExecContext(ctx, migrations[cur-1]); err != nil {
+			return fmt.Errorf("hub: 迁移 v%d→v%d: %w", cur, cur+1, err)
 		}
-		if cur > SchemaVersion {
-			return fmt.Errorf("hub: 库 schema 版本 %d 高于本程序支持的 %d，请升级 LZSync", cur, SchemaVersion)
+		cur++
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE meta SET value=? WHERE key='schema_version'`, strconv.Itoa(cur)); err != nil {
+			return fmt.Errorf("hub: 写 schema 版本 %d: %w", cur, err)
 		}
-		// cur < SchemaVersion 的向前迁移链待 v2 出现时在此追加（v1 是初始版本）。
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("hub: 提交迁移: %w", err)
