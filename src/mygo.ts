@@ -119,6 +119,7 @@ export interface PlanItem {
   SkipReason: string;
   NeedsConfirm: boolean;
   Restore: boolean;
+  OldContentKey: string;
 }
 
 /** ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。 */
