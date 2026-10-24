@@ -21,21 +21,24 @@ typecheck:
 generate:
     bun run generate
 
-# mygo build 完整打包：tsc + vite build + go build → build/linux-amd64/
-package:
+# mygo build 完整编译打包：tsc + vite build + go build → build/linux-amd64/
+build:
     bun run build
 
+# guix 打包（先 build）：装配进 store 并 wrap 出独立可运行环境
+package: build
+    guix build -f lzsync.scm
+
 # 四道门禁一次跑全（等价 AGENTS.md 的全量验收）
-gates: go-check test typecheck package
+gates: go-check test typecheck build
 
-# webview 运行库路径：guix 无全局库路径，取 manifest 环境 profile 的 lib
-#（direnv use guix 设 GUIX_ENVIRONMENT；未进 direnv 环境时启动会报缺 libglib）
-webview-libs := "$GUIX_ENVIRONMENT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-# 打包并启动主程序（调试入口：窗口打开即最新构建）
-run: package
-    LD_LIBRARY_PATH={{webview-libs}} ./build/linux-amd64/lzsync
+# 启动主程序（调试入口）：优先跑 guix 包的 wrapped binary（自带运行环境），
+# guix 不可用/打包失败时回退直跑 build 产物（经 manifest 环境补 webview 库）。
+# webview 运行库经 guix shell 供给——direnv 的 use guix 只导出 search-paths
+# 不设 GUIX_ENVIRONMENT，且 just 的 recipe 以 sh -eu 运行、unset 即报错。
+run: build
+    out=$(guix build -f lzsync.scm 2>/dev/null) && exec "$out/bin/lzsync" || guix shell -m manifest.scm -- sh -c 'LD_LIBRARY_PATH="$GUIX_ENVIRONMENT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./build/linux-amd64/lzsync'
 
 # mygo dev 热重载开发模式（vite dev server + 5173，窗口同步需要 webview 库）
 dev:
-    LD_LIBRARY_PATH={{webview-libs}} bun run dev
+    guix shell -m manifest.scm -- sh -c 'LD_LIBRARY_PATH="$GUIX_ENVIRONMENT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" bun run dev'

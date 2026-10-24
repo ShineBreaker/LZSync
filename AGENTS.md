@@ -30,11 +30,11 @@ just go-check    # go build ./... && go vet ./...
 just test        # go test ./... -count=1（含 itests 集成断言）
 just typecheck   # tsc --noEmit
 just generate    # mygo generate（改 appsvc Bind 面后重生 src/mygo.ts）
-just package     # mygo build 完整打包 → build/linux-amd64/
+just build       # mygo build 完整编译打包 → build/linux-amd64/
+just package     # guix 打包（先 build；lzsync.scm 装配进 store，wrap 好运行环境）
 just gates       # 四道门禁一次跑全
-just run         # 打包并启动主程序（调试入口）
+just run         # 启动主程序（调试入口）：优先 guix 包 binary，回退直跑 build 产物
 just dev         # mygo dev 热重载（vite 5173）
-guix build -f lzsync.scm   # 先 just package；产 store 包（wrap 好 webview/realm 环境，可独立运行/安装）
 ```
 
 ## 架构边界与硬约束
