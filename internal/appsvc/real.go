@@ -130,6 +130,7 @@ func newRealBackend(deps Deps, prog ProgressSink) (*Backend, error) {
 		Library:  &realLibrary{deps: deps, reg: reg},
 		Compare:  cmp,
 		Sync:     &realSync{deps: deps, reg: reg, cmp: cmp, prog: prog},
+		Export:   newRealExport(deps, reg),
 		Settings: &realSettings{deps: deps},
 		Mode:     "real",
 		Reason:   "",

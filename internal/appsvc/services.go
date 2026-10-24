@@ -1,8 +1,8 @@
 // Package appsvc 是 mygo Bind 的 UI 服务层（design.md §3.1、§1.4、§6）：
-// 四服务（库管理 / 对比预览 / 同步执行 / 设置）+ 进度事件 + 真实/Mock
-// 后端切换（M-4）。方法签名保持可 JSON 序列化（mygo typed bindings 边界）；
-// 长任务进度经构造时注入的 ProgressSink 推送（由 main 装配桥接
-// mygo.NewEvent，M-2），mygo 的方法调用本身跑在独立 goroutine 上，
+// 五服务（库管理 / 对比预览 / 同步执行 / 容器导出 / 设置）+ 进度事件 +
+// 真实/Mock 后端切换（M-4）。方法签名保持可 JSON 序列化（mygo typed
+// bindings 边界）；长任务进度经构造时注入的 ProgressSink 推送（由 main
+// 装配桥接 mygo.NewEvent，M-2），mygo 的方法调用本身跑在独立 goroutine 上，
 // UI 线程不被阻塞。
 //
 // 分层纪律：appsvc 是薄服务层——库身份走 forks、对账查询走 hub/diff、
@@ -184,16 +184,33 @@ type SyncService interface {
 	RestoreBackup(forkID, backupPath string) error
 }
 
+// ExportResult 容器导出结果（§7-M3-5 路线④）。拉起失败不吞路径：容器
+// 文件已生成，人话提示进 Note，用户总能手动导入。
+type ExportResult struct {
+	Paths []string // 生成的容器绝对路径（临时目录）
+	Note  string   // 拉起结果人话提示；空 = 已全部交给系统默认程序
+}
+
+// ExportService 容器降级路径（§7-M3-5 路线④：不碰 realm，容器导入）。
+type ExportService interface {
+	// ExportContainers 按 kind 从 hub 真相读取 payload，与仓内实体一起生成
+	// .osz/.osk/.osr 到临时目录，并以系统默认打开方式把容器交给目标 fork
+	// 客户端（lazer 启动参数导入，go-realm-options §5-1）。仅谱面集/皮肤/
+	// 成绩有容器形态。
+	ExportContainers(forkID string, kind hub.EntityKind, contentKeys []string) (ExportResult, error)
+}
+
 // SettingsService 设置（§6.4 M1 骨架：只读显示）。
 type SettingsService interface {
 	Get() (SettingsInfo, error)
 }
 
-// Backend 聚合四服务（main 装配后逐字段 BindAs 暴露给前端）。
+// Backend 聚合服务（main 装配后逐字段 BindAs 暴露给前端）。
 type Backend struct {
 	Library  LibraryService
 	Compare  CompareService
 	Sync     SyncService
+	Export   ExportService
 	Settings SettingsService
 	Mode     string // SettingsInfo.Mode 的来源
 	Reason   string

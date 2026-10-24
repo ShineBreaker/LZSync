@@ -29,6 +29,7 @@ type mockBackend struct {
 	lib   *mockLibrary
 	cmp   *mockCompare
 	sync  *mockSync
+	exp   *mockExport
 	mode  string
 	reasn string
 }
@@ -40,20 +41,51 @@ func newMockBackend(mode, reason string, prog ProgressSink) *Backend {
 	cmp := &mockCompare{createdAt: time.Now()}
 	sync := &mockSync{prog: prog}
 	b := &mockBackend{
-		lib:  &mockLibrary{},
-		cmp:  cmp,
-		sync: sync,
-		mode: mode, reasn: reason,
+		lib:   &mockLibrary{},
+		cmp:   cmp,
+		sync:  sync,
+		exp:   &mockExport{},
+		mode:  mode, reasn: reason,
 	}
 	sync.cmp = cmp
 	return &Backend{
 		Library:  b.lib,
 		Compare:  cmp,
 		Sync:     sync,
+		Export:   b.exp,
 		Settings: b,
 		Mode:     mode,
 		Reason:   reason,
 	}
+}
+
+// --- 容器导出（§7-M3-5 路线④ Mock：只演示分支，不触碰文件系统与进程） ---
+
+type mockExport struct{}
+
+func (m *mockExport) ExportContainers(forkID string, kind hub.EntityKind, contentKeys []string) (ExportResult, error) {
+	if forkID == "" {
+		return ExportResult{}, errors.New("appsvc: 导出需要目标 fork")
+	}
+	ext := ""
+	switch kind {
+	case hub.KindBeatmapSet:
+		ext = ".osz"
+	case hub.KindSkin:
+		ext = ".osk"
+	case hub.KindScore:
+		ext = ".osr"
+	default:
+		return ExportResult{}, fmt.Errorf("appsvc: %s 无容器形态（仅谱面集/皮肤/成绩可导出，§7-M3-5）", kind)
+	}
+	if len(contentKeys) == 0 {
+		return ExportResult{}, errors.New("appsvc: 未指定要导出的内容键")
+	}
+	paths := make([]string, 0, len(contentKeys))
+	for i, k := range contentKeys {
+		paths = append(paths, fmt.Sprintf("/mock/export/lzsync-export-mock/%02d-%s%s", i+1, shortKey(k), ext))
+	}
+	return ExportResult{Paths: paths, Note: "Mock 后端仅演示：未生成真实容器、未拉起客户端"}, nil
 }
 
 // --- 库管理 ---

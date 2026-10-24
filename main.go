@@ -1,5 +1,5 @@
 // LZSync 应用装配（design.md §3.1/§3.4/§1.4）：解析平台数据目录（P-3）→
-// 装配 hub/store/snapshots/backups/guard 协作依赖 → 构造 appsvc 四服务并
+// 装配 hub/store/snapshots/backups/guard 协作依赖 → 构造 appsvc 五服务并
 // BindAs 暴露给前端（M-1）→ 真实/Mock 后端切换（M-4：native 库不可用或
 // LZSYNC_MOCK=1 时降级 Mock，P-2 不闪退）→ 同步进度经 mygo 事件推送（M-2）。
 package main
@@ -39,6 +39,7 @@ func main() {
 	mygo.BindAs("LibraryService", backend.Library)
 	mygo.BindAs("CompareService", backend.Compare)
 	mygo.BindAs("SyncService", backend.Sync)
+	mygo.BindAs("ExportService", backend.Export)
 	mygo.BindAs("SettingsService", backend.Settings)
 
 	mygo.App.WhenReady(func() {
