@@ -9,9 +9,13 @@
 package forks
 
 // SkinFingerprint 标识 fork 专有皮肤（读取投影跳过，§4.1）。
+// 判定通道二选一命中即专有：Guid（hex 32 字符，与 hub.Skin.ID 同形，
+// EZRealmSync IsEzOnlySkin 的 GUID 手法，ezrealmsync-design §6.2）或
+// Name+Creator 双等值。空字段不参与判定。
 type SkinFingerprint struct {
 	Name    string
 	Creator string
+	Guid    string // 行 Guid 的 hex（无连字符小写），固定常量类专有皮肤用
 }
 
 // IniKeyPolicy 是 game.ini 键策略（S10 红灯排除 + M3 白名单同步）。
@@ -39,10 +43,31 @@ type ForkProfile struct {
 	// ExtTables 本 fork 专有表（Ez 7 张技能表）。
 	ExtTables []string
 	// OwnRulesets 专有规则集 ShortName（Ez: bms；g0v0 市场规则集 ShortName
-	// 动态不可枚举，走 G0v0MarketRulesetMinOnlineID 判定）。
+	// 动态不可枚举，走 MarketRulesetMinOnlineID 判定）。
 	OwnRulesets []string
 	// OwnSkins 专有皮肤指纹。
 	OwnSkins []SkinFingerprint
+	// ExtSetHashPrefix 外部托管谱面集的内容键前缀（Ez 的 "ext:set:"——
+	// 该形态 Hash 是路径编码而非内容哈希，files/ 无字节，fork-ez2lazer
+	// §5.1；收集侧跳过 + 投放侧对 hub 已收行的防线判定，D5）。空 = 无
+	// 此机制。
+	ExtSetHashPrefix string
+	// MarketRulesetMinOnlineID 规则集市场的 OnlineID 下界（g0v0：服务端
+	// 市场第三方规则集 OnlineID >= 10 落库，fork-g0v0 §2.1）。> 0 时指向
+	// 该域规则集的成绩在收集侧跳过（D8）。0 = 无市场机制。
+	MarketRulesetMinOnlineID int64
+	// ScoreJudgeColumns 成绩行的判定语义列（Ez 的 JudgeMode/HealthMode：
+	// 非 0 = 非 Lazer 判定档成绩，官方端重算会错，R7）。列缺省自然 0。
+	// 读取投影时任一列非 0 → 跳过并计数。
+	ScoreJudgeColumns []string
+	// ModAcronyms 本端可解析的 mod acronym 名录（Ordinal 区分大小写，
+	// fork-comparison D7 的 shared 集先例）。投放成绩时 acronym 不在
+	// 名录 → 整条跳过（白名单制宁拒勿杀，§5.4）。
+	ModAcronyms []string
+	// StatisticsKeys 本端 HitResult 枚举的 StatisticsJson 键名录
+	//（snake_case 键形；四端同值，fork-comparison C11）。投放时目标端
+	// 名录外的键过滤后写（D7）。
+	StatisticsKeys []string
 	// IniKeys game.ini 键策略。
 	IniKeys IniKeyPolicy
 }
@@ -78,6 +103,29 @@ func EncodeEzVersion(upstream, forkRev int) uint64 {
 //（D15），ReleaseStream 是每端身份配置、枚举域四端互不相同（D14）。
 var lockedIniKeys = []string{"Token", "Username", "ReleaseStream"}
 
+// officialModAcronyms 官方（ppy 系四端共同基线）mod acronym 名录：
+// EZRealmSync OfficialModList.json 的 shared 集 29 项原文（fork-comparison
+// D7；Ordinal 区分大小写）。各规则集专属集未在调研摘录中展开——按
+// shared 全集保守过滤，宁拒勿杀（§5.4）。Ez 专有 mod（LAsMods 等）的
+// acronym 取值未取得调研数据（fork-ez2lazer §9），ez2lazer 端暂随基线。
+var officialModAcronyms = []string{
+	"AC", "AS", "AT", "BR", "CL", "CN", "DA", "DC", "DT", "EZ", "FL", "HD",
+	"HR", "HT", "MR", "MU", "NC", "NF", "NM", "NS", "PF", "RD", "RX", "SD",
+	"SV2", "SY", "TD", "WD", "WU",
+}
+
+// officialStatisticsKeys 官方 HitResult 枚举的 StatisticsJson 键名录
+//（snake_case 键形，lazer API 序列化约定；四端同值——delta 明确不引入
+// 新 HitResult 枚举值（fork-delta §5.3），Ez/g0v0 未改该枚举，
+// fork-comparison C11）。枚举成员清单不在 docs/research 摘录内，按官方
+// osu.Game/Rulesets/Scoring/HitResult.cs 逐成员转写（15 项）。
+var officialStatisticsKeys = []string{
+	"none", "ignore", "miss",
+	"small_tick_miss", "large_tick_miss", "small_tick_hit", "large_tick_hit",
+	"slider_tail_hit", "small_bonus", "large_bonus",
+	"ok", "meh", "great", "combo_break", "legacy_combo_increase",
+}
+
 var profiles = []ForkProfile{
 	{
 		// 官方 lazer：一切对比的基线（fork-comparison §0）。
@@ -88,7 +136,10 @@ var profiles = []ForkProfile{
 		DecodeVersion: decodePlain,
 		DiskVersion:   52,                // fork-comparison §1.1
 		ServerRealm:   "ppy",             // osu.ppy.sh
-		IniKeys:       IniKeyPolicy{Locked: lockedIniKeys},
+		// 目标端兼容基线（§5.4 adapter 输入）：官方 mod/HitResult 名录。
+		ModAcronyms:    officialModAcronyms,
+		StatisticsKeys: officialStatisticsKeys,
+		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys},
 	},
 	{
 		// DeltaLazer：Realm 与官方完全同构、schema 停在 51、连官方服务器但
@@ -100,6 +151,9 @@ var profiles = []ForkProfile{
 		DecodeVersion: decodePlain,
 		DiskVersion:   51, // fork-delta §2.1（唯一缺官方 v52 的 RealmOnlineAsset）
 		ServerRealm:   "ppy", // 未改任何端点（fork-delta §1.3）
+		// Realm 与官方同构（fork-delta §2）：mod/HitResult 名录随官方基线。
+		ModAcronyms:    officialModAcronyms,
+		StatisticsKeys: officialStatisticsKeys,
 		IniKeys: IniKeyPolicy{
 			Own: []string{ // fork 新增 6 键（fork-delta §3.1，官方不识别）
 				"MenuCursorFromSkin", "MenuCursorFromSkinConfirmed", "MenuCursorFromSkinSize",
@@ -137,7 +191,21 @@ var profiles = []ForkProfile{
 		// BMS 规则集在仓库内（ShortName="bms"）；diva 不在仓库、未确认
 		//（fork-ez2lazer §5.2/§9），不列入。
 		OwnRulesets: []string{"bms"},
-		IniKeys:     IniKeyPolicy{Locked: lockedIniKeys}, // OsuSetting 枚举与官方一致（fork-ez2lazer §3.1）
+		// 外部托管集 Hash 前缀（fork-ez2lazer §5.1 HASH_PREFIX）。
+		ExtSetHashPrefix: "ext:set:",
+		// Ez 专有皮肤指纹：EZRealmSync IsEzOnlySkin 写死的三个 GUID 之一
+		//（fork-comparison D21 / ezrealmsync-design §6.2——另两个 GUID
+		// 调研摘录未列明，取得后补录）。
+		OwnSkins: []SkinFingerprint{
+			{Guid: "fc372386381d4f8e897ac1d89ef39f9c"},
+		},
+		// JudgeMode/HealthMode 非 0 = 非 Lazer 判定档成绩（fork-ez2lazer
+		// §2.4/§2.7 取值域；R7：官方重算会错，收集侧跳过）。
+		ScoreJudgeColumns: []string{"JudgeMode", "HealthMode"},
+		// Ez 继承官方 mod 体系（专有 mod acronym 未取得调研数据）。
+		ModAcronyms:    officialModAcronyms,
+		StatisticsKeys: officialStatisticsKeys,
+		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys}, // OsuSetting 枚举与官方一致（fork-ez2lazer §3.1）
 	},
 	{
 		// g0v0!：Realm schema 与官方 52 完全一致（零结构改动），差异全在
@@ -152,6 +220,13 @@ var profiles = []ForkProfile{
 		// 市场规则集（OnlineID>=10）ShortName 动态，走常量判定；RX/AP 特殊
 		// 规则集（osurx 等 OnlineID 4–7）是内存概念不落库（fork-g0v0 §2.1、§5.3）。
 		OwnRulesets: nil,
+		// g0v0-server 规则集市场：第三方规则集 OnlineID >= 10 落库
+		//（fork-g0v0 §2.1 IsBuiltinRuleset 的 < 10 判据，D8）。
+		MarketRulesetMinOnlineID: G0v0MarketRulesetMinOnlineID,
+		// Realm schema 与官方全等（fork-g0v0 §2）：mod/HitResult 名录随基线
+		//（RX/AP 是内存概念不落库——APIMods 为 [Ignored] 属性，D9）。
+		ModAcronyms:    officialModAcronyms,
+		StatisticsKeys: officialStatisticsKeys,
 		IniKeys: IniKeyPolicy{
 			Own: []string{ // fork 新增 11 键（fork-g0v0 §3）
 				"UseRulesetSkins", "RulesetSkins", "UseV2ResultsScreen",

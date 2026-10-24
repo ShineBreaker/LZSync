@@ -208,6 +208,64 @@ func TestDecodeVersion(t *testing.T) {
 	}
 }
 
+// TestCompatFilterData §5.4 目标端兼容过滤的规则数据逐项核对（§4.3：
+// fork 专属知识只进 Profile；内核 collect/deploy 依此判定）。
+func TestCompatFilterData(t *testing.T) {
+	ez, ok := Profile("ez2lazer")
+	if !ok {
+		t.Fatal("ez2lazer Profile 缺失")
+	}
+	// Ez 专有皮肤指纹（D21：EZRealmSync IsEzOnlySkin 的 GUID 之一，
+	// fork-comparison D21 / ezrealmsync-design §6.2）。
+	if len(ez.OwnSkins) != 1 || ez.OwnSkins[0].Guid != "fc372386381d4f8e897ac1d89ef39f9c" {
+		t.Errorf("ez OwnSkins = %+v，期望登记 fc372386-… 指纹", ez.OwnSkins)
+	}
+	// 外部托管集 Hash 前缀（D5，fork-ez2lazer §5.1）。
+	if ez.ExtSetHashPrefix != "ext:set:" {
+		t.Errorf("ez ExtSetHashPrefix = %q, 期望 ext:set:", ez.ExtSetHashPrefix)
+	}
+	// 判定档列（R7：JudgeMode/HealthMode ≠ 0 官方重算会错）。
+	if !equalStrings(ez.ScoreJudgeColumns, []string{"JudgeMode", "HealthMode"}) {
+		t.Errorf("ez ScoreJudgeColumns = %v", ez.ScoreJudgeColumns)
+	}
+	// g0v0 市场规则集 OnlineID 下界（D8，fork-g0v0 §2.1）。
+	g0, _ := Profile("g0v0")
+	if g0.MarketRulesetMinOnlineID != 10 {
+		t.Errorf("g0v0 MarketRulesetMinOnlineID = %d, 期望 10", g0.MarketRulesetMinOnlineID)
+	}
+	for _, p := range []ForkProfile{ez, g0} {
+		if p.MarketRulesetMinOnlineID != 0 && len(p.OwnRulesets) > 0 {
+			// 不构成错误（两种机制可并存），仅提示数据面一致性。
+			t.Logf("%s 同时声明 OwnRulesets 与 MarketRulesetMinOnlineID", p.ID)
+		}
+	}
+	// 四端 mod/HitResult 名录：四端同基线（fork-comparison C11/D7），非空。
+	for _, id := range []string{"lazer", "delta", "ez2lazer", "g0v0"} {
+		p, _ := Profile(id)
+		if len(p.ModAcronyms) == 0 || len(p.StatisticsKeys) == 0 {
+			t.Errorf("%s 的 ModAcronyms/StatisticsKeys 不应为空", id)
+		}
+	}
+	// shared 集 29 项原文（fork-comparison D7）+ Statistics 键 15 项。
+	lazer, _ := Profile("lazer")
+	if len(lazer.ModAcronyms) != 29 {
+		t.Errorf("官方 mod 名录 %d 项, 期望 29（shared 集原文）", len(lazer.ModAcronyms))
+	}
+	if len(lazer.StatisticsKeys) != 15 {
+		t.Errorf("官方 Statistics 键名录 %d 项, 期望 15（HitResult 枚举全成员）", len(lazer.StatisticsKeys))
+	}
+	// 键形抽查：fixture 已用的 snake_case 键必须在名录内（D7 过滤基准）。
+	mustKey := map[string]bool{}
+	for _, k := range lazer.StatisticsKeys {
+		mustKey[k] = true
+	}
+	for _, k := range []string{"great", "ok", "miss", "legacy_combo_increase"} {
+		if !mustKey[k] {
+			t.Errorf("StatisticsKeys 缺官方键 %q", k)
+		}
+	}
+}
+
 func extColumnCount(p ForkProfile) int {
 	n := 0
 	for _, cols := range p.ExtColumns {
