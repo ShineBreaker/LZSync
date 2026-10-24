@@ -14,6 +14,7 @@ import (
 	"lzsync/internal/forks"
 	"lzsync/internal/guard"
 	"lzsync/internal/hub"
+	"lzsync/internal/inisettings"
 	"lzsync/internal/realmc"
 )
 
@@ -28,6 +29,9 @@ type Deps struct {
 	Files     *filestore.Engine
 	Snapshots *forks.SnapshotStore
 	Guard     *guard.Guard
+	// GameIni 是 game.ini 白名单键快照仓（hub 目录自有文件，§3.1
+	// inisettings）。nil = 本次收集不含 ini 面（既有调用方兼容）。
+	GameIni *inisettings.Store
 }
 
 // Stage 收集进度阶段（§3.2 收集三步）。
@@ -49,6 +53,9 @@ type Report struct {
 	FilesAdopted    int                        // 收仓成功文件数
 	FilesSkipped    int                        // 收仓跳过数（能力探测整体跳过等）
 	AdoptModeCounts map[filestore.LinkMode]int // 收仓后各链接形态计数（降级统计）
+	// IniKeysCollected 收集的 game.ini 白名单键数（-1 = 源端无 game.ini，
+	// 从未启动过客户端的正常态；0 = Deps.GameIni 未配置）。
+	IniKeysCollected int
 }
 
 // Runner 执行对单个 fork 的完整收集。
@@ -123,6 +130,24 @@ func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog Prog
 	}
 	report.Entities = applyRes.EntitiesWritten
 	report.Skips = snap.Skips
+
+	// ③b game.ini 白名单键入快照仓（文件级、投影事务之后：投影失败则
+	// ini 快照同样不落）。源端无 game.ini 是从未启动过客户端的正常态，
+	// 计数不静默（§1.5-4）。
+	if r.deps.GameIni != nil {
+		n, gerr := collectGameIni(target, r.deps.GameIni)
+		if gerr != nil {
+			return report, fmt.Errorf("collect: 收 game.ini 白名单键: %w", gerr)
+		}
+		if n < 0 {
+			report.IniKeysCollected = -1
+			report.Skips = append(report.Skips, hub.SkipStat{
+				Reason: "源端无 game.ini（从未启动过客户端，ini 键未收集）", Count: 1,
+			})
+		} else {
+			report.IniKeysCollected = n
+		}
+	}
 
 	// ④ 顺手采集结构档案（采集失败只记日志——坏文件按不存在处理，§4.3；
 	// 失败不阻断收集主体）。
