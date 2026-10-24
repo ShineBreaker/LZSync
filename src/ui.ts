@@ -66,6 +66,38 @@ export function categoryLabel(cat: string): string {
   }
 }
 
+/** 实体类型中文标注（§6.2 数据类型 Tab / 行键显示）。 */
+export function kindLabel(kind: string): string {
+  switch (kind) {
+    case "beatmap_set":
+      return "谱面集";
+    case "beatmap":
+      return "难度";
+    case "collection":
+      return "收藏夹";
+    case "skin":
+      return "皮肤";
+    case "score":
+      return "成绩";
+    default:
+      return kind;
+  }
+}
+
+/** 计划动作中文标注（§6.2 计划摘要 / §6.3 执行报告）。 */
+export function actionLabel(action: string): string {
+  switch (action) {
+    case "create":
+      return "新建";
+    case "update":
+      return "就地更新";
+    case "version-replace":
+      return "版本替换";
+    default:
+      return action;
+  }
+}
+
 /** 徽标色类。 */
 export function categoryClass(cat: string): string {
   return `badge badge-${cat}`;

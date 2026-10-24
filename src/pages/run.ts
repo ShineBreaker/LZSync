@@ -4,7 +4,7 @@
 
 import { CompareService, LibraryService, SyncService } from "../mygo";
 import type { ProgressEvent } from "../mygo";
-import { clear, el, errText, fmtBytes, message, text } from "../ui";
+import { actionLabel, clear, el, errText, fmtBytes, kindLabel, message, text } from "../ui";
 
 export async function renderRun(root: HTMLElement): Promise<void> {
   clear(root);
@@ -86,7 +86,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
 
   function collectSummary(report: Awaited<ReturnType<typeof SyncService.collect>>): string {
     const ents = Object.entries(report.Entities ?? {})
-      .map(([kind, n]) => `${kind} ${n}`)
+      .map(([kind, n]) => `${kindLabel(kind)} ${n}`)
       .join(" · ");
     const skips = (report.Skips ?? [])
       .map((s) => `${s.Reason}×${s.Count}`)
@@ -115,7 +115,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
     const items = [
       check("守卫状态", guardOk ? "通过（目标 fork 进程未运行）" : `目标 fork 运行中（${targetCard?.RunningNames.join("、")}），请先关闭游戏`, guardOk),
       check("备份目标", targetCard ? `${targetCard.RealmPath} 写前自动备份（S2）` : "目标库未注册，执行时将被拦截", true),
-      check("链接形态", "按 §5.3 自动分级：符号链接 → 硬链接（同卷）→ 复制（M1 收藏夹无 files 阶段）", true),
+      check("链接形态", "按 §5.3 自动分级：符号链接 → 硬链接（同卷）→ 复制（谱面集/皮肤/成绩的 files 阶段）", true),
       check("计划摘要", `目标 ${plan.TargetFork} · 动作 ${actions.length} 项 · 计入跳过 ${skips.length} 项`, true),
     ];
     for (const it of items) {
@@ -173,13 +173,25 @@ export async function renderRun(root: HTMLElement): Promise<void> {
       return;
     }
     const box = el("div", { class: "card report-card" }, [el("h3", {}, [text("投放报告")])]);
-    const appliedBy = new Map<string, number>();
+    // applied 按类计数分组（§6.3：按类、按原因分组），组内按动作细分。
+    const appliedByKind = new Map<string, Map<string, number>>();
     for (const a of report.Applied ?? []) {
-      const k = `${a.Kind}/${a.Action}`;
-      appliedBy.set(k, (appliedBy.get(k) ?? 0) + 1);
+      const kind = kindLabel(String(a.Kind));
+      const act = actionLabel(String(a.Action));
+      const byAct = appliedByKind.get(kind) ?? new Map<string, number>();
+      byAct.set(act, (byAct.get(act) ?? 0) + 1);
+      appliedByKind.set(kind, byAct);
     }
-    const appliedParts = [...appliedBy.entries()].map(([k, n]) => `${k} ${n}`);
-    box.append(kvRow("已提交批 applied", appliedParts.length > 0 ? appliedParts.join(" · ") : "无"));
+    const appliedParts = [...appliedByKind.entries()].map(([kind, byAct]) => {
+      const acts = [...byAct.entries()].map(([act, n]) => `${act} ${n}`).join(" · ");
+      return `${kind}：${acts}`;
+    });
+    box.append(kvRow("已提交批 applied", appliedParts.length > 0 ? appliedParts.join("；") : "无"));
+    // 跳过按原因分组计数（SkipCollector 口径，§3.3——不静默吞掉）。
+    const skips = report.Skipped ?? [];
+    if (skips.length > 0) {
+      box.append(kvRow("跳过（按原因）", skips.map((s) => `${s.Reason}×${s.Count}`).join(" · ")));
+    }
     const failed = report.FailedBatches ?? [];
     if (failed.length > 0) {
       for (const f of failed) {
@@ -190,7 +202,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
       box.append(kvRow("未执行批清单", `${report.NotRun?.length ?? 0} 项（可从失败处重续）`));
     }
     for (const p of report.Repointed ?? []) {
-      box.append(kvRow("执行期改判", `${p.Item.Kind} ${p.Item.ContentKey}：${p.Reason}`));
+      box.append(kvRow("执行期改判", `${kindLabel(String(p.Item.Kind))} ${p.Item.ContentKey}：${p.Reason}`));
     }
     if (report.BackupPath) {
       box.append(kvRow("备份路径", report.BackupPath));

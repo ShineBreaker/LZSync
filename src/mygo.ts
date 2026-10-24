@@ -24,19 +24,24 @@ export interface DeployReport {
   BackupPath: string;
 }
 
-/** DiffRow 对比预览页单行（§6.2 差异列表的行模型）。 */
+/**
+ * DiffRow 对比预览页单行（§6.2 差异列表的行模型）。Kind 是数据类型 Tab
+ * 的数据面维度（谱面集/难度/收藏/皮肤/成绩），前端按其分组渲染。
+ */
 export interface DiffRow {
   Kind: EntityKind;
   ContentKey: string;
   Category: Category;
-  /** 人类可读摘要（曲名/收藏名/日期） */
+  /** 人类可读摘要（曲名/收藏名/皮肤名/日期/分数） */
   Summary: string;
   /** Category == CategoryConflict 时填充 */
   ConflictFields: FieldDiff[];
   /** 版本更新时的谱面身份键（online:/meta: 前缀） */
   IdentityKey: string;
-  /** 版本更新时的证据强度（EvidenceStrong/Weak） */
+  /** 版本更新时的证据强度（EvidenceStrong/Weak）；弱键 = 需用户确认项 */
   Evidence: string;
+  /** 版本更新时的 hub 链尾内容键（勾选 → version-replace 的写入键） */
+  CurrentKey: string;
   /** 跳过原因预演（adapter 规则在预览期即跑） */
   SkipReason: string;
   /** 恢复组的删除时间（Unix 毫秒） */
@@ -225,13 +230,17 @@ export const LibraryService = {
 export const CompareService = {
   /**
    * BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。
-   * M1 实际动作面 = 收藏夹 create/update；其余类型与版本更新归入 skip 并
-   * 给出原因（谱面集/版本替换的写路径属 M2，§5.1 分阶段启用）。
+   * M2 动作面 = 收藏夹 + 谱面集（create/update/version-replace）+ 皮肤 +
+   * 成绩（create/update）——与 deploy 执行面（writer_set/writer_skin/
+   * writer_score）对齐；键位/规则集设置/ModPreset 属 M3 写路径（§5.1）。
    */
   buildPlan(target: string, sel: Selection[]): Promise<Plan> {
     return call("CompareService.BuildPlan", target, sel);
   },
-  /** CompareForks fork↔fork 快照对比（委托 diff 层：两份 presence 差集）。 */
+  /**
+   * CompareForks fork↔fork 快照对比（委托 diff 层：两份 presence 差集；
+   * kinds 传递全部启用 kind，diff 层落地后零改动接通）。
+   */
   compareForks(source: string, target: string): Promise<DiffRow[]> {
     return call("CompareService.CompareForks", source, target);
   },
@@ -239,11 +248,19 @@ export const CompareService = {
   currentPlan(): Promise<Plan> {
     return call("CompareService.CurrentPlan");
   },
-  /** DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 全量，HB2）。 */
+  /**
+   * DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 全量，HB2）：
+   * 遍历全部启用 kind（含暂无对账行的 beatmap——presence/tombstone 天然按
+   * kind 泛化，缺项自然为空）。
+   */
   deletedEntries(target: string): Promise<DiffRow[]> {
     return call("CompareService.DeletedEntries", target);
   },
-  /** PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）。 */
+  /**
+   * PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）：
+   * 覆盖全部启用 kind（collection/beatmap_set 走 hub 公共对账面，skin/score
+   * 走本层过渡直查）。
+   */
   previewDeploy(target: string): Promise<DiffRow[]> {
     return call("CompareService.PreviewDeploy", target);
   },

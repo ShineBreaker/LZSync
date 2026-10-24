@@ -1,9 +1,11 @@
 // 对比预览页（§6.2）：模式选择（hub→fork 投放预演 / fork↔fork 快照对比）、
-// 类型 Tab 与分类筛选、差异列表（分类徽标含「恢复（已删除）」、行级勾选、
-// 冲突字段展开）、底部统计条、生成投放计划。
+// 类型 Tab（谱面集/难度/收藏/皮肤/成绩）与分类筛选、「需用户确认」分组
+//（元数据弱键，默认不勾选）、差异列表（分类徽标含「恢复（已删除）」与
+// 强/弱键标注、行级勾选、冲突字段展开）、底部统计条（N 条同步 / M 条
+// 跳过·k 类原因）、生成投放计划。
 
 import { CompareService, LibraryService } from "../mygo";
-import { categoryClass, categoryLabel, clear, el, errText, fmtMillis, message, text } from "../ui";
+import { categoryClass, categoryLabel, clear, el, errText, fmtMillis, kindLabel, message, text } from "../ui";
 
 /** 行的运行态（勾选状态脱离 DefaultChecked 后由 UI 持有）。 */
 interface RowState {
@@ -11,11 +13,15 @@ interface RowState {
   checked: boolean;
 }
 
-/** 类型 Tab（M1 对账类型面：收藏夹 + 谱面集）。 */
+/** 类型 Tab（§6.2 数据面五类 + 全部；「全部」默认不含成绩——成绩量大且
+ * 常需单独审视，对齐 EZRealmSync 的 EntityKindFilter.All 语义）。 */
 const KIND_TABS = [
   { id: "all", label: "全部" },
-  { id: "collection", label: "收藏夹" },
   { id: "beatmap_set", label: "谱面集" },
+  { id: "beatmap", label: "难度" },
+  { id: "collection", label: "收藏夹" },
+  { id: "skin", label: "皮肤" },
+  { id: "score", label: "成绩" },
 ] as const;
 
 /** 分类筛选（纯结果筛选，§6.2）。 */
@@ -155,7 +161,12 @@ export async function renderCompare(root: HTMLElement): Promise<void> {
 
   function visibleRows(): DiffRowView[] {
     return rows.filter((r) => {
-      if (kindFilter !== "all" && String(r.Kind) !== kindFilter) return false;
+      const kind = String(r.Kind);
+      if (kindFilter === "all") {
+        if (kind === "score") return false; // 「全部」默认不含成绩（§6.2）
+      } else if (kind !== kindFilter) {
+        return false;
+      }
       if (catFilter !== "all" && String(r.Category) !== catFilter) return false;
       return true;
     });
@@ -189,18 +200,43 @@ export async function renderCompare(root: HTMLElement): Promise<void> {
 
   function renderList(): void {
     clear(listBox);
-    const visible = visibleRows();
     if (rows.length === 0) {
       listBox.append(el("p", { class: "muted" }, [text("选择模式与 fork 后点击「查询差异」。")]));
       renderStats();
       return;
     }
+    if (kindFilter === "beatmap") {
+      // 难度层不做独立版本对账（§4.2：难度生命周期挂在可软删的父集上
+      // 整集管理），对账面不产独立差异行——空态说明而非伪数据。
+      listBox.append(
+        el("p", { class: "muted" }, [text("难度差异随谱面集整集管理（谱面集的版本替换即整集替换，§4.2），无独立差异行。")]),
+      );
+      renderStats();
+      return;
+    }
+    const visible = visibleRows();
     if (visible.length === 0) {
       listBox.append(el("p", { class: "muted" }, [text("当前筛选无匹配行。")]));
       renderStats();
       return;
     }
-    for (const r of visible) {
+    // 「需用户确认」分组（§6.2）：元数据弱键「疑似」版本更新集中呈现，
+    // 默认不勾选；勾选即三选一拍板中的「替换」（不勾选 = 忽略）。
+    const needsConfirm = visible.filter((r) => String(r.Evidence) === "weak");
+    const normal = visible.filter((r) => String(r.Evidence) !== "weak");
+    if (needsConfirm.length > 0) {
+      listBox.append(
+        el("div", { class: "group-title" }, [text("需用户确认（默认不勾选）")]),
+        el("p", { class: "muted" }, [text("元数据弱键「疑似」版本更新——勾选即拍板按版本替换执行，不勾选视为忽略（§5.4 三选一）。")]),
+      );
+      for (const r of needsConfirm) {
+        listBox.append(renderRow(r));
+      }
+      if (normal.length > 0) {
+        listBox.append(el("div", { class: "group-title" }, [text("其余差异")]));
+      }
+    }
+    for (const r of normal) {
       listBox.append(renderRow(r));
     }
     renderStats();
@@ -218,9 +254,10 @@ export async function renderCompare(root: HTMLElement): Promise<void> {
     const badges = [el("span", { class: categoryClass(String(r.Category)) }, [text(categoryLabel(String(r.Category)))])];
     if (String(r.Category) === "version-update") {
       const weak = String(r.Evidence) === "weak";
+      const ident = r.IdentityKey ? ` · ${r.IdentityKey}` : "";
       badges.push(
         el("span", { class: `badge ${weak ? "badge-weak" : "badge-strong"}` }, [
-          text(weak ? "元数据弱键「疑似」" : "OnlineID 强键"),
+          text(weak ? `元数据弱键「疑似」${ident}` : `OnlineID 强键${ident}`),
         ]),
       );
     }
@@ -235,7 +272,7 @@ export async function renderCompare(root: HTMLElement): Promise<void> {
       cb,
       el("div", { class: "row-body" }, [
         el("div", { class: "row-title" }, [el("span", { class: "row-summary" }, [text(r.Summary)]), ...badges]),
-        el("div", { class: "row-key muted" }, [text(`${r.Kind} · ${r.ContentKey}`)]),
+        el("div", { class: "row-key muted" }, [text(`${kindLabel(String(r.Kind))} · ${r.ContentKey}`)]),
       ]),
     ]);
 
@@ -259,27 +296,28 @@ export async function renderCompare(root: HTMLElement): Promise<void> {
     return row;
   }
 
+  /** 统计条（§6.2）：全量口径（Tab/筛选只是查看切片，计划由勾选决定）——
+   * 将同步 N 条 / 跳过 M 条·k 类原因（SkipReason 分组，未标注原因的归
+   * 「用户未勾选」）。 */
   function renderStats(): void {
     clear(statsBar);
     let willSync = 0;
-    let skipped = 0;
-    const byCat = new Map<string, number>();
+    const skipReasons = new Map<string, number>();
     for (const r of rows) {
-      const cat = String(r.Category);
-      byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
       if (checked.get(rowKey(r)) === true) {
         willSync++;
-      } else {
-        skipped++;
+        continue;
       }
+      const reason = r.SkipReason || "用户未勾选";
+      skipReasons.set(reason, (skipReasons.get(reason) ?? 0) + 1);
     }
-    const parts: string[] = [];
-    for (const [cat, n] of byCat) {
-      parts.push(`${categoryLabel(cat)} ${n}`);
-    }
+    const skipped = [...skipReasons.values()].reduce((a, b) => a + b, 0);
+    const reasonParts = [...skipReasons.entries()].map(([reason, n]) => `${reason}×${n}`);
     statsBar.append(
-      el("span", { class: "stat-main" }, [text(`将同步 ${willSync} 条 · 跳过 ${skipped} 条`)]),
-      el("span", { class: "muted" }, [text(parts.length > 0 ? parts.join(" · ") : "无差异数据")]),
+      el("span", { class: "stat-main" }, [
+        text(`将同步 ${willSync} 条 / 跳过 ${skipped} 条 · ${skipReasons.size} 类原因`),
+      ]),
+      el("span", { class: "muted" }, [text(reasonParts.length > 0 ? reasonParts.join(" · ") : "无差异数据")]),
     );
   }
 
