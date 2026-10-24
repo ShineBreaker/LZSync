@@ -653,3 +653,265 @@ func TestMigrateRejectsFutureVersion(t *testing.T) {
 		t.Fatal("高于本程序支持的 schema 版本应拒绝打开")
 	}
 }
+
+// --- v2：skin/score upsert 往返、HB3、幂等 ---
+
+func mkSkin(hash, name, creator, guid string, files ...NamedFile) Skin {
+	return Skin{
+		ID: guid, Hash: hash, Name: name, Creator: creator,
+		InstantiationInfo: "osu.Game.Skinning.DefaultLegacySkin, osu.Game",
+		Files:             files,
+	}
+}
+
+func mkScore(bh, hash, guid string) Score {
+	legacy := int64(987654)
+	pp := 321.5
+	return Score{
+		ID: guid, BeatmapHash: bh, Hash: hash,
+		RulesetShortName: "osu", ClientVersion: "2026.1005.0",
+		TotalScore:        1_000_000,
+		TotalScoreWithoutMods: 900_000,
+		TotalScoreVersion:     30000019,
+		LegacyTotalScore:      &legacy,
+		MaxCombo:              1234,
+		Accuracy:              0.9876,
+		Date:                  t0,
+		PP:                    &pp,
+		OnlineID:              -1,
+		LegacyOnlineID:        424242,
+		User:                  RealmUser{OnlineID: 1, Username: "player", CountryString: "CN"},
+		ModsJson:              `[{"acronym":"HD"}]`,
+		StatisticsJson:        `{"300":1}`,
+		MaximumStatisticsJson: `{"300":1}`,
+		Pauses:                []int32{1000, 5000},
+		RankInt:               2,
+		Combo:                 700,
+		Files:                 []NamedFile{{Hash: "replay-hash", Filename: "replay.osr"}},
+	}
+}
+
+func TestApplySnapshotSkinScoreRoundtrip(t *testing.T) {
+	s := openMem(t)
+	snap := Snapshot{
+		ForkID: "A", CollectedAt: t0,
+		Skins:  []Skin{mkSkin("sk1", "MySkin", "maker", "g-sk1", NamedFile{Hash: "fh1", Filename: "skin.ini"})},
+		Scores: []Score{mkScore("bh1", "sc1", "g-sc1")},
+	}
+	res := applySnap(t, s, snap)
+	if got := res.EntitiesWritten[KindSkin]; got != 1 {
+		t.Errorf("EntitiesWritten[skin] = %d，期望 1", got)
+	}
+	if got := res.EntitiesWritten[KindScore]; got != 1 {
+		t.Errorf("EntitiesWritten[score] = %d，期望 1", got)
+	}
+
+	sk, origin, ok, err := s.LoadSkin(context.Background(), "sk1")
+	if err != nil || !ok {
+		t.Fatalf("LoadSkin = (%v,%v)", ok, err)
+	}
+	if sk.ID != "g-sk1" || sk.Hash != "sk1" || sk.Name != "MySkin" || sk.Creator != "maker" ||
+		sk.InstantiationInfo != "osu.Game.Skinning.DefaultLegacySkin, osu.Game" ||
+		sk.Protected || sk.DeletePending || len(sk.Files) != 1 ||
+		sk.Files[0] != (NamedFile{Hash: "fh1", Filename: "skin.ini"}) {
+		t.Errorf("皮肤往返不一致: %+v", sk)
+	}
+	if origin != (Origin{GUID: "g-sk1", Fork: "A"}) {
+		t.Errorf("皮肤 Origin = %+v", origin)
+	}
+
+	sc, origin, ok, err := s.LoadScore(context.Background(), "bh1", "sc1")
+	if err != nil || !ok {
+		t.Fatalf("LoadScore = (%v,%v)", ok, err)
+	}
+	if sc.ID != "g-sc1" || sc.BeatmapHash != "bh1" || sc.Hash != "sc1" ||
+		sc.RulesetShortName != "osu" || sc.ClientVersion != "2026.1005.0" ||
+		sc.TotalScore != 1_000_000 || sc.TotalScoreWithoutMods != 900_000 ||
+		sc.TotalScoreVersion != 30000019 ||
+		sc.LegacyTotalScore == nil || *sc.LegacyTotalScore != 987654 ||
+		sc.MaxCombo != 1234 || sc.Accuracy != 0.9876 || !sc.Date.Equal(t0) ||
+		sc.PP == nil || *sc.PP != 321.5 ||
+		sc.OnlineID != -1 || sc.LegacyOnlineID != 424242 ||
+		sc.User != (RealmUser{OnlineID: 1, Username: "player", CountryString: "CN"}) ||
+		sc.ModsJson != `[{"acronym":"HD"}]` || sc.StatisticsJson != `{"300":1}` ||
+		sc.MaximumStatisticsJson != `{"300":1}` ||
+		len(sc.Pauses) != 2 || sc.Pauses[0] != 1000 || sc.Pauses[1] != 5000 ||
+		sc.RankInt != 2 || sc.Combo != 700 || sc.IsLegacyScore ||
+		len(sc.Files) != 1 || sc.Files[0] != (NamedFile{Hash: "replay-hash", Filename: "replay.osr"}) {
+		t.Errorf("成绩往返不一致: %+v", sc)
+	}
+	if origin != (Origin{GUID: "g-sc1", Fork: "A"}) {
+		t.Errorf("成绩 Origin = %+v", origin)
+	}
+
+	// presence：skin/score 各一行，score 占用组合键编码位。
+	if n := countRows(t, s, `SELECT COUNT(*) FROM presence WHERE fork_id=? AND kind=?`, "A", KindSkin); n != 1 {
+		t.Errorf("skin presence 行数 = %d，期望 1", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM presence WHERE fork_id=? AND kind=? AND content_key=?`,
+		"A", KindScore, ScoreContentKey("bh1", "sc1")); n != 1 {
+		t.Errorf("score presence 组合键行数 = %d，期望 1", n)
+	}
+
+	// HB3：同键从 fork B 再收集（Guid 不同）→ fork 随行更新、guid 首次固定。
+	applySnap(t, s, Snapshot{
+		ForkID: "B", CollectedAt: t0.Add(time.Hour),
+		Skins:  []Skin{mkSkin("sk1", "MySkin", "maker", "g-skB")},
+		Scores: []Score{mkScore("bh1", "sc1", "g-scB")},
+	})
+	if _, oc, ok, err := s.LoadSkin(context.Background(), "sk1"); err != nil || !ok ||
+		oc != (Origin{GUID: "g-sk1", Fork: "B"}) {
+		t.Errorf("HB3 皮肤 Origin = (%+v,%v)", oc, err)
+	}
+	if _, oc, ok, err := s.LoadScore(context.Background(), "bh1", "sc1"); err != nil || !ok ||
+		oc != (Origin{GUID: "g-sc1", Fork: "B"}) {
+		t.Errorf("HB3 成绩 Origin = (%+v,%v)", oc, err)
+	}
+
+	// 幂等重跑：无增量、实体行数不涨。
+	res = applySnap(t, s, snap)
+	if res.TombstonesAdded != 0 || res.TombstonesCleared != 0 || res.VersionLinksCreated != 0 {
+		t.Errorf("重跑增量 = (+%d,-%d,链%d)，期望全 0",
+			res.TombstonesAdded, res.TombstonesCleared, res.VersionLinksCreated)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM skin`); n != 1 {
+		t.Errorf("skin 行数 = %d，期望 1", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM score`); n != 1 {
+		t.Errorf("score 行数 = %d，期望 1", n)
+	}
+}
+
+// --- v2：skin/score 的 tombstone 生成与清除（HB2 泛化） ---
+
+func TestSkinScoreTombstoneLifecycle(t *testing.T) {
+	s := openMem(t)
+	skinSnap := Snapshot{
+		ForkID: "A", CollectedAt: t0,
+		Skins: []Skin{mkSkin("sk1", "MySkin", "maker", "g-sk1")},
+	}
+	scoreSnap := Snapshot{
+		ForkID: "A", CollectedAt: t0,
+		Scores: []Score{mkScore("bh1", "sc1", "g-sc1")},
+	}
+	both := Snapshot{
+		ForkID: "A", CollectedAt: t0,
+		Skins:  []Skin{mkSkin("sk1", "MySkin", "maker", "g-sk1")},
+		Scores: []Score{mkScore("bh1", "sc1", "g-sc1")},
+	}
+	// 建立：皮肤与成绩同时在场。
+	applySnap(t, s, both)
+
+	// 皮肤消失（只带成绩的快照）→ skin tombstone（kind 泛化）。
+	res := applySnap(t, s, scoreSnap)
+	if res.TombstonesAdded != 1 {
+		t.Fatalf("皮肤消失 TombstonesAdded = %d，期望 1", res.TombstonesAdded)
+	}
+	if n := countRows(t, s,
+		`SELECT COUNT(*) FROM tombstone WHERE fork_id=? AND kind=? AND content_key=?`,
+		"A", KindSkin, "sk1"); n != 1 {
+		t.Fatalf("skin tombstone 行数 = %d，期望 1", n)
+	}
+
+	// 成绩消失 → score tombstone（组合键编码）；皮肤重现 → 清除。
+	res = applySnap(t, s, skinSnap)
+	if res.TombstonesAdded != 1 || res.TombstonesCleared != 1 {
+		t.Fatalf("成绩消失结果 = (+%d,-%d)，期望 (+1,-1)", res.TombstonesAdded, res.TombstonesCleared)
+	}
+	if n := countRows(t, s,
+		`SELECT COUNT(*) FROM tombstone WHERE fork_id=? AND kind=? AND content_key=?`,
+		"A", KindScore, ScoreContentKey("bh1", "sc1")); n != 1 {
+		t.Fatalf("score tombstone 行数 = %d，期望 1", n)
+	}
+
+	// 两者同时重现 → 全部清除。
+	res = applySnap(t, s, both)
+	if res.TombstonesAdded != 0 || res.TombstonesCleared != 1 {
+		t.Fatalf("重现结果 = (+%d,-%d)，期望 (+0,-1)", res.TombstonesAdded, res.TombstonesCleared)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM tombstone WHERE fork_id=?`, "A"); n != 0 {
+		t.Errorf("重现后 tombstone 行数 = %d，期望 0", n)
+	}
+	// per-fork：A 的删除不影响 B。
+	if n := countRows(t, s, `SELECT COUNT(*) FROM tombstone WHERE fork_id=?`, "B"); n != 0 {
+		t.Errorf("B 的 tombstone = %d，期望 0（per-fork 生效）", n)
+	}
+}
+
+// --- v2：beatmap payload 扩为 C2 白名单全列的往返 ---
+
+func TestBeatmapC2ColumnsRoundtrip(t *testing.T) {
+	s := openMem(t)
+	submitted := t0.Add(-720 * time.Hour)
+	ranked := t0.Add(-700 * time.Hour)
+	touched := t0.Add(-24 * time.Hour)
+	editorTS := 12345.6
+	bs := BeatmapSet{
+		ID: "guid-hc2", Hash: "hc2", OnlineID: 55, StatusInt: 4,
+		DateAdded: t0, DateSubmitted: &submitted, DateRanked: &ranked,
+		Artist: "AR", Title: "TI", AuthorUsername: "AU",
+		Files: []NamedFile{{Hash: "fh1", Filename: "audio.mp3"}},
+		Beatmaps: []Beatmap{{
+			ID: "guid-hc2-d", Hash: "hc2-d", MD5Hash: "md5-c2", OnlineMD5Hash: "omd5-c2",
+			DifficultyName: "Insane", RulesetShortName: "osu", StatusInt: 4, OnlineID: 551,
+			Length: 123456, BPM: 180.5, StarRating: 5.25,
+			LastLocalUpdate: &touched, LastOnlineUpdate: &touched, Hidden: true,
+			EndTimeObjectCount: 300, TotalObjectCount: 900, LastPlayed: &touched,
+			BeatDivisor: 8, EditorTimestamp: &editorTS,
+			Difficulty: Difficulty{
+				DrainRate: 6.5, CircleSize: 4, OverallDifficulty: 8,
+				ApproachRate: 9.2, SliderMultiplier: 1.6, SliderTickRate: 2,
+			},
+			Metadata: Metadata{
+				Title: "TI", TitleUnicode: "TIU", Artist: "AR", ArtistUnicode: "ARU",
+				Author:      RealmUser{OnlineID: 77, Username: "AU", CountryString: "JP"},
+				Source:      "anime", Tags: "a b", UserTags: []string{"tag1"},
+				PreviewTime: 12345, AudioFile: "audio.mp3", BackgroundFile: "bg.jpg",
+			},
+			UserSettingsOffset: -12.5,
+		}},
+	}
+	applySnap(t, s, Snapshot{ForkID: "A", CollectedAt: t0, BeatmapSets: []BeatmapSet{bs}})
+
+	sets, err := s.CurrentBeatmapSets(context.Background())
+	if err != nil || len(sets) != 1 {
+		t.Fatalf("CurrentBeatmapSets = (%d,%v)，期望 1", len(sets), err)
+	}
+	got := sets[0].Set
+	if got.DateSubmitted == nil || !got.DateSubmitted.Equal(submitted) ||
+		got.DateRanked == nil || !got.DateRanked.Equal(ranked) {
+		t.Errorf("谱面集可空时间列往返不一致: %+v", got)
+	}
+	if len(got.Files) != 1 || got.Files[0] != (NamedFile{Hash: "fh1", Filename: "audio.mp3"}) {
+		t.Errorf("谱面集 Files 往返不一致: %+v", got.Files)
+	}
+	if len(got.Beatmaps) != 1 {
+		t.Fatalf("难度数 = %d，期望 1", len(got.Beatmaps))
+	}
+	bm := got.Beatmaps[0]
+	if bm.OnlineMD5Hash != "omd5-c2" || bm.StatusInt != 4 || bm.OnlineID != 551 ||
+		bm.Length != 123456 || bm.BPM != 180.5 || bm.StarRating != 5.25 || !bm.Hidden ||
+		bm.EndTimeObjectCount != 300 || bm.TotalObjectCount != 900 || bm.BeatDivisor != 8 ||
+		bm.EditorTimestamp == nil || *bm.EditorTimestamp != 12345.6 ||
+		bm.LastLocalUpdate == nil || !bm.LastLocalUpdate.Equal(touched) ||
+		bm.LastOnlineUpdate == nil || !bm.LastOnlineUpdate.Equal(touched) ||
+		bm.LastPlayed == nil || !bm.LastPlayed.Equal(touched) ||
+		bm.UserSettingsOffset != -12.5 {
+		t.Errorf("难度标量列往返不一致: %+v", bm)
+	}
+	if bm.Difficulty != (Difficulty{
+		DrainRate: 6.5, CircleSize: 4, OverallDifficulty: 8,
+		ApproachRate: 9.2, SliderMultiplier: 1.6, SliderTickRate: 2,
+	}) {
+		t.Errorf("Difficulty embedded 往返不一致: %+v", bm.Difficulty)
+	}
+	if bm.Metadata.Title != "TI" || bm.Metadata.TitleUnicode != "TIU" ||
+		bm.Metadata.Artist != "AR" || bm.Metadata.ArtistUnicode != "ARU" ||
+		bm.Metadata.Author != (RealmUser{OnlineID: 77, Username: "AU", CountryString: "JP"}) ||
+		bm.Metadata.Source != "anime" || bm.Metadata.Tags != "a b" ||
+		len(bm.Metadata.UserTags) != 1 || bm.Metadata.UserTags[0] != "tag1" ||
+		bm.Metadata.PreviewTime != 12345 ||
+		bm.Metadata.AudioFile != "audio.mp3" || bm.Metadata.BackgroundFile != "bg.jpg" {
+		t.Errorf("Metadata 内联往返不一致: %+v", bm.Metadata)
+	}
+}
