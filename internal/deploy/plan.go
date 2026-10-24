@@ -6,6 +6,7 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -108,10 +109,11 @@ type BuildOptions struct {
 // BuildPlan 从 hub 对账结果构建默认投放计划（§3.2 计划 / §6.2 默认勾选）：
 // hub diff（ReconcileAgainst，当前版本差集）− 目标 tombstone 命中（恢复组
 // 默认排除，仅 RestoreKeys 显式勾选者进入）− 需确认项。conflict → update
-// （默认 hub 覆盖目标，§5.4 方向模型）。
+//（默认 hub 覆盖目标，§5.4 方向模型）。
 //
 // 施工面：收藏夹（M1，§5.1 最安全首投放路径）+ 谱面集（M2 create/update +
-// 版本更新整集原子替换，§5.4 三步）。其他实体类型返回错误，由后续块放开。
+// 版本更新整集原子替换，§5.4 三步）+ 皮肤（M2，§5.1）。其他实体类型返回
+// 错误，由后续块放开。
 func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts BuildOptions) (Plan, error) {
 	if target.ForkID == "" {
 		return Plan{}, errors.New("deploy: BuildPlan 缺目标 fork 身份")
@@ -120,6 +122,13 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 		return Plan{}, errors.New("deploy: BuildPlan 缺目标库路径（LibraryRef 未解析）")
 	}
 	items, err := h.ReconcileAgainst(ctx, target.ForkID, []hub.EntityKind{hub.KindCollection, hub.KindBeatmapSet})
+	if err != nil {
+		return Plan{}, err
+	}
+	// 皮肤对账：hub.ReconcileAgainst 尚未放开 skin kind（块 1/2 未提供），
+	// 此处以 hub.DB() 只读直查承载（loadBeatmapSet 的同构过渡先例，hub
+	// 增补领域方法后应切换）；结果在主循环之后并入计划。
+	skins, err := reconcileSkins(ctx, h, target.ForkID)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -210,6 +219,33 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 			return Plan{}, fmt.Errorf("deploy: BuildPlan 不支持实体类型 %q（后续块扩面）", ri.Kind)
 		}
 	}
+	// 皮肤 → 计划项（create/conflict 两分类；皮肤无版本链与谱面身份键，
+	// restore 语义与收藏夹一致——tombstone 命中默认排除，§6.2）。
+	for _, sr := range skins {
+		switch sr.category {
+		case hub.ReconcileCreate:
+			if sr.restorable && !restore[sr.contentKey] {
+				continue // 恢复组默认排除（HB2：需用户显式勾选）
+			}
+			planItems = append(planItems, PlanItem{
+				Kind:       hub.KindSkin,
+				ContentKey: sr.contentKey,
+				Action:     ActionCreate,
+				Summary:    skinSummary(sr.name),
+				Restore:    sr.restorable,
+			})
+		case hub.ReconcileConflict:
+			// 默认方向 = hub 覆盖目标（就地更新白名单列，保目标 Guid，§5.4）。
+			planItems = append(planItems, PlanItem{
+				Kind:       hub.KindSkin,
+				ContentKey: sr.contentKey,
+				Action:     ActionUpdate,
+				Summary:    skinSummary(sr.name),
+			})
+		default:
+			return Plan{}, fmt.Errorf("deploy: 皮肤对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.category, sr.contentKey)
+		}
+	}
 	plan, err := NewPlan(target.ForkID, planItems)
 	if err != nil {
 		return Plan{}, err
@@ -239,4 +275,104 @@ func hashPrefix(contentHash string) string {
 		prefix = prefix[:12]
 	}
 	return prefix
+}
+
+// skinReconcile 皮肤对账行（deploy 内过渡承载：hub.ReconcileAgainst 未
+// 放开 skin kind，hub.ReconcileItem 亦无摘要字段——皮肤摘要取 Name 而非
+// 内容键前缀，故自带 name；hub 增补领域方法后应切换）。
+type skinReconcile struct {
+	contentKey string
+	name       string
+	category   hub.ReconcileCategory
+	restorable bool
+}
+
+// reconcileSkins 皮肤对账（hub 真相 → 目标 fork，纯 SQL 只读）：skin 表
+// 全部行（皮肤无版本链）vs 目标 presence 差集 → create；命中 tombstone 的
+// 归恢复组（默认排除，§5.4 删除不复活）；presence 有该键则比冲突字段
+// Name/Creator（§4.2：Skin 比 Name/Creator，内容键 Hash 本身不比），有
+// 差异 → conflict（hub 覆盖目标）。
+func reconcileSkins(ctx context.Context, h *hub.Store, forkID string) ([]skinReconcile, error) {
+	rows, err := h.DB().QueryContext(ctx,
+		`SELECT content_hash, payload FROM skin ORDER BY content_hash`)
+	if err != nil {
+		return nil, fmt.Errorf("deploy: 读皮肤 canonical: %w", err)
+	}
+	type canon struct {
+		key, name, payload string
+	}
+	var canonRows []canon
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("deploy: 读皮肤 canonical 行: %w", err)
+		}
+		var sk hub.Skin
+		if err := json.Unmarshal([]byte(v), &sk); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("deploy: 解码皮肤 %q payload: %w", k, err)
+		}
+		canonRows = append(canonRows, canon{k, sk.Name, v})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("deploy: 遍历皮肤 canonical: %w", err)
+	}
+	rows.Close()
+
+	presRows, err := h.DB().QueryContext(ctx,
+		`SELECT content_key, local_values FROM presence WHERE fork_id=? AND kind=?`, forkID, hub.KindSkin)
+	if err != nil {
+		return nil, fmt.Errorf("deploy: 读皮肤 presence: %w", err)
+	}
+	pres := map[string]string{}
+	for presRows.Next() {
+		var k, v string
+		if err := presRows.Scan(&k, &v); err != nil {
+			presRows.Close()
+			return nil, fmt.Errorf("deploy: 读皮肤 presence 行: %w", err)
+		}
+		pres[k] = v
+	}
+	if err := presRows.Err(); err != nil {
+		presRows.Close()
+		return nil, fmt.Errorf("deploy: 遍历皮肤 presence: %w", err)
+	}
+	presRows.Close()
+
+	tombs, err := h.Tombstones(ctx, forkID)
+	if err != nil {
+		return nil, err
+	}
+	tombKeys := tombs[hub.KindSkin]
+
+	var out []skinReconcile
+	for _, c := range canonRows {
+		local, inPres := pres[c.key]
+		if !inPres {
+			it := skinReconcile{contentKey: c.key, name: c.name, category: hub.ReconcileCreate}
+			if _, dead := tombKeys[c.key]; dead {
+				it.restorable = true
+			}
+			out = append(out, it)
+			continue
+		}
+		var hubSk, forkSk hub.Skin
+		if err := json.Unmarshal([]byte(c.payload), &hubSk); err != nil {
+			return nil, fmt.Errorf("deploy: 解码皮肤 %q canonical: %w", c.key, err)
+		}
+		if err := json.Unmarshal([]byte(local), &forkSk); err != nil {
+			return nil, fmt.Errorf("deploy: 解码皮肤 %q presence: %w", c.key, err)
+		}
+		// 冲突判据 §4.2：Name/Creator；一致则无动作不产出。
+		if hubSk.Name != forkSk.Name || hubSk.Creator != forkSk.Creator {
+			out = append(out, skinReconcile{contentKey: c.key, name: hubSk.Name, category: hub.ReconcileConflict})
+		}
+	}
+	return out, nil
+}
+
+func skinSummary(name string) string {
+	return "皮肤 " + strconv.Quote(name)
 }

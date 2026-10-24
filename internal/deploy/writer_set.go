@@ -609,61 +609,76 @@ func (w *beatmapSetWriter) matchesCanonical(obj realmObjectPtr, bs hub.BeatmapSe
 }
 
 // appendUsage 向 Files 列表追加一条 RealmNamedFileUsage（File 链接 +
-// Filename）。File 行由 fileRow 取/建（Find ?? Create）。
+// Filename）。File 行由 findOrCreateFileRow 取/建（Find ?? Create）。
 func (w *beatmapSetWriter) appendUsage(lst *realmc.List, nf hub.NamedFile) error {
-	fileRow, err := w.fileRow(nf.Hash)
+	return appendNamedFileUsage(w.r, lst, w.fileCK, w.filePK, w.fileCols, w.usageCols, nf)
+}
+
+// appendNamedFileUsage 向 Files 列表追加一条 RealmNamedFileUsage（File
+// 链接 + Filename；谱面集/皮肤/成绩写入器共用，S6：RealmFile 行与模型引用
+// 同事务成对写入）。File 行走 §5.3 的 `Find(File, hash) ?? Create`——跨
+// 实体共享 blob 行不重复建。
+func appendNamedFileUsage(r *realmc.Realm, lst *realmc.List, fileCK uint32, filePK bool,
+	fileCols, usageCols map[string]int64, nf hub.NamedFile) error {
+	fileRow, err := findOrCreateFileRow(r, fileCK, filePK, fileCols, nf.Hash)
 	if err != nil {
 		return err
 	}
-	defer w.r.ReleaseObject(fileRow)
+	defer r.ReleaseObject(fileRow)
 	usage, err := lst.AddEmbedded()
 	if err != nil {
 		return fmt.Errorf("deploy: 建 Files usage（%s）: %w", nf.Filename, err)
 	}
-	defer w.r.ReleaseObject(usage)
-	if err := w.r.SetString(usage, w.usageCols["Filename"], nf.Filename); err != nil {
+	defer r.ReleaseObject(usage)
+	if err := r.SetString(usage, usageCols["Filename"], nf.Filename); err != nil {
 		return fmt.Errorf("deploy: 写 Files usage Filename %q: %w", nf.Filename, err)
 	}
-	if err := w.r.SetLinkedObject(usage, w.usageCols["File"], fileRow); err != nil {
+	if err := r.SetLinkedObject(usage, usageCols["File"], fileRow); err != nil {
 		return fmt.Errorf("deploy: 链 Files usage → RealmFile %s: %w", nf.Hash, err)
 	}
 	return nil
 }
 
-// fileRow 取/建 RealmFile 行（§5.3 `Find(File, hash) ?? Create`——跨谱面
-// 共享 blob 行不重复建）。主键形态走 GetOrCreate；无主键形态（fixture 镜
-// 像）查建组合。返回句柄由调用方释放。
-func (w *beatmapSetWriter) fileRow(hash string) (realmObjectPtr, error) {
-	if w.filePK {
-		obj, _, err := w.r.GetOrCreateObjectWithStringPK(w.fileCK, hash)
+// findOrCreateFileRow 取/建 RealmFile 行（§5.3 `Find(File, hash) ?? Create`）。
+// 主键形态走 GetOrCreate；无主键形态（fixture 镜像）查建组合。返回句柄由
+// 调用方释放。
+func findOrCreateFileRow(r *realmc.Realm, fileCK uint32, filePK bool, fileCols map[string]int64, hash string) (realmObjectPtr, error) {
+	if filePK {
+		obj, _, err := r.GetOrCreateObjectWithStringPK(fileCK, hash)
 		if err != nil {
 			return nil, fmt.Errorf("deploy: RealmFile %s GetOrCreate: %w", hash, err)
 		}
 		return obj, nil
 	}
-	obj, err := w.r.FindFirstByString(w.fileCK, w.fileCols["Hash"], hash)
+	obj, err := r.FindFirstByString(fileCK, fileCols["Hash"], hash)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: 查 RealmFile %s: %w", hash, err)
 	}
 	if obj != nil {
 		return obj, nil
 	}
-	obj, err = w.r.CreateObject(w.fileCK)
+	obj, err = r.CreateObject(fileCK)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: 新建 RealmFile %s: %w", hash, err)
 	}
-	if err := w.r.SetString(obj, w.fileCols["Hash"], hash); err != nil {
-		w.r.ReleaseObject(obj)
+	if err := r.SetString(obj, fileCols["Hash"], hash); err != nil {
+		r.ReleaseObject(obj)
 		return nil, fmt.Errorf("deploy: 写 RealmFile %s Hash: %w", hash, err)
 	}
 	return obj, nil
 }
 
-// resolveRuleset 目标端规则集解析（§5.1-M2）：已有同名行复用；缺行且属
-// 官方四规则集新建（Available=true）；fork 专有不凭空插（ok=false，调用
-// 方跳过该难度并计数）。返回行句柄由调用方释放。
+// resolveRuleset 目标端规则集解析（§5.1-M2，公共实现见 resolveRulesetObj）。
 func (w *beatmapSetWriter) resolveRuleset(shortName string) (realmObjectPtr, bool, error) {
-	obj, err := w.r.FindFirstByString(w.rulesetCK, w.rulesetCols["ShortName"], shortName)
+	return resolveRulesetObj(w.r, w.rulesetCK, w.rulesetCols, shortName)
+}
+
+// resolveRulesetObj 目标端规则集解析（§5.1-M2；难度与成绩写入器共用，
+// §5.2-4 的成绩规则集解析即此语义）：已有同名行复用；缺行且属官方四
+// 规则集新建（Available=true）；fork 专有不凭空插（ok=false，调用方跳过
+// 该项并计数）。返回行句柄由调用方释放。
+func resolveRulesetObj(r *realmc.Realm, rulesetCK uint32, rulesetCols map[string]int64, shortName string) (realmObjectPtr, bool, error) {
+	obj, err := r.FindFirstByString(rulesetCK, rulesetCols["ShortName"], shortName)
 	if err != nil {
 		return nil, false, fmt.Errorf("deploy: 查规则集 %q: %w", shortName, err)
 	}
@@ -674,22 +689,22 @@ func (w *beatmapSetWriter) resolveRuleset(shortName string) (realmObjectPtr, boo
 	if !ok {
 		return nil, false, nil
 	}
-	obj, err = w.r.CreateObject(w.rulesetCK)
+	obj, err = r.CreateObject(rulesetCK)
 	if err != nil {
 		return nil, false, fmt.Errorf("deploy: 新建官方规则集 %q: %w", shortName, err)
 	}
 	fail := func(err error) (realmObjectPtr, bool, error) {
-		w.r.ReleaseObject(obj)
+		r.ReleaseObject(obj)
 		return nil, false, err
 	}
 	writes := []func() error{
-		func() error { return w.r.SetString(obj, w.rulesetCols["ShortName"], shortName) },
-		func() error { return w.r.SetInt64(obj, w.rulesetCols["OnlineID"], def.onlineID) },
-		func() error { return w.r.SetString(obj, w.rulesetCols["Name"], def.name) },
-		func() error { return w.r.SetString(obj, w.rulesetCols["InstantiationInfo"], def.instantiationInfo) },
+		func() error { return r.SetString(obj, rulesetCols["ShortName"], shortName) },
+		func() error { return r.SetInt64(obj, rulesetCols["OnlineID"], def.onlineID) },
+		func() error { return r.SetString(obj, rulesetCols["Name"], def.name) },
+		func() error { return r.SetString(obj, rulesetCols["InstantiationInfo"], def.instantiationInfo) },
 	}
-	if key, ok := w.rulesetCols["Available"]; ok {
-		writes = append(writes, func() error { return w.r.SetBool(obj, key, true) })
+	if key, ok := rulesetCols["Available"]; ok {
+		writes = append(writes, func() error { return r.SetBool(obj, key, true) })
 	}
 	for _, write := range writes {
 		if err := write(); err != nil {
