@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,16 +7,20 @@
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
-    <main>
-      <h1>LZSync</h1>
-      <p class="muted">Go ↔ TypeScript, fully typed.</p>
-      <form id="greet">
-        <input id="name" placeholder="Your name" autocomplete="off" autofocus />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greeting" class="card"></p>
-      <p class="muted"><span id="info"></span> · <span id="clock">--:--:--</span></p>
-    </main>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="brand">
+          <img src="./resources/icon.png" alt="LZSync" class="brand-icon" />
+          <span>LZSync</span>
+        </div>
+        <nav id="nav"></nav>
+        <div id="fork-lights" class="fork-lights"></div>
+      </aside>
+      <div id="content-wrapper">
+        <div id="global-warning" class="global-warning hidden"></div>
+        <main id="content"></main>
+      </div>
+    </div>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

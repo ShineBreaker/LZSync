@@ -4,27 +4,263 @@ import { call, event } from "mygo-runtime";
 
 // ---- Types ----
 
-/** SystemInfo describes the machine the app runs on. */
-export interface SystemInfo {
-  os: string;
-  arch: string;
-  goVersion: string;
+export type Action = string;
+
+export interface BatchFailure {
+  BatchIndex: number;
+  Reason: string;
+  Items: PlanItem[];
 }
+
+/** Category 对账分类的 UI 徽标口径（§6.2 四分类 + 恢复组）。 */
+export type Category = "create" | "target-only" | "conflict" | "version-update" | "restore";
+
+export interface DeployReport {
+  Applied: ItemResult[];
+  Skipped: SkipStat[];
+  FailedBatches: BatchFailure[];
+  NotRun: PlanItem[];
+  Repointed: RepointedItem[];
+  BackupPath: string;
+}
+
+/** DiffRow 对比预览页单行（§6.2 差异列表的行模型）。 */
+export interface DiffRow {
+  Kind: EntityKind;
+  ContentKey: string;
+  Category: Category;
+  /** 人类可读摘要（曲名/收藏名/日期） */
+  Summary: string;
+  /** Category == CategoryConflict 时填充 */
+  ConflictFields: FieldDiff[];
+  /** 版本更新时的谱面身份键（online:/meta: 前缀） */
+  IdentityKey: string;
+  /** 版本更新时的证据强度（EvidenceStrong/Weak） */
+  Evidence: string;
+  /** 跳过原因预演（adapter 规则在预览期即跑） */
+  SkipReason: string;
+  /** 恢复组的删除时间（Unix 毫秒） */
+  DeletedAt: number;
+  /** §6.2 默认勾选规则预计算 */
+  DefaultChecked: boolean;
+}
+
+export type EntityKind = string;
+
+/** FieldDiff 冲突字段级对比（canonical vs 目标 fork presence）。 */
+export interface FieldDiff {
+  Field: string;
+  HubValue: string;
+  ForkValue: string;
+}
+
+export interface ItemResult {
+  Kind: EntityKind;
+  ContentKey: string;
+  Action: Action;
+}
+
+/**
+ * LibraryCard 库管理页卡片数据（§6.1）：身份、版本来源标注、files 体积、
+ * 进程运行状态（状态灯数据）。
+ */
+export interface LibraryCard {
+  /** 命中的 Profile ID；未识别为 "" */
+  ForkID: string;
+  /** fork 数据目录（files/ 的父目录） */
+  DataDir: string;
+  RealmPath: string;
+  /** 原始磁盘版本（未识别/运行中可为 0） */
+  DiskVersion: number;
+  /** 版本值来源标注 */
+  VersionSource: VersionSource;
+  /** 解码后的官方基线版本 */
+  UpstreamVersion: number;
+  /** fork 修订号（非 Ez 恒 0） */
+  ForkRev: number;
+  /** 预组装显示（如 "52011 = 官方 52 + Ez 11"） */
+  VersionLabel: string;
+  /** 库文件字节数 */
+  RealmSize: number;
+  /** §5.3 三级回退解析结果 */
+  FilesDir: string;
+  /** files/ 总字节（实体与链接一并计入） */
+  FilesSize: number;
+  FilesCount: number;
+  /** 该 fork 的进程名命中守卫名单（§6.1 运行状态） */
+  ProcessRunning: boolean;
+  /** 命中的进程名 */
+  RunningNames: string[];
+  /** 已注册（Discover 发现或手动注册） */
+  Registered: boolean;
+}
+
+export interface LibraryRef {
+  ForkID: string;
+  DataDir: string;
+  RealmPath: string;
+  DiskVersion: number;
+  VersionSource: VersionSource;
+  UpstreamVersion: number;
+  ForkRev: number;
+}
+
+export interface Plan {
+  TargetFork: string;
+  Target: LibraryRef;
+  Items: PlanItem[];
+}
+
+export interface PlanItem {
+  Kind: EntityKind;
+  ContentKey: string;
+  Action: Action;
+  Summary: string;
+  SkipReason: string;
+  NeedsConfirm: boolean;
+  Restore: boolean;
+}
+
+/** ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。 */
+export interface ProgressEvent {
+  /** "collect" | "deploy" */
+  Service: string;
+  /** collect/deploy 的 Stage 字符串值 */
+  Stage: string;
+  Current: number;
+  Total: number;
+  /** 人类可读补充（批号、对象计数等） */
+  Message: string;
+  At: string;
+}
+
+export interface RepointedItem {
+  Item: PlanItem;
+  Reason: string;
+}
+
+export interface Report {
+  Entities: Record<string, number>;
+  Skips: SkipStat[];
+  FilesAdopted: number;
+  FilesSkipped: number;
+  AdoptModeCounts: Record<string, number>;
+}
+
+/** Selection 预览页勾选结果的一项（类型 + 内容键）。 */
+export interface Selection {
+  Kind: EntityKind;
+  ContentKey: string;
+}
+
+/** SettingsInfo 设置页数据（§6.4 M1 骨架：备份目录、守卫名单、链接策略显示）。 */
+export interface SettingsInfo {
+  /** "real" | "mock" | "mock-fallback" */
+  Mode: string;
+  /** 降级/强制原因（空 = 正常真实后端） */
+  Reason: string;
+  /** hub 数据目录（§3.4） */
+  DataDir: string;
+  HubDBPath: string;
+  BackupsDir: string;
+  /** 备份目录内条目数 */
+  BackupsCount: number;
+  /** 内置守卫名单（ForkProfile.ProcessNames 汇总） */
+  GuardNames: string[];
+  /** 链接能力探测（§5.3 分级） */
+  LinkSymlink: boolean;
+  LinkHardlink: boolean;
+  /** 探测说明（如「不可用时自动降级复制」） */
+  LinkNote: string;
+  /** librealm 加载状态（P-2 诊断） */
+  NativeLibOK: boolean;
+  NativeLibErr: string;
+}
+
+export interface SkipStat {
+  Reason: string;
+  Count: number;
+}
+
+/** SyncStatus 长任务运行状态（执行页轮询）。 */
+export interface SyncStatus {
+  Busy: boolean;
+  /** "collect" | "deploy" | "" */
+  Kind: string;
+  ForkID: string;
+  Stage: string;
+}
+
+export type VersionSource = string;
 
 // ---- Services ----
 
-/**
- * Greeter is callable from the frontend: `mygo generate` turns its methods
- * into typed TypeScript functions in src/mygo.ts.
- */
-export const Greeter = {
-  /** Greet returns a greeting for name. */
-  greet(name: string): Promise<string> {
-    return call("Greeter.Greet", name);
+export const LibraryService = {
+  assignFork(path: string, forkID: string): Promise<LibraryRef> {
+    return call("LibraryService.AssignFork", path, forkID);
   },
-  /** Info returns information about the system. */
-  info(): Promise<SystemInfo> {
-    return call("Greeter.Info");
+  list(): Promise<LibraryCard[]> {
+    return call("LibraryService.List");
+  },
+  register(path: string): Promise<LibraryRef> {
+    return call("LibraryService.Register", path);
+  },
+  remove(forkID: string): Promise<void> {
+    return call("LibraryService.Remove", forkID);
+  },
+  scan(): Promise<LibraryRef[]> {
+    return call("LibraryService.Scan");
+  },
+} as const;
+
+export const CompareService = {
+  /**
+   * BuildPlan 勾选 → 计划（内存持久；M1 动作面与真实后端同构：仅收藏夹
+   * 产生 create/update，其余计 skip + 原因；走 deploy.NewPlan 校验）。
+   */
+  buildPlan(target: string, sel: Selection[]): Promise<Plan> {
+    return call("CompareService.BuildPlan", target, sel);
+  },
+  compareForks(source: string, target: string): Promise<DiffRow[]> {
+    return call("CompareService.CompareForks", source, target);
+  },
+  currentPlan(): Promise<Plan> {
+    return call("CompareService.CurrentPlan");
+  },
+  deletedEntries(target: string): Promise<DiffRow[]> {
+    return call("CompareService.DeletedEntries", target);
+  },
+  previewDeploy(target: string): Promise<DiffRow[]> {
+    return call("CompareService.PreviewDeploy", target);
+  },
+} as const;
+
+export const SyncService = {
+  cancel(): Promise<void> {
+    return call("SyncService.Cancel");
+  },
+  /** Collect 模拟收集两阶段进度（投影 → 收仓），g0v0 演示守卫拦截。 */
+  collect(forkID: string): Promise<Report> {
+    return call("SyncService.Collect", forkID);
+  },
+  /**
+   * DeployCurrentPlan 模拟投放：守卫 → 备份（一次性）→ 4 批 ×（建链接 →
+   * 事务写入 → DriftGuard）；取消点在批间（§3.3）。
+   */
+  deployCurrentPlan(): Promise<DeployReport> {
+    return call("SyncService.DeployCurrentPlan");
+  },
+  restoreBackup(forkID: string, backupPath: string): Promise<void> {
+    return call("SyncService.RestoreBackup", forkID, backupPath);
+  },
+  running(): Promise<SyncStatus> {
+    return call("SyncService.Running");
+  },
+} as const;
+
+export const SettingsService = {
+  get(): Promise<SettingsInfo> {
+    return call("SettingsService.Get");
   },
 } as const;
 
@@ -32,6 +268,9 @@ export const Greeter = {
 
 /** Events sent by the Go side. Subscribe with `events.name.on(listener)`. */
 export const events = {
-  /** Tick is sent to the page every second. */
-  tick: event<string>("tick"),
+  /**
+   * SyncProgress 同步长任务进度事件（M-2：收集/投放执行不阻塞 UI，批级
+   * 进度实时推送，main.go:36 的 Tick 先例的同款机制）。
+   */
+  syncProgress: event<ProgressEvent>("sync-progress"),
 } as const;

@@ -1,0 +1,797 @@
+package appsvc
+
+// 真实后端实现：库身份走 forks、对账走 hub（ReconcileAgainst/Tombstones），
+// fork↔fork 对比与收集/投放编排分别委托 diff / collect / deploy 层——
+// 这些层的契约桩尚未施工时如实上抛 ErrNotImplemented，UI 由 Mock 后端
+// 承载（M-4）。层实现落地后本文件零改动即接通真实链路。
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"lzsync/internal/collect"
+	"lzsync/internal/deploy"
+	"lzsync/internal/diff"
+	"lzsync/internal/filestore"
+	"lzsync/internal/forks"
+	"lzsync/internal/guard"
+	"lzsync/internal/hub"
+	"lzsync/internal/realmc"
+)
+
+// kinds M1 对账类型面：收藏夹 + 谱面集（skin/score 等待后续 schema 迁移）。
+var kinds = []hub.EntityKind{hub.KindCollection, hub.KindBeatmapSet}
+
+// registry 已注册库（forkID → 解析结果）。M1 内存态；盘面持久待设置页
+// 落 config.json 时一并施工（notes 已记）。
+type registry struct {
+	mu   sync.Mutex
+	byID map[string]forks.LibraryRef
+}
+
+func (r *registry) put(ref forks.LibraryRef) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.byID[ref.ForkID] = ref
+}
+
+func (r *registry) get(forkID string) (forks.LibraryRef, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ref, ok := r.byID[forkID]
+	return ref, ok
+}
+
+func (r *registry) all() []forks.LibraryRef {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]forks.LibraryRef, 0, len(r.byID))
+	for _, ref := range r.byID {
+		out = append(out, ref)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ForkID < out[j].ForkID })
+	return out
+}
+
+func (r *registry) remove(forkID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byID, forkID)
+}
+
+// newRealBackend 构造真实后端：加载 native 库（P-2 判定）→ 装配四服务 →
+// 恢复持久化的投放计划。
+func newRealBackend(deps Deps, prog ProgressSink) (*Backend, error) {
+	if deps.Hub == nil {
+		return nil, errors.New("appsvc: 真实后端缺少 hub 存储")
+	}
+	if _, err := realmc.Load(); err != nil {
+		return nil, fmt.Errorf("appsvc: native 库不可用（P-2）: %w", err)
+	}
+	if prog == nil {
+		prog = func(ProgressEvent) {}
+	}
+	reg := &registry{byID: map[string]forks.LibraryRef{}}
+	// 发现失败（数据根不可读等）不阻塞后端构造：库管理页可手动注册。
+	if refs, err := discoverRefs(deps); err == nil {
+		for _, ref := range refs {
+			reg.put(ref)
+		}
+	}
+	cmp := &realCompare{deps: deps, reg: reg}
+	if err := cmp.loadPersistedPlan(); err != nil {
+		return nil, err
+	}
+	b := &Backend{
+		Library:  &realLibrary{deps: deps, reg: reg},
+		Compare:  cmp,
+		Sync:     &realSync{deps: deps, reg: reg, cmp: cmp, prog: prog},
+		Settings: &realSettings{deps: deps},
+		Mode:     "real",
+		Reason:   "",
+	}
+	return b, nil
+}
+
+// discoverRefs 扫描数据根并把发现结果并入注册表（幂等重扫安全）。
+// panic 兜底同 safeIdentify（目录内存在异常库文件时单文件识别缺陷
+// 不应毁掉整次扫描）。
+func discoverRefs(deps Deps) (refs []forks.LibraryRef, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			refs, err = nil, fmt.Errorf("appsvc: 扫描 %s 时底层会话异常: %v", deps.DataRoot, r)
+		}
+	}()
+	return forks.Discover(deps.DataRoot)
+}
+
+// --- LibraryService ---
+
+type realLibrary struct {
+	deps Deps
+	reg  *registry
+}
+
+// Scan 扫描数据根（§6.1 自动发现），发现的库自动并入注册表。
+func (s *realLibrary) Scan() ([]forks.LibraryRef, error) {
+	refs, err := forks.Discover(s.deps.DataRoot)
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range refs {
+		s.reg.put(ref)
+	}
+	if refs == nil {
+		refs = []forks.LibraryRef{}
+	}
+	return refs, nil
+}
+
+// Register 手动注册：识别失败返回 ForkID 为空串的 ref（携带原始版本供
+// UI 指认，§6.1）；只有路径不可访问等硬错误走 error。
+func (s *realLibrary) Register(path string) (forks.LibraryRef, error) {
+	if _, err := os.Stat(path); err != nil {
+		return forks.LibraryRef{}, fmt.Errorf("appsvc: 库文件不可访问: %w", err)
+	}
+	ref, _ := safeIdentify(path, s.deps.Snapshots)
+	if ref.ForkID != "" {
+		s.reg.put(ref)
+	}
+	return ref, nil
+}
+
+// safeIdentify 识别调用的 panic 兜底：realmc 对空/异常库文件的结构枚举
+// 存在跨包缺陷（realm_get_class_keys n=0 时 &keys[0] 越界 panic，已记
+// notes）；服务层绝不带着 panic 毁掉应用（P-2 不闪退的同一纪律）。
+func safeIdentify(path string, snaps *forks.SnapshotStore) (ref forks.LibraryRef, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			ref, err = forks.LibraryRef{}, fmt.Errorf("appsvc: 识别 %s 时底层会话异常: %v", path, r)
+		}
+	}()
+	return forks.IdentifyCached(path, snaps)
+}
+
+// AssignFork 用户指认 fork 身份（绝不猜，§6.1）；指认后按 Profile 解码版本。
+func (s *realLibrary) AssignFork(path, forkID string) (forks.LibraryRef, error) {
+	p, ok := forks.Profile(forkID)
+	if !ok {
+		return forks.LibraryRef{}, fmt.Errorf("appsvc: 未知 fork %q（可选：%s）", forkID, forkIDs())
+	}
+	dir := filepath.Dir(path)
+	var ver uint64
+	if ref, err := safeIdentify(path, s.deps.Snapshots); err == nil || ref.DiskVersion > 0 {
+		ver = ref.DiskVersion
+		if ref.VersionSource != "" && ref.DiskVersion > 0 {
+			// 保留探测链已拿到的版本来源；仅身份采用用户指认。
+			ref.ForkID = forkID
+			ref.UpstreamVersion, ref.ForkRev = p.DecodeVersion(ref.DiskVersion)
+			s.reg.put(ref)
+			return ref, nil
+		}
+	}
+	ref := forks.LibraryRef{
+		ForkID:        forkID,
+		DataDir:       dir,
+		RealmPath:     path,
+		DiskVersion:   ver,
+		VersionSource: forks.VersionUnknownRunning,
+	}
+	ref.UpstreamVersion, ref.ForkRev = p.DecodeVersion(ver)
+	s.reg.put(ref)
+	return ref, nil
+}
+
+// List 组装库卡片（状态灯数据，§6.1）。
+func (s *realLibrary) List() []LibraryCard {
+	refs := s.reg.all()
+	running := map[string]bool{}
+	if s.deps.Guard != nil {
+		for _, name := range s.deps.Guard.Running() {
+			running[name] = true
+		}
+	}
+	cards := make([]LibraryCard, 0, len(refs))
+	for _, ref := range refs {
+		cards = append(cards, buildCard(ref, running))
+	}
+	return cards
+}
+
+// Remove 解除管理（不碰磁盘）。
+func (s *realLibrary) Remove(forkID string) error {
+	if _, ok := s.reg.get(forkID); !ok {
+		return fmt.Errorf("appsvc: 未注册的 fork %q", forkID)
+	}
+	s.reg.remove(forkID)
+	return nil
+}
+
+// buildCard 从解析结果组装卡片：体积统计 + 版本标注 + 运行状态。
+func buildCard(ref forks.LibraryRef, running map[string]bool) LibraryCard {
+	card := LibraryCard{
+		ForkID:          ref.ForkID,
+		DataDir:         ref.DataDir,
+		RealmPath:       ref.RealmPath,
+		DiskVersion:     ref.DiskVersion,
+		VersionSource:   ref.VersionSource,
+		UpstreamVersion: ref.UpstreamVersion,
+		ForkRev:         ref.ForkRev,
+		VersionLabel:    versionLabel(ref),
+		FilesDir:        filestore.ResolveFilesDir(ref.RealmPath),
+		Registered:      true,
+		RunningNames:    []string{},
+	}
+	if st, err := os.Stat(ref.RealmPath); err == nil {
+		card.RealmSize = st.Size()
+	}
+	card.FilesSize, card.FilesCount = dirStats(card.FilesDir)
+	if p, ok := forks.Profile(ref.ForkID); ok {
+		for _, name := range p.ProcessNames {
+			if running[name] {
+				card.ProcessRunning = true
+				card.RunningNames = append(card.RunningNames, name)
+			}
+		}
+	}
+	return card
+}
+
+// versionLabel 组装版本显示（Ez 解码呈现「52011 = 官方 52 + Ez 11」，§6.1）。
+func versionLabel(ref forks.LibraryRef) string {
+	if ref.DiskVersion == 0 {
+		return "未知（运行中）"
+	}
+	if ref.ForkRev > 0 {
+		return fmt.Sprintf("%d = 官方 %d + %s %d", ref.DiskVersion, ref.UpstreamVersion, ref.ForkID, ref.ForkRev)
+	}
+	return fmt.Sprintf("%d", ref.DiskVersion)
+}
+
+// dirStats 统计目录总字节与条目数（files/ 体积展示；链接按 Lstat 不跟进）。
+func dirStats(dir string) (int64, int) {
+	var size int64
+	var count int
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // 统计尽力而为：单点失败不毁整个卡片
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		size += info.Size()
+		count++
+		return nil
+	})
+	return size, count
+}
+
+func forkIDs() string {
+	ids := make([]string, 0)
+	for _, p := range forks.All() {
+		ids = append(ids, p.ID)
+	}
+	return fmt.Sprint(ids)
+}
+
+// --- CompareService ---
+
+type realCompare struct {
+	deps Deps
+	reg  *registry
+
+	mu   sync.Mutex
+	plan deploy.Plan // 持久化的当前计划（plan.json）
+}
+
+// PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）。
+func (s *realCompare) PreviewDeploy(target string) ([]DiffRow, error) {
+	items, err := s.deps.Hub.ReconcileAgainst(context.Background(), target, kinds)
+	if err != nil {
+		return nil, err
+	}
+	sum := newSummarizer(s.deps.Hub)
+	rows := make([]DiffRow, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, reconcileToRow(it, sum))
+	}
+	return rows, nil
+}
+
+// CompareForks fork↔fork 快照对比（委托 diff 层：两份 presence 差集）。
+func (s *realCompare) CompareForks(source, target string) ([]DiffRow, error) {
+	entries, err := diff.CompareForks(context.Background(), s.deps.Hub, source, target, kinds)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]DiffRow, 0, len(entries))
+	for _, e := range entries {
+		rows = append(rows, diffEntryToRow(e))
+	}
+	return rows, nil
+}
+
+// DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 全量，HB2）。
+func (s *realCompare) DeletedEntries(target string) ([]DiffRow, error) {
+	tombs, err := s.deps.Hub.Tombstones(context.Background(), target)
+	if err != nil {
+		return nil, err
+	}
+	sum := newSummarizer(s.deps.Hub)
+	rows := []DiffRow{}
+	for _, kind := range kinds {
+		for key, deletedAt := range tombs[kind] {
+			rows = append(rows, DiffRow{
+				Kind:           kind,
+				ContentKey:     key,
+				Category:       CategoryRestore,
+				Summary:        sum.summary(kind, key),
+				DeletedAt:      deletedAt,
+				DefaultChecked: false, // §6.2：恢复组默认不勾选
+			})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Kind != rows[j].Kind {
+			return rows[i].Kind < rows[j].Kind
+		}
+		return rows[i].ContentKey < rows[j].ContentKey
+	})
+	return rows, nil
+}
+
+// BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。
+// M1 实际动作面 = 收藏夹 create/update；其余类型与版本更新归入 skip 并
+// 给出原因（谱面集/版本替换的写路径属 M2，§5.1 分阶段启用）。
+func (s *realCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, error) {
+	if target == "" {
+		return deploy.Plan{}, errors.New("appsvc: 生成计划缺少目标 fork")
+	}
+	if len(sel) == 0 {
+		return deploy.Plan{}, errors.New("appsvc: 未勾选任何条目")
+	}
+	ref, ok := s.reg.get(target)
+	if !ok {
+		return deploy.Plan{}, fmt.Errorf("appsvc: 目标 fork %q 未注册，请先在库管理页发现或注册", target)
+	}
+	// 以当前预演结果校验勾选（预览与执行之间目标库可能漂移，执行期还有
+	// 现场复核兜底，§3.3）。
+	items, err := s.deps.Hub.ReconcileAgainst(context.Background(), target, kinds)
+	if err != nil {
+		return deploy.Plan{}, err
+	}
+	byKey := map[string]hub.ReconcileItem{}
+	for _, it := range items {
+		byKey[string(it.Kind)+"\x00"+it.ContentKey] = it
+	}
+	sum := newSummarizer(s.deps.Hub)
+
+	var raw []deploy.PlanItem
+	seen := map[string]bool{}
+	for _, sl := range sel {
+		key := string(sl.Kind) + "\x00" + sl.ContentKey
+		if seen[key] {
+			continue // 同键去重
+		}
+		seen[key] = true
+		it, ok := byKey[key]
+		if !ok {
+			raw = append(raw, deploy.PlanItem{
+				Kind: sl.Kind, ContentKey: sl.ContentKey, Action: deploy.ActionSkip,
+				Summary:    sum.summary(sl.Kind, sl.ContentKey),
+				SkipReason: "预演数据中不存在该键（快照可能已过期，请刷新预览）",
+			})
+			continue
+		}
+		raw = append(raw, planItemFrom(it, sum))
+	}
+	plan, err := deploy.NewPlan(target, raw)
+	if err != nil {
+		return deploy.Plan{}, err
+	}
+	plan.Target = ref // 投放执行需要 RealmPath 落盘位置（deploy.Plan 契约）
+	if err := s.persistPlan(plan); err != nil {
+		return deploy.Plan{}, err
+	}
+	return plan, nil
+}
+
+// planItemFrom 单条对账结果 → 计划项（M1 动作面收缩，超出部分计 skip）。
+// 勾选恢复组 = 用户显式拍板投放（Restore 标记，投放成功清 tombstone）；
+// 勾选弱键疑似 = 已拍板按版本更新处理（NeedsConfirm 置位留痕，M1 实际
+// 动作仍属 M2 写路径）。
+func planItemFrom(it hub.ReconcileItem, sum *summarizer) deploy.PlanItem {
+	item := deploy.PlanItem{
+		Kind:       it.Kind,
+		ContentKey: it.ContentKey,
+		Summary:    sum.summary(it.Kind, it.ContentKey),
+		Restore:    it.Restorable,
+	}
+	if it.Kind != hub.KindCollection {
+		item.Action, item.SkipReason = deploy.ActionSkip, "谱面集/难度投放属 M2 写路径（§5.1 分阶段），M1 仅收藏夹"
+		return item
+	}
+	switch it.Category {
+	case hub.ReconcileCreate:
+		item.Action = deploy.ActionCreate
+	case hub.ReconcileConflict:
+		item.Action = deploy.ActionUpdate // 冲突默认 hub 覆盖（就地更新白名单列，§5.4）
+	default:
+		item.Action, item.SkipReason = deploy.ActionSkip, "收藏夹无版本更新语义（内容键即 Name）"
+	}
+	return item
+}
+
+// CurrentPlan 返回持久化的当前计划。
+func (s *realCompare) CurrentPlan() (deploy.Plan, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.plan.Items) == 0 && s.plan.TargetFork == "" {
+		return deploy.Plan{}, ErrNoPlan
+	}
+	return s.plan, nil
+}
+
+func (s *realCompare) planPath() string {
+	return filepath.Join(s.deps.DataDir, "plan.json")
+}
+
+func (s *realCompare) persistPlan(plan deploy.Plan) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("appsvc: 序列化投放计划: %w", err)
+	}
+	if err := os.WriteFile(s.planPath(), b, 0o644); err != nil {
+		return fmt.Errorf("appsvc: 写入投放计划 %s: %w", s.planPath(), err)
+	}
+	s.plan = plan
+	return nil
+}
+
+func (s *realCompare) loadPersistedPlan() error {
+	b, err := os.ReadFile(s.planPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("appsvc: 读取投放计划 %s: %w", s.planPath(), err)
+	}
+	var plan deploy.Plan
+	if err := json.Unmarshal(b, &plan); err != nil {
+		return nil // 坏文件按无计划处理（重建即可，不阻塞启动）
+	}
+	s.plan = plan
+	return nil
+}
+
+// reconcileToRow hub 对账条目 → UI 行（含恢复组归并与默认勾选）。
+func reconcileToRow(it hub.ReconcileItem, sum *summarizer) DiffRow {
+	row := DiffRow{
+		Kind:       it.Kind,
+		ContentKey: it.ContentKey,
+	}
+	fields := make([]FieldDiff, 0, len(it.ConflictFields))
+	for _, f := range it.ConflictFields {
+		fields = append(fields, FieldDiff{Field: f.Field, HubValue: f.HubValue, ForkValue: f.ForkValue})
+	}
+	row.ConflictFields = fields
+	row.IdentityKey, row.Evidence = it.IdentityKey, it.Evidence
+	row.DeletedAt = it.DeletedAt
+	// 默认勾选（§6.2）：新增/冲突默认勾选（冲突默认 hub 覆盖，§5.4）；
+	// 版本更新强键勾选、弱键需拍板不勾；恢复组默认不勾。
+	checked := false
+	switch {
+	case it.Restorable:
+		row.Category = CategoryRestore
+	case it.Category == hub.ReconcileCreate:
+		row.Category, checked = CategoryCreate, true
+	case it.Category == hub.ReconcileConflict:
+		row.Category, checked = CategoryConflict, true
+	case it.Category == hub.ReconcileVersionUpdate:
+		row.Category = CategoryVersionUpdate
+		checked = it.Evidence == EvidenceStrong
+		if it.Evidence == EvidenceWeak {
+			row.SkipReason = "元数据弱键「疑似」版本更新，需用户拍板（§5.4 三选一）"
+		}
+	}
+	row.DefaultChecked = checked
+	row.Summary = sum.summary(it.Kind, it.ContentKey)
+	return row
+}
+
+// summarizer 内容键 → 人类可读摘要（§6.2）。收藏夹内容键即 Name
+//（§4.2 第一层），键本身就是摘要，无需查库；谱面集摘要走 hub 公共
+// 查询面（当前版本集合的 Title/Artist 规范值）。
+type summarizer struct {
+	setTitles map[string]string // hash → "Artist - Title（Author）"
+}
+
+func newSummarizer(h *hub.Store) *summarizer {
+	s := &summarizer{setTitles: map[string]string{}}
+	if sets, err := h.CurrentBeatmapSets(context.Background()); err == nil {
+		for _, e := range sets {
+			s.setTitles[e.Set.Hash] = fmt.Sprintf("%s - %s（%s）", e.Set.Artist, e.Set.Title, e.Set.AuthorUsername)
+		}
+	}
+	return s
+}
+
+func (s *summarizer) summary(kind hub.EntityKind, key string) string {
+	switch kind {
+	case hub.KindCollection:
+		return "收藏夹「" + key + "」"
+	case hub.KindBeatmapSet:
+		if t, ok := s.setTitles[key]; ok {
+			return t
+		}
+		return "谱面集 " + shortKey(key)
+	default:
+		return string(kind) + " " + shortKey(key)
+	}
+}
+
+// shortKey 长哈希截断显示。
+func shortKey(key string) string {
+	if len(key) > 12 {
+		return key[:12] + "…"
+	}
+	return key
+}
+
+// --- SyncService ---
+
+type realSync struct {
+	deps  Deps
+	reg   *registry
+	cmp   *realCompare
+	prog  ProgressSink
+	cRun  *collect.Runner
+	dRun  *deploy.Runner
+
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	status SyncStatus
+}
+
+// Collect 对单个 fork 执行收集（§6.3 收集阶段）。游戏运行中被守卫拦截；
+// 编排主体委托 collect.Runner（桩未施工时如实上抛其错误）。
+func (s *realSync) Collect(forkID string) (collect.Report, error) {
+	if err := s.begin("collect", forkID); err != nil {
+		return collect.Report{}, err
+	}
+	defer s.finish()
+	ref, ok := s.reg.get(forkID)
+	if !ok {
+		return collect.Report{}, fmt.Errorf("appsvc: 未注册的 fork %q，请先在库管理页发现或注册", forkID)
+	}
+	if err := s.guardClear(); err != nil {
+		return collect.Report{}, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.setCancel(cancel)
+	defer cancel()
+	s.prog(ProgressEvent{Service: "collect", Stage: string(collect.StageProject), At: time.Now(),
+		Message: fmt.Sprintf("开始收集 %s", forkID)})
+	report, err := s.cRunner().Collect(ctx, ref, func(stage collect.Stage, current, total int) {
+		s.prog(ProgressEvent{Service: "collect", Stage: string(stage), Current: current, Total: total,
+			At: time.Now(), Message: fmt.Sprintf("%s：%d/%d", stageLabel(stage), current, total)})
+	})
+	if report.Entities == nil {
+		report.Entities = map[hub.EntityKind]int{}
+	}
+	if report.AdoptModeCounts == nil {
+		report.AdoptModeCounts = map[filestore.LinkMode]int{}
+	}
+	if report.Skips == nil {
+		report.Skips = []hub.SkipStat{}
+	}
+	return report, err
+}
+
+// DeployCurrentPlan 执行当前计划（§6.3 投放执行：守卫 → 备份 → 批事务）。
+func (s *realSync) DeployCurrentPlan() (deploy.Report, error) {
+	plan, err := s.cmp.CurrentPlan()
+	if err != nil {
+		return deploy.Report{}, err
+	}
+	if err := s.begin("deploy", plan.TargetFork); err != nil {
+		return deploy.Report{}, err
+	}
+	defer s.finish()
+	if err := s.guardClear(); err != nil {
+		return deploy.Report{}, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.setCancel(cancel)
+	defer cancel()
+	s.prog(ProgressEvent{Service: "deploy", Stage: string(deploy.StageGuard), At: time.Now(),
+		Message: fmt.Sprintf("开始投放到 %s（%d 项）", plan.TargetFork, len(plan.Items))})
+	report, err := s.dRunner().Deploy(ctx, plan, func(stage deploy.Stage, batchIndex, batchTotal, current, total int) {
+		s.prog(ProgressEvent{Service: "deploy", Stage: string(stage), Current: current, Total: total,
+			At: time.Now(), Message: fmt.Sprintf("批 %d/%d · %s：%d/%d", batchIndex, batchTotal, stageLabel(stage), current, total)})
+	})
+	if report.Skipped == nil {
+		report.Skipped = []hub.SkipStat{}
+	}
+	if report.Applied == nil {
+		report.Applied = []deploy.ItemResult{}
+	}
+	if report.FailedBatches == nil {
+		report.FailedBatches = []deploy.BatchFailure{}
+	}
+	if report.NotRun == nil {
+		report.NotRun = []deploy.PlanItem{}
+	}
+	if report.Repointed == nil {
+		report.Repointed = []deploy.RepointedItem{}
+	}
+	return report, err
+}
+
+// Cancel 取消当前长任务（批间生效，批事务不可打断，§3.3）。
+func (s *realSync) Cancel() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+}
+
+// Running 当前任务状态。
+func (s *realSync) Running() SyncStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status
+}
+
+// RestoreBackup 从备份还原（guard.Backups 委托；还原前自动再备份）。
+func (s *realSync) RestoreBackup(forkID, backupPath string) error {
+	ref, ok := s.reg.get(forkID)
+	if !ok {
+		return fmt.Errorf("appsvc: 未注册的 fork %q", forkID)
+	}
+	if s.deps.Backups == nil {
+		return errors.New("appsvc: 未配置备份目录")
+	}
+	return s.deps.Backups.Restore(backupPath, ref.RealmPath)
+}
+
+func (s *realSync) cRunner() *collect.Runner {
+	if s.cRun == nil {
+		s.cRun = collect.NewRunner(collect.Deps{
+			Hub: s.deps.Hub, Files: s.deps.Files,
+			Snapshots: s.deps.Snapshots, Guard: s.deps.Guard,
+		})
+	}
+	return s.cRun
+}
+
+func (s *realSync) dRunner() *deploy.Runner {
+	if s.dRun == nil {
+		s.dRun = deploy.NewRunner(deploy.Deps{
+			Hub: s.deps.Hub, Files: s.deps.Files,
+			Backups: s.deps.Backups, Guard: s.deps.Guard,
+		})
+	}
+	return s.dRun
+}
+
+// guardClear 守卫预检：名单内进程在运行即拒绝（S5 友好提示先行）。
+func (s *realSync) guardClear() error {
+	if s.deps.Guard == nil {
+		return nil
+	}
+	if names := s.deps.Guard.Running(); len(names) > 0 {
+		return fmt.Errorf("%w（运行中：%v）", guard.ErrGameRunning, names)
+	}
+	return nil
+}
+
+func (s *realSync) begin(kind, forkID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status.Busy {
+		return ErrBusy
+	}
+	s.status = SyncStatus{Busy: true, Kind: kind, ForkID: forkID}
+	return nil
+}
+
+func (s *realSync) finish() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancel = nil
+	s.status = SyncStatus{}
+}
+
+func (s *realSync) setCancel(cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancel = cancel
+}
+
+// stageLabel 阶段中文名（进度消息用）。
+func stageLabel(stage any) string {
+	switch v := stage.(type) {
+	case collect.Stage:
+		switch v {
+		case collect.StageProject:
+			return "只读投影"
+		case collect.StageApply:
+			return "入 hub"
+		case collect.StageAdopt:
+			return "收仓+回链"
+		}
+	case deploy.Stage:
+		switch v {
+		case deploy.StageGuard:
+			return "守卫复查"
+		case deploy.StageBackup:
+			return "自动备份"
+		case deploy.StageLink:
+			return "建链接"
+		case deploy.StageWrite:
+			return "事务写入"
+		case deploy.StageVerify:
+			return "结构校验"
+		}
+	}
+	return fmt.Sprint(stage)
+}
+
+// --- SettingsService ---
+
+type realSettings struct {
+	deps Deps
+}
+
+// Get 组装设置页数据（§6.4 M1 骨架，只读显示）。
+func (s *realSettings) Get() (SettingsInfo, error) {
+	info := SettingsInfo{
+		Mode:       "real",
+		DataDir:    s.deps.DataDir,
+		HubDBPath:  filepath.Join(s.deps.DataDir, "hub.db"),
+		BackupsDir: "",
+		GuardNames: []string{},
+		LinkNote:   "按 §5.3 自动分级：符号链接 → 硬链接（同卷）→ 复制兜底；探测不可用时逐级降级",
+		NativeLibOK: true,
+	}
+	if s.deps.Backups != nil {
+		info.BackupsDir = s.deps.Backups.Dir
+		if entries, err := os.ReadDir(info.BackupsDir); err == nil {
+			info.BackupsCount = len(entries)
+		}
+	}
+	names := map[string]bool{}
+	for _, p := range forks.All() {
+		for _, n := range p.ProcessNames {
+			if !names[n] {
+				names[n] = true
+				info.GuardNames = append(info.GuardNames, n)
+			}
+		}
+	}
+	sort.Strings(info.GuardNames)
+	if s.deps.Files != nil {
+		if caps, err := s.deps.Files.Probe(); err == nil {
+			info.LinkSymlink, info.LinkHardlink = caps.Symlink, caps.Hardlink
+		} else {
+			info.LinkNote = "链接能力探测失败（" + err.Error() + "）；投放时将降级为复制"
+		}
+	}
+	return info, nil
+}
