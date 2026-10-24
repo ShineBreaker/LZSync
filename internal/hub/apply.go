@@ -17,7 +17,17 @@ type Snapshot struct {
 	CollectedAt time.Time
 	Collections []Collection
 	BeatmapSets []BeatmapSet
+	Skins       []Skin  // v2：M2 皮肤实体（Hash 为空的行由投影端跳过，§4.2）
+	Scores      []Score // v2：M2 成绩实体（组合内容键见 ScoreContentKey）
 	Skips       []SkipStat // 投影期跳过（进 collect_log）
+}
+
+// ScoreContentKey 把成绩组合内容键 (BeatmapHash, Hash)（§4.2 第一层）
+// 编码为 presence/tombstone 的单列内容键。两段均为 SHA-256 hex（字符集
+// [0-9a-f]、定长 64，不含分隔符 "|"），编码无歧义；这是组合键的规范
+// 序列化约定，解析侧按首个 "|" 拆分。
+func ScoreContentKey(beatmapHash, hash string) string {
+	return beatmapHash + "|" + hash
 }
 
 // ApplyResult 是 ApplySnapshot 的执行摘要。
@@ -79,6 +89,18 @@ func (s *Store) ApplySnapshot(ctx context.Context, snap Snapshot) (ApplyResult, 
 			return res, err
 		}
 		res.VersionLinksCreated += int(links)
+	}
+	for i := range snap.Skins {
+		if err := upsertSkin(ctx, tx, &snap.Skins[i], snap.ForkID, now); err != nil {
+			return res, err
+		}
+		res.EntitiesWritten[KindSkin]++
+	}
+	for i := range snap.Scores {
+		if err := upsertScore(ctx, tx, &snap.Scores[i], snap.ForkID, now); err != nil {
+			return res, err
+		}
+		res.EntitiesWritten[KindScore]++
 	}
 
 	// 效果 2 + 3：presence 整段重写 + 差集 tombstone（HB2）。
@@ -164,10 +186,47 @@ ON CONFLICT(content_hash) DO UPDATE SET
 	return nil
 }
 
-// rewritePresence 按 fork 整段重写两类 presence（快照语义，幂等），并就
+// upsertSkin 皮肤实体行（内容键 = Hash，v2）。同 HB3 语义：payload 与
+// origin_fork 整行覆盖；origin_guid 仅首次插入落库。
+func upsertSkin(ctx context.Context, tx *sql.Tx, sk *Skin, fork string, now int64) error {
+	payload, err := json.Marshal(sk)
+	if err != nil {
+		return fmt.Errorf("hub: 序列化皮肤 %q: %w", sk.Hash, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO skin(content_hash, payload, origin_guid, origin_fork, first_seen, updated_at)
+VALUES(?,?,?,?,?,?)
+ON CONFLICT(content_hash) DO UPDATE SET
+  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
+		sk.Hash, string(payload), sk.ID, fork, now, now); err != nil {
+		return fmt.Errorf("hub: upsert 皮肤 %q: %w", sk.Hash, err)
+	}
+	return nil
+}
+
+// upsertScore 成绩实体行（组合内容键 = (BeatmapHash, Hash)，v2）。同 HB3
+// 语义；皮肤/成绩无版本链语义（superseded_by 是 beatmap_set 专属，HB1）。
+func upsertScore(ctx context.Context, tx *sql.Tx, sc *Score, fork string, now int64) error {
+	payload, err := json.Marshal(sc)
+	if err != nil {
+		return fmt.Errorf("hub: 序列化成绩 %q: %w", ScoreContentKey(sc.BeatmapHash, sc.Hash), err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO score(beatmap_hash, content_hash, payload, origin_guid, origin_fork, first_seen, updated_at)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(beatmap_hash, content_hash) DO UPDATE SET
+  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
+		sc.BeatmapHash, sc.Hash, string(payload), sc.ID, fork, now, now); err != nil {
+		return fmt.Errorf("hub: upsert 成绩 %q: %w", ScoreContentKey(sc.BeatmapHash, sc.Hash), err)
+	}
+	return nil
+}
+
+// rewritePresence 按 fork 整段重写四类 presence（快照语义，幂等），并就
 // 上次快照差集生成 tombstone（HB2）。防误标三道闸：
 //   - 「投影完整成功才落库」由 Snapshot 构造方保证（见 Snapshot 注释）；
-//   - 消失键已被版本链取代（链尾仍在本次快照中）→ 不算删除；
+//   - 消失键已被版本链取代（链尾仍在本次快照中）→ 不算删除（仅
+//     beatmap_set 有版本链，skin/score 按普通差集）；
 //   - 本次出现的键命中既有 tombstone → 即刻清除（同键重现）。
 //
 // 必须在版本链维护之后调用（链状态参与差集判定）。
@@ -177,27 +236,47 @@ func rewritePresence(ctx context.Context, tx *sql.Tx, snap *Snapshot, now int64)
 		keys  []string
 		local map[string]string // 内容键 → fork 侧投影 JSON（local_values）
 	}
+	newPlan := func(kind EntityKind, n int) kindPayload {
+		return kindPayload{kind: kind, keys: make([]string, 0, n), local: make(map[string]string, n)}
+	}
 	plans := []kindPayload{
-		{kind: KindCollection, local: map[string]string{}},
-		{kind: KindBeatmapSet, local: map[string]string{}},
+		newPlan(KindCollection, len(snap.Collections)),
+		newPlan(KindBeatmapSet, len(snap.BeatmapSets)),
+		newPlan(KindSkin, len(snap.Skins)),
+		newPlan(KindScore, len(snap.Scores)),
+	}
+	appendPlan := func(p *kindPayload, key string, v any) error {
+		j, mErr := json.Marshal(v)
+		if mErr != nil {
+			return fmt.Errorf("hub: 序列化 %s %q presence: %w", p.kind, key, mErr)
+		}
+		p.keys = append(p.keys, key)
+		p.local[key] = string(j)
+		return nil
 	}
 	for i := range snap.Collections {
 		c := &snap.Collections[i]
-		j, mErr := json.Marshal(c)
-		if mErr != nil {
-			return 0, 0, fmt.Errorf("hub: 序列化收藏 %q presence: %w", c.Name, mErr)
+		if aErr := appendPlan(&plans[0], c.Name, c); aErr != nil {
+			return 0, 0, aErr
 		}
-		plans[0].keys = append(plans[0].keys, c.Name)
-		plans[0].local[c.Name] = string(j)
 	}
 	for i := range snap.BeatmapSets {
 		bs := &snap.BeatmapSets[i]
-		j, mErr := json.Marshal(bs)
-		if mErr != nil {
-			return 0, 0, fmt.Errorf("hub: 序列化谱面集 %q presence: %w", bs.Hash, mErr)
+		if aErr := appendPlan(&plans[1], bs.Hash, bs); aErr != nil {
+			return 0, 0, aErr
 		}
-		plans[1].keys = append(plans[1].keys, bs.Hash)
-		plans[1].local[bs.Hash] = string(j)
+	}
+	for i := range snap.Skins {
+		sk := &snap.Skins[i]
+		if aErr := appendPlan(&plans[2], sk.Hash, sk); aErr != nil {
+			return 0, 0, aErr
+		}
+	}
+	for i := range snap.Scores {
+		sc := &snap.Scores[i]
+		if aErr := appendPlan(&plans[3], ScoreContentKey(sc.BeatmapHash, sc.Hash), sc); aErr != nil {
+			return 0, 0, aErr
+		}
 	}
 
 	for _, p := range plans {

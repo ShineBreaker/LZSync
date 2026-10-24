@@ -149,6 +149,56 @@ func (s *Store) LoadCollection(ctx context.Context, contentKey string) (Collecti
 	return c, Origin{GUID: originGUID, Fork: originFork}, true, nil
 }
 
+// LoadSkin 按内容键读取皮肤 canonical 值及其来源声明（v2）。
+// 不存在返回 (零值, Origin{}, false, nil)。
+func (s *Store) LoadSkin(ctx context.Context, contentHash string) (Skin, Origin, bool, error) {
+	var (
+		payload    string
+		originGUID string
+		originFork string
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT payload, origin_guid, origin_fork FROM skin WHERE content_hash=?`,
+		contentHash).Scan(&payload, &originGUID, &originFork)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Skin{}, Origin{}, false, nil
+	}
+	if err != nil {
+		return Skin{}, Origin{}, false, fmt.Errorf("hub: 读皮肤 %q: %w", contentHash, err)
+	}
+	var sk Skin
+	if err := json.Unmarshal([]byte(payload), &sk); err != nil {
+		return Skin{}, Origin{}, false, fmt.Errorf("hub: 解码皮肤 %q payload: %w", contentHash, err)
+	}
+	return sk, Origin{GUID: originGUID, Fork: originFork}, true, nil
+}
+
+// LoadScore 按组合内容键 (BeatmapHash, Hash) 读取成绩 canonical 值及其
+// 来源声明（v2）。
+func (s *Store) LoadScore(ctx context.Context, beatmapHash, hash string) (Score, Origin, bool, error) {
+	var (
+		payload    string
+		originGUID string
+		originFork string
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT payload, origin_guid, origin_fork FROM score WHERE beatmap_hash=? AND content_hash=?`,
+		beatmapHash, hash).Scan(&payload, &originGUID, &originFork)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Score{}, Origin{}, false, nil
+	}
+	if err != nil {
+		return Score{}, Origin{}, false,
+			fmt.Errorf("hub: 读成绩 %q: %w", ScoreContentKey(beatmapHash, hash), err)
+	}
+	var sc Score
+	if err := json.Unmarshal([]byte(payload), &sc); err != nil {
+		return Score{}, Origin{}, false,
+			fmt.Errorf("hub: 解码成绩 %q payload: %w", ScoreContentKey(beatmapHash, hash), err)
+	}
+	return sc, Origin{GUID: originGUID, Fork: originFork}, true, nil
+}
+
 // BeatmapSetEntry 是当前版本谱面集查询结果行。
 type BeatmapSetEntry struct {
 	Set    BeatmapSet
