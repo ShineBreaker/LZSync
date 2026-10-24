@@ -23,7 +23,7 @@ type Action string
 const (
 	ActionCreate         Action = "create"          // 目标缺行 → 以 origin_guid 新建（§4.2）
 	ActionUpdate         Action = "update"          // 内容键命中 → 就地更新白名单列（保目标 Guid）
-	ActionVersionReplace Action = "version-replace" // 版本更新 → 整集原子替换（M2，§5.4）
+	ActionVersionReplace Action = "version-replace" // 版本更新 → 整集原子替换三步（§5.4）
 	ActionSkip           Action = "skip"            // 跳过（必须携带原因）
 )
 
@@ -39,6 +39,12 @@ type PlanItem struct {
 	// HB2/§6.2）：默认不进计划；用户勾选投放成功后同时清除该 tombstone
 	//（§5.4 删除不复活——确认动作即清除）。
 	Restore bool
+	// OldContentKey 版本替换专用（Action == ActionVersionReplace 时必填）：
+	// 目标现场旧版本集的内容键——由对账按谱面身份键/版本链定位
+	//（beatmap_identity / superseded_by 链，§4.4），执行期在现场按此键
+	// 重寻址旧行（§3.3 现场复核）。ContentKey 则是 hub 链尾新版本键
+	//（写入面 canonical payload 的读取键）。
+	OldContentKey string
 }
 
 // Plan 投放计划：预览页勾选结果的快照（计划项按内容键幂等，§3.3——重跑
@@ -53,8 +59,8 @@ type Plan struct {
 
 // NewPlan 构造并校验计划：targetFork 非空；skip 项必须带原因；同一
 // (Kind, ContentKey) 不得重复；Restore 项必须为 create 动作（恢复语义 =
-// 重建整行）。NeedsConfirm 项必须已经用户拍板方可进入（由调用方 appsvc
-// 保证）。
+// 重建整行）；version-replace 项必须携带旧版本键且与新键不同。NeedsConfirm
+// 项必须已经用户拍板方可进入（由调用方 appsvc 保证）。
 func NewPlan(targetFork string, items []PlanItem) (Plan, error) {
 	if targetFork == "" {
 		return Plan{}, errors.New("deploy: 计划缺少目标 fork")
@@ -78,6 +84,10 @@ func NewPlan(targetFork string, items []PlanItem) (Plan, error) {
 			return Plan{}, fmt.Errorf("deploy: 恢复项 (%s, %s) 必须是 create 动作，got %s",
 				it.Kind, it.ContentKey, it.Action)
 		}
+		if it.Action == ActionVersionReplace && (it.OldContentKey == "" || it.OldContentKey == it.ContentKey) {
+			return Plan{}, fmt.Errorf("deploy: version-replace 项 (%s, %s) 缺旧版本键或新旧键相同",
+				it.Kind, it.ContentKey)
+		}
 	}
 	return Plan{TargetFork: targetFork, Items: items}, nil
 }
@@ -88,6 +98,11 @@ type BuildOptions struct {
 	// tombstone 的 create 项默认不进计划（§5.4 删除不复活），出现在本名单
 	// 才进入，且投放成功后同时清除对应 tombstone。
 	RestoreKeys []string
+	// ConfirmVersionReplaceKeys 元数据弱键「疑似」版本更新经用户拍板
+	// 「替换」的 hub 链尾键（ReconcileItem.CurrentKey）：弱键项默认不进
+	// 计划（NeedsConfirm 语义——§5.4 三选一：替换/并存/忽略），出现在本
+	// 名单才以 version-replace 进入（「并存」走普通 create 链路，不经本名单）。
+	ConfirmVersionReplaceKeys []string
 }
 
 // BuildPlan 从 hub 对账结果构建默认投放计划（§3.2 计划 / §6.2 默认勾选）：
@@ -95,9 +110,8 @@ type BuildOptions struct {
 // 默认排除，仅 RestoreKeys 显式勾选者进入）− 需确认项。conflict → update
 // （默认 hub 覆盖目标，§5.4 方向模型）。
 //
-// 施工面：收藏夹（M1，§5.1 最安全首投放路径）+ 谱面集（M2——create/
-// update 动作；版本更新的整集原子替换动作由后续块启用，本版以 skip 项
-// 呈现并计数，不静默吞）。其他实体类型返回错误，由后续块放开。
+// 施工面：收藏夹（M1，§5.1 最安全首投放路径）+ 谱面集（M2 create/update +
+// 版本更新整集原子替换，§5.4 三步）。其他实体类型返回错误，由后续块放开。
 func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts BuildOptions) (Plan, error) {
 	if target.ForkID == "" {
 		return Plan{}, errors.New("deploy: BuildPlan 缺目标 fork 身份")
@@ -112,6 +126,10 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	restore := make(map[string]bool, len(opts.RestoreKeys))
 	for _, k := range opts.RestoreKeys {
 		restore[k] = true
+	}
+	confirmVersion := make(map[string]bool, len(opts.ConfirmVersionReplaceKeys))
+	for _, k := range opts.ConfirmVersionReplaceKeys {
+		confirmVersion[k] = true
 	}
 	var planItems []PlanItem
 	for _, ri := range items {
@@ -165,14 +183,25 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 					Summary:    beatmapSetSummary(ri.ContentKey),
 				})
 			case hub.ReconcileVersionUpdate:
-				// 版本更新 = 整集原子替换（§5.4 三步），执行面属后续施工块；
-				// 本版以 skip 项呈现（计划面可见 + 执行期如实计数，不静默吞）。
+				// 版本更新 = 整集原子替换（§5.4 三步）。OnlineID 强键默认
+				// 执行；元数据弱键「疑似」默认不进计划——配对建议需用户
+				// 三选一拍板（替换/并存/忽略，§5.4），显式确认（以 hub
+				// 链尾键为锚）后按替换执行。
+				switch ri.Evidence {
+				case hub.EvidenceStrong:
+				case hub.EvidenceWeak:
+					if !confirmVersion[ri.CurrentKey] {
+						continue
+					}
+				default:
+					return Plan{}, fmt.Errorf("deploy: 未知证据强度 %q（键 %s），属工具缺陷请报告", ri.Evidence, ri.ContentKey)
+				}
 				planItems = append(planItems, PlanItem{
-					Kind:       ri.Kind,
-					ContentKey: ri.ContentKey,
-					Action:     ActionSkip,
-					Summary:    beatmapSetSummary(ri.ContentKey),
-					SkipReason: "版本更新动作尚未启用（整集原子替换待施工，本版不投放）",
+					Kind:          ri.Kind,
+					ContentKey:    ri.CurrentKey,
+					OldContentKey: ri.ContentKey,
+					Action:        ActionVersionReplace,
+					Summary:       versionReplaceSummary(ri.ContentKey, ri.CurrentKey),
 				})
 			default:
 				return Plan{}, fmt.Errorf("deploy: 未知对账分类 %q（键 %s）", ri.Category, ri.ContentKey)
@@ -196,9 +225,18 @@ func collectionSummary(name string) string {
 // beatmapSetSummary 谱面集摘要：对账面只携带内容键（hash），摘要取其
 // 前缀（预览页的人类可读锚点；曲名等由 payload 查询面补充，§6.2）。
 func beatmapSetSummary(contentHash string) string {
+	return "谱面集 " + hashPrefix(contentHash) + "…"
+}
+
+// versionReplaceSummary 版本替换摘要：新旧内容键前缀对照（预览页锚点）。
+func versionReplaceSummary(oldHash, newHash string) string {
+	return "谱面集版本替换 " + hashPrefix(oldHash) + "… → " + hashPrefix(newHash) + "…"
+}
+
+func hashPrefix(contentHash string) string {
 	prefix := contentHash
 	if len(prefix) > 12 {
 		prefix = prefix[:12]
 	}
-	return "谱面集 " + prefix + "…"
+	return prefix
 }

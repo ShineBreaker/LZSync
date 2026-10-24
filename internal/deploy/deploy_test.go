@@ -70,6 +70,21 @@ func TestNewPlanValidation(t *testing.T) {
 	}); err != nil {
 		t.Errorf("合法恢复项不应报错: %v", err)
 	}
+	if _, err := NewPlan("lazer", []PlanItem{
+		{Kind: hub.KindBeatmapSet, ContentKey: "new", Action: ActionVersionReplace},
+	}); err == nil {
+		t.Error("version-replace 缺旧版本键应报错")
+	}
+	if _, err := NewPlan("lazer", []PlanItem{
+		{Kind: hub.KindBeatmapSet, ContentKey: "same", OldContentKey: "same", Action: ActionVersionReplace},
+	}); err == nil {
+		t.Error("version-replace 新旧键相同应报错")
+	}
+	if _, err := NewPlan("lazer", []PlanItem{
+		{Kind: hub.KindBeatmapSet, ContentKey: "new", OldContentKey: "old", Action: ActionVersionReplace},
+	}); err != nil {
+		t.Errorf("合法 version-replace 项不应报错: %v", err)
+	}
 }
 
 func TestGuidRoundtrip(t *testing.T) {
@@ -301,8 +316,8 @@ func TestDeployFixtureRoundtrip(t *testing.T) {
 	seedB.Scores = nil
 	seedB.Files = nil
 	seedB.Collections = []hub.Collection{
-		{Name: "标准收藏夹"},        // 与 A 同名 → 冲突 → update
-		{Name: "delta 独有夹"},      // B 独有 → 不进计划
+		{Name: "标准收藏夹"},     // 与 A 同名 → 冲突 → update
+		{Name: "delta 独有夹"}, // B 独有 → 不进计划
 	}
 	dirB := t.TempDir()
 	refB, err := fixture.Build(ctx, fixture.Spec{

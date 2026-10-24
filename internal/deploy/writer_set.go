@@ -13,9 +13,13 @@ package deploy
 //
 // 就地更新（同 Hash 内容键命中，§4.2）：只更新集行标量白名单列，保目标
 // Guid 与目标端本地引用；同 Hash 必同难度内容集合（集 Hash = 集内全部
-// .osu 拼接），不替换 Beatmaps / Files 列表——「就地更新难度时复用既有
-// Metadata 行」的前提（同 Hash 难度内容等价）自然成立，难度行的新建 /
-// 复用对偶在版本更新的整集替换（§5.4，后续施工块）才出现。
+// .osu 拼接），不替换 Beatmaps / Files 列表——难度行的新建/复用对偶只出
+// 现在版本更新的整集替换（§5.4）。
+//
+// 版本替换（version-replace，§5.4 三步，单批事务内）：① 以 origin_guid
+// 新建新版本整套（复用 createSet）；② 目标旧版本集写 DeletePending=true
+//（S4 软删）；③ 解绑旧难度上的本地成绩（Score.BeatmapInfo 关系置 null、
+// BeatmapHash 字符串列保留）。
 //
 // S8：OnlineID 仅同 ServerRealm（origin_fork → ForkProfile 派生）携带；
 // 异域新行置 -1、更新行不触碰该列（§4.4 / §5.4）。
@@ -161,9 +165,13 @@ func prepareBeatmapSetWriter(r *realmc.Realm) (*beatmapSetWriter, error) {
 	return w, nil
 }
 
-// exec 执行单个谱面集计划项（§3.3 执行期现场复核 + 写入）。sameRealm 是
+// exec 执行单个谱面集计划项（§3.3 执行期现场复核 + 写入）。oldKey 是
+// version-replace 项的目标旧版本集内容键（其他动作空串）。sameRealm 是
 // S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）。
-func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, sameRealm bool, action Action) (applied, skipStat, string, error) {
+func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool, action Action) (applied, skipStat, string, error) {
+	if action == ActionVersionReplace {
+		return w.execVersionReplace(bs, oldKey, sameRealm)
+	}
 	if w.absent {
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
 	}
@@ -206,6 +214,166 @@ func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, sameRealm bool, action Action
 	}
 	w.r.ReleaseObject(obj)
 	return applied{action: ActionCreate}, skipStat{}, repoint, nil
+}
+
+// execVersionReplace 版本更新的整集原子替换（§5.4 三步，单批事务内）：
+// ① 写入新版本整套（以 origin_guid 新建 Set+难度+Metadata+Files+RealmFile）；
+// ② 目标旧版本集写 DeletePending=true（S4 软删——不是删除，是「同一谱面
+// 换新版本」原子动作的一半，物理清理由目标客户端兑现）；③ 解绑旧难度上
+// 的本地成绩。旧集由对账定位的旧键（OldContentKey）在现场重寻址——预览
+// 与执行之间目标库可能漂移（§3.3），按现场「新行在否 × 旧行在否 × 旧行
+// 软删否」组合复核改判：
+//
+//	新不在+旧不在  → 改判 create（旧版本已被清理，无旧可替换）
+//	新不在+旧在    → 完整三步（正常路径）
+//	新在+旧已软删/消失 → 跳过（重续判定：三步要么整批做过要么没做过，S1）
+//	新在+旧未软删  → 跳过重建只补②③（新行已由第三方/前次批落位）
+//
+// 重续时不比对新行标量（本地行为字段如 LastPlayed 默认保留目标值，D22；
+// 整集身份以内容键幂等锚定）。
+func (w *beatmapSetWriter) execVersionReplace(bs hub.BeatmapSet, oldKey string, sameRealm bool) (applied, skipStat, string, error) {
+	if w.absent {
+		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
+	}
+	// DeletePending 与难度 Hash 是本动作的锚定列（软删面 + 成绩解绑面），
+	// 缺列则整集替换无法执行，计数跳过（缺列不静默吞，§1.5-4）。
+	dpKey, ok := w.setCols["DeletePending"]
+	if !ok {
+		return applied{}, skipStat{reason: "目标库 BeatmapSet 缺 DeletePending 列，无法软删旧版本（版本替换跳过）", count: 1}, "", nil
+	}
+	if _, ok := w.bmCols["Hash"]; !ok {
+		return applied{}, skipStat{reason: "目标库 Beatmap 缺 Hash 列，无法锚定旧难度成绩解绑（版本替换跳过）", count: 1}, "", nil
+	}
+	newRow, err := w.r.FindFirstByString(w.setCK, w.setCols["Hash"], bs.Hash)
+	if err != nil {
+		return applied{}, skipStat{}, "", fmt.Errorf("deploy: 现场匹配谱面集 %s: %w", bs.Hash, err)
+	}
+	if newRow != nil {
+		w.r.ReleaseObject(newRow)
+	}
+	oldRow, err := w.r.FindFirstByString(w.setCK, w.setCols["Hash"], oldKey)
+	if err != nil {
+		return applied{}, skipStat{}, "", fmt.Errorf("deploy: 现场匹配旧版本谱面集 %s: %w", oldKey, err)
+	}
+
+	switch {
+	case newRow != nil && oldRow == nil:
+		// 旧版本已被目标端清理/手删而新版本已在：动作已兑现，无处软删。
+		return applied{}, skipStat{reason: "目标已是新版本且旧版本已不在现场（重续判定：已存在 → 跳过）", count: 1}, "", nil
+	case newRow != nil:
+		defer w.r.ReleaseObject(oldRow)
+		dp, err := w.r.GetBool(oldRow, dpKey)
+		if err != nil {
+			return applied{}, skipStat{}, "", err
+		}
+		if dp {
+			return applied{}, skipStat{reason: "目标已是新版本且旧版本已软删（重续判定：已存在 → 跳过）", count: 1}, "", nil
+		}
+		// 新行已在（第三方落位或前次批提交），跳过重建只补②③。
+		if err := w.softDeleteAndUnlink(oldRow, dpKey); err != nil {
+			return applied{}, skipStat{}, "", err
+		}
+		return applied{action: ActionVersionReplace}, skipStat{},
+			"目标已出现新版本行：跳过重建，仅补软删与解绑", nil
+	case oldRow == nil:
+		// 新旧都不在现场：降级为普通新建（改判入报告）。
+		obj, err := w.createSet(bs, sameRealm)
+		if err != nil {
+			return applied{}, skipStat{}, "", err
+		}
+		w.r.ReleaseObject(obj)
+		return applied{action: ActionCreate}, skipStat{},
+			"目标旧版本与新版本均不在现场：版本替换 → 新建", nil
+	}
+
+	defer w.r.ReleaseObject(oldRow)
+	// ① 新版本整套（§5.4：以 origin_guid 新建全链，未变难度的 blob 由
+	// 链接先行保证幂等，§5.3）。
+	obj, err := w.createSet(bs, sameRealm)
+	if err != nil {
+		return applied{}, skipStat{}, "", err
+	}
+	w.r.ReleaseObject(obj)
+	// ②③ 软删旧集 + 解绑旧难度成绩（§5.4 官方谱面更新语义的保守子集）。
+	if err := w.softDeleteAndUnlink(oldRow, dpKey); err != nil {
+		return applied{}, skipStat{}, "", err
+	}
+	return applied{action: ActionVersionReplace}, skipStat{}, "", nil
+}
+
+// softDeleteAndUnlink §5.4 三步的后两步：旧集行写 DeletePending=true（S4），
+// 再解绑 Score.BeatmapInfo 关系指向旧集难度的本地成绩——关系列置 null、
+// BeatmapHash 字符串列保留作历史锚点（官方 UpdateLocalScores 的保守子集；
+// 不解绑则客户端兑现软删、清理旧难度行时会撞上悬挂关系）。目标库无 Score
+// 表或无 BeatmapInfo 关系列时无成绩面可解绑，自然 no-op。
+func (w *beatmapSetWriter) softDeleteAndUnlink(oldRow realmObjectPtr, dpKey int64) error {
+	if err := w.r.SetBool(oldRow, dpKey, true); err != nil {
+		return fmt.Errorf("deploy: 软删旧版本集: %w", err)
+	}
+	scoreCK, err := w.r.FindClass("Score")
+	if err != nil {
+		return nil // 无成绩表 = 无本地成绩可解绑
+	}
+	bmLink, err := w.r.FindProperty(scoreCK, "BeatmapInfo")
+	if err != nil {
+		return nil // 无关系列 = 无关系可解绑（BeatmapHash 列本就不动）
+	}
+	oldHashes, err := w.setBeatmapHashes(oldRow)
+	if err != nil {
+		return err
+	}
+	if len(oldHashes) == 0 {
+		return nil
+	}
+	return w.r.ForEach(scoreCK, func(score realmObjectPtr) error {
+		bm, err := w.r.GetLinkedObject(score, bmLink)
+		if err != nil {
+			return err
+		}
+		if bm == nil {
+			return nil // 已解绑（历史成绩常态，lazer-baseline §6.3）
+		}
+		hash, err := w.r.GetString(bm, w.bmCols["Hash"])
+		w.r.ReleaseObject(bm)
+		if err != nil {
+			return err
+		}
+		if !oldHashes[hash] {
+			return nil
+		}
+		return w.r.SetNull(score, bmLink)
+	})
+}
+
+// setBeatmapHashes 读集行 Beatmaps 列表内全部难度的 Hash 集合（解绑锚定面：
+// Score.BeatmapInfo 关系目标 ∈ 旧集难度）。
+func (w *beatmapSetWriter) setBeatmapHashes(setRow realmObjectPtr) (map[string]bool, error) {
+	lst, err := w.r.GetList(setRow, w.setCols["Beatmaps"])
+	if err != nil {
+		return nil, fmt.Errorf("deploy: 取旧集 Beatmaps 列表: %w", err)
+	}
+	defer lst.Close()
+	out := map[string]bool{}
+	n, err := lst.Size()
+	if err != nil {
+		return nil, err
+	}
+	for i := uint64(0); i < n; i++ {
+		bm, err := lst.GetLinkedObject(i)
+		if err != nil {
+			return nil, err
+		}
+		if bm == nil {
+			continue
+		}
+		hash, err := w.r.GetString(bm, w.bmCols["Hash"])
+		w.r.ReleaseObject(bm)
+		if err != nil {
+			return nil, err
+		}
+		out[hash] = true
+	}
+	return out, nil
 }
 
 // createSet 新建整集全链（集行 → Files usage → 逐难度），返回集行句柄

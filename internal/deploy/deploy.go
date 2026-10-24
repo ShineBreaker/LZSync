@@ -94,8 +94,8 @@ func NewRunner(deps Deps) *Runner {
 // 重跑身份匹配与判定（改判入报告）。
 // 批间是取消点（ctx 取消 → 停止后续批，已提交批保留）；批失败 → 整批回滚
 // 并停止，报告部分完成（合法终态，不强制整体撤销）。
-// 写入面：收藏夹（M1）+ 谱面集（M2——RealmFile 行与模型引用同批事务，
-// §5.3 顺序铁律；版本更新的整集替换动作由后续施工块启用）。
+// 写入面：收藏夹（M1）+ 谱面集（M2 create/update + 版本更新整集原子替换
+// §5.4 三步——RealmFile 行与模型引用同批事务，§5.3 顺序铁律）。
 //
 // 目标库取 plan.Target（投放执行需要 RealmPath；字符串 forkID 不足以定位
 // 库文件——计划构建方 BuildPlan 已填，手工构造计划的调用方须自填）。
@@ -306,7 +306,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此谱面集当前版本（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := setW.exec(bs, s8SameRealm(origin.Fork, targetFork), item.Action)
+			ap, skip, rep, err := setW.exec(bs, item.OldContentKey, s8SameRealm(origin.Fork, targetFork), item.Action)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}

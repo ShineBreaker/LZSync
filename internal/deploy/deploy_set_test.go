@@ -971,10 +971,12 @@ func contains(s, sub string) bool {
 	})()
 }
 
-// TestBuildPlanBeatmapSetVersionUpdateSkipped 版本更新分类（版本链尾 ≠
-// 目标 presence 版本）本版以 skip 项呈现（整集原子替换留待块 4），执行期
-// 如实计数、目标库零变化。
-func TestBuildPlanBeatmapSetVersionUpdateSkipped(t *testing.T) {
+// TestDeployBeatmapSetVersionReplace 版本更新分类（版本链尾 ≠ 目标
+// presence 版本，强键）→ ActionVersionReplace 计划项 → 投放落地 §5.4 三步
+// （本测试聚焦集行形态：新版本整链 + 旧集软删保留），重续幂等。
+// 成绩解绑（第三步）的全链断言在 itests B1（fixture 播 Score 行 + 现场
+// 注入 BeatmapInfo 关系）。
+func TestDeployBeatmapSetVersionReplace(t *testing.T) {
 	lib := mustLib(t)
 	ctx := context.Background()
 
@@ -983,10 +985,16 @@ func TestBuildPlanBeatmapSetVersionUpdateSkipped(t *testing.T) {
 		t.Fatalf("VersionChangeSeeds: %v", err)
 	}
 	v1, v2 := seedV1.BeatmapSets[0], seedV2.BeatmapSets[0]
+	// 夹具不设 Guid（版本链用例只关心 Hash），逐字段断言需要固定锚点。
+	v2.ID = "71111111-2222-4333-8444-555555555556"
+	for i := range v2.Beatmaps {
+		v2.Beatmaps[i].ID = fmt.Sprintf("71333333-3333-4333-8333-3333333333%02d", i)
+	}
 
+	// 目标库现场播种 v1（对账 presence 与现场一致——收集方向收的就是它）。
 	refB, err := fixture.Build(ctx, fixture.Spec{
 		ForkID: fixture.ForkDelta, SchemaVersion: fixture.VersionDelta,
-		DataDir: t.TempDir(), Seed: fixture.Seed{},
+		DataDir: t.TempDir(), Seed: fixture.Seed{BeatmapSets: []hub.BeatmapSet{v1}, Files: seedV1.Files},
 	})
 	if err != nil {
 		t.Fatalf("fixture.Build(B): %v", err)
@@ -1005,35 +1013,115 @@ func TestBuildPlanBeatmapSetVersionUpdateSkipped(t *testing.T) {
 		t.Fatalf("计划项 = %d（期望 1）: %+v", len(plan.Items), plan.Items)
 	}
 	it := plan.Items[0]
-	if it.Kind != hub.KindBeatmapSet || it.Action != ActionSkip || it.SkipReason == "" {
-		t.Fatalf("计划项 = %+v，期望 beatmap_set skip 带原因", it)
+	if it.Kind != hub.KindBeatmapSet || it.Action != ActionVersionReplace {
+		t.Fatalf("计划项 = %+v，期望 beatmap_set version-replace", it)
+	}
+	if it.ContentKey != v2.Hash || it.OldContentKey != v1.Hash {
+		t.Errorf("计划项键 = new %s / old %s，期望 new %s / old %s",
+			it.ContentKey, it.OldContentKey, v2.Hash, v1.Hash)
 	}
 
-	report, err := NewRunner(Deps{Hub: h, Files: mustEngine(t)}).Deploy(ctx, plan, nil)
-	if err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
-	if len(report.Applied) != 0 {
-		t.Errorf("skip 项不应落地: %+v", report.Applied)
-	}
-	if len(report.Skipped) != 1 || report.Skipped[0].Count != 1 || report.Skipped[0].Reason != it.SkipReason {
-		t.Errorf("Skipped = %+v（期望原因计数 1）", report.Skipped)
-	}
-	// 目标库零变化（空库保持零集）。
-	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
-		if got := classRowCount(t, sr, "BeatmapSet"); got != 0 {
-			t.Errorf("skip 计划执行后 BeatmapSet 行数 = %d（期望 0）", got)
-		}
-	})
-}
-
-func mustEngine(t *testing.T) *filestore.Engine {
-	t.Helper()
 	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
 	if err != nil {
 		t.Fatalf("filestore.Open: %v", err)
 	}
-	return filestore.NewEngine(store)
+	fillStore(t, store, seedV2.Files)
+	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy: %v（report=%+v）", err, report)
+	}
+	if len(report.Applied) != 1 || report.Applied[0].Action != ActionVersionReplace {
+		t.Fatalf("Applied = %+v（期望 1 项 version-replace）", report.Applied)
+	}
+
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		// 新版本整链逐字段 + 未软删；旧版本行保留且软删（S4：物理清理是
+		// 客户端职责）。
+		gotV2, ok := sr.readSetProjection(v2.Hash)
+		if !ok {
+			t.Fatal("版本替换后读回缺新版本集")
+		}
+		assertSetDeepEqual(t, gotV2, v2, v2.OnlineID)
+		gotV1, ok := sr.readSetProjection(v1.Hash)
+		if !ok {
+			t.Fatal("版本替换后旧版本行应保留（软删非物理删）")
+		}
+		if !gotV1.DeletePending {
+			t.Error("旧版本集 DeletePending = false，期望 true（§5.4 三步之②）")
+		}
+		// 无孤儿难度行：两版本难度各挂各的父集（Beatmap 无独立软删/清理
+		// 通道，生命周期挂父集，design §4.3）。
+		if got := classRowCount(t, sr, "Beatmap"); got != uint64(len(v1.Beatmaps)+len(v2.Beatmaps)) {
+			t.Errorf("Beatmap 行数 = %d（期望 %d——新旧两版本难度各一）", got, len(v1.Beatmaps)+len(v2.Beatmaps))
+		}
+		if got := classRowCount(t, sr, "BeatmapMetadata"); got != uint64(len(v1.Beatmaps)+len(v2.Beatmaps)) {
+			t.Errorf("BeatmapMetadata 行数 = %d（期望 %d）", got, len(v1.Beatmaps)+len(v2.Beatmaps))
+		}
+		if got := classRowCount(t, sr, "File"); got != uint64(len(seedV1.Files)+len(seedV2.Files)) {
+			t.Errorf("File 行数 = %d（期望 %d——新旧版本实体各一）", got, len(seedV1.Files)+len(seedV2.Files))
+		}
+	})
+
+	// 重续幂等：同计划重跑 → 新在+旧已软删 → 跳过计数，零 applied。
+	report2, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy#2: %v", err)
+	}
+	if len(report2.Applied) != 0 {
+		t.Errorf("重跑 Applied = %+v（期望 0）", report2.Applied)
+	}
+	if len(report2.Skipped) != 1 || report2.Skipped[0].Count != 1 {
+		t.Errorf("重跑 Skipped = %+v（期望 1 条计数 1）", report2.Skipped)
+	}
+}
+
+// TestBuildPlanVersionReplaceWeakEvidence 弱键「疑似」版本更新：默认不进
+// 计划（NeedsConfirm 语义，§5.4 三选一）；显式确认（hub 链尾键）后按
+// version-replace 进入。
+func TestBuildPlanVersionReplaceWeakEvidence(t *testing.T) {
+	ctx := context.Background()
+
+	files := map[string][]byte{}
+	wOld, err := fixture.MaterializeSet(0, "Weak Artist", "Weak Title", "mapperW",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("weak old osu bytes")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet(old): %v", err)
+	}
+	wNew, err := fixture.MaterializeSet(0, "Weak Artist", "Weak Title", "mapperW",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("weak new osu bytes")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet(new): %v", err)
+	}
+
+	h := openMemHub(t)
+	// 目标持 wOld、源收 wNew（同 meta 弱键、不同 Hash；OnlineID=0 不建链，
+	// 两版本并存为链尾——弱键「疑似」配对由对账现场建议）。
+	applySnap(t, h, hub.Snapshot{ForkID: "fork-t", CollectedAt: t0, BeatmapSets: []hub.BeatmapSet{wOld}})
+	applySnap(t, h, hub.Snapshot{ForkID: "fork-s", CollectedAt: t0.Add(time.Hour),
+		BeatmapSets: []hub.BeatmapSet{wNew}})
+	ref := forks.LibraryRef{ForkID: "fork-t", RealmPath: "/tmp/weak-plan.client.realm", DiskVersion: 52}
+
+	// 默认计划：弱键项不进（不得以任何动作静默投放——三选一未拍板）。
+	planDefault, err := BuildPlan(ctx, h, ref, BuildOptions{})
+	if err != nil {
+		t.Fatalf("BuildPlan(默认): %v", err)
+	}
+	if len(planDefault.Items) != 0 {
+		t.Fatalf("默认计划 = %+v（期望空：弱键版本更新需用户拍板）", planDefault.Items)
+	}
+
+	// 显式确认（以 hub 链尾键为锚）→ version-replace 进入。
+	plan, err := BuildPlan(ctx, h, ref, BuildOptions{ConfirmVersionReplaceKeys: []string{wNew.Hash}})
+	if err != nil {
+		t.Fatalf("BuildPlan(确认): %v", err)
+	}
+	if len(plan.Items) != 1 {
+		t.Fatalf("确认后计划 = %+v（期望 1 项）", plan.Items)
+	}
+	it := plan.Items[0]
+	if it.Action != ActionVersionReplace || it.ContentKey != wNew.Hash || it.OldContentKey != wOld.Hash {
+		t.Errorf("确认后计划项 = %+v，期望 version-replace new=%s old=%s", it, wNew.Hash, wOld.Hash)
+	}
 }
 
 // insertBareSet 向目标库现场插入一行最小形态集（Hash + DateAdded +
