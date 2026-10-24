@@ -315,13 +315,15 @@ func TestDeployFixtureRoundtrip(t *testing.T) {
 
 	// 收集入 hub（投影按已知键读回——fixture 库无全表遍历导出面）。
 	// 顺序关键（HB3）：目标 B 先收（presence=B 值）、源 A 后收（canonical=A
-	// 值），「标准收藏夹」才成冲突项。
+	// 值），「标准收藏夹」才成冲突项。谱面集不进本夹具的 hub（M2 起
+	// BuildPlan 对账谱面集，本测试聚焦收藏夹链路且 Runner 无 Files 依赖；
+	// 谱面集全链由 TestDeployBeatmapSetFullChain 覆盖）。
 	h := openMemHub(t)
 	colsB := projectKnown(t, lib, refB.RealmPath, []string{"标准收藏夹", "delta 独有夹"})
 	applySnap(t, h, hub.Snapshot{ForkID: refB.ForkID, CollectedAt: t0, Collections: colsB})
 	colsA := projectKnown(t, lib, refA.RealmPath, []string{"标准收藏夹", "lazer 独有夹"})
 	applySnap(t, h, hub.Snapshot{ForkID: refA.ForkID, CollectedAt: t0.Add(time.Hour),
-		Collections: colsA, BeatmapSets: seedA.BeatmapSets})
+		Collections: colsA})
 
 	// 计划。fixture 库无 BeatmapMD5Hashes 列（fixture 构造面已知边界），
 	// 双端投影的 MD5 指纹恒等（均空）→「标准收藏夹」无差异不产出动作

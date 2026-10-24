@@ -92,11 +92,12 @@ type BuildOptions struct {
 
 // BuildPlan 从 hub 对账结果构建默认投放计划（§3.2 计划 / §6.2 默认勾选）：
 // hub diff（ReconcileAgainst，当前版本差集）− 目标 tombstone 命中（恢复组
-// 默认排除，仅 RestoreKeys 显式勾选者进入）− 需确认项（M1 收藏夹无此组）。
-// conflict → update（默认 hub 覆盖目标，§5.4 方向模型）。
+// 默认排除，仅 RestoreKeys 显式勾选者进入）− 需确认项。conflict → update
+// （默认 hub 覆盖目标，§5.4 方向模型）。
 //
-// M1 施工面：仅收藏夹（KindCollection——最安全首投放路径，无 files、无跨表
-// 关系，§5.1）；其他实体类型返回错误，由 M2 写入面扩面时放开。
+// 施工面：收藏夹（M1，§5.1 最安全首投放路径）+ 谱面集（M2——create/
+// update 动作；版本更新的整集原子替换动作由后续块启用，本版以 skip 项
+// 呈现并计数，不静默吞）。其他实体类型返回错误，由后续块放开。
 func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts BuildOptions) (Plan, error) {
 	if target.ForkID == "" {
 		return Plan{}, errors.New("deploy: BuildPlan 缺目标 fork 身份")
@@ -104,7 +105,7 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	if target.RealmPath == "" {
 		return Plan{}, errors.New("deploy: BuildPlan 缺目标库路径（LibraryRef 未解析）")
 	}
-	items, err := h.ReconcileAgainst(ctx, target.ForkID, []hub.EntityKind{hub.KindCollection})
+	items, err := h.ReconcileAgainst(ctx, target.ForkID, []hub.EntityKind{hub.KindCollection, hub.KindBeatmapSet})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -114,35 +115,70 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	}
 	var planItems []PlanItem
 	for _, ri := range items {
-		if ri.Kind != hub.KindCollection {
-			return Plan{}, fmt.Errorf("deploy: BuildPlan(M1) 不支持实体类型 %q（M2 扩面）", ri.Kind)
-		}
-		switch ri.Category {
-		case hub.ReconcileCreate:
-			if ri.Restorable && !restore[ri.ContentKey] {
-				continue // 恢复组默认排除（HB2：需用户显式勾选）
+		switch ri.Kind {
+		case hub.KindCollection:
+			switch ri.Category {
+			case hub.ReconcileCreate:
+				if ri.Restorable && !restore[ri.ContentKey] {
+					continue // 恢复组默认排除（HB2：需用户显式勾选）
+				}
+				planItems = append(planItems, PlanItem{
+					Kind:       ri.Kind,
+					ContentKey: ri.ContentKey,
+					Action:     ActionCreate,
+					Summary:    collectionSummary(ri.ContentKey),
+					Restore:    ri.Restorable,
+				})
+			case hub.ReconcileConflict:
+				// 默认方向 = hub 覆盖目标（就地更新白名单列，保目标 Guid，§5.4）。
+				planItems = append(planItems, PlanItem{
+					Kind:       ri.Kind,
+					ContentKey: ri.ContentKey,
+					Action:     ActionUpdate,
+					Summary:    collectionSummary(ri.ContentKey),
+				})
+			case hub.ReconcileVersionUpdate:
+				// 收藏夹无版本链 / 谱面身份键，ReconcileAgainst 对 collection 不产
+				// 此分类；防御性拒绝而非静默吞（§1.5-4）。
+				return Plan{}, fmt.Errorf("deploy: 收藏夹对账出现 version-update 分类（键 %s），属工具缺陷请报告", ri.ContentKey)
+			default:
+				return Plan{}, fmt.Errorf("deploy: 未知对账分类 %q（键 %s）", ri.Category, ri.ContentKey)
 			}
-			planItems = append(planItems, PlanItem{
-				Kind:       ri.Kind,
-				ContentKey: ri.ContentKey,
-				Action:     ActionCreate,
-				Summary:    collectionSummary(ri.ContentKey),
-				Restore:    ri.Restorable,
-			})
-		case hub.ReconcileConflict:
-			// 默认方向 = hub 覆盖目标（就地更新白名单列，保目标 Guid，§5.4）。
-			planItems = append(planItems, PlanItem{
-				Kind:       ri.Kind,
-				ContentKey: ri.ContentKey,
-				Action:     ActionUpdate,
-				Summary:    collectionSummary(ri.ContentKey),
-			})
-		case hub.ReconcileVersionUpdate:
-			// 收藏夹无版本链 / 谱面身份键，ReconcileAgainst 对 collection 不产
-			// 此分类；防御性拒绝而非静默吞（§1.5-4）。
-			return Plan{}, fmt.Errorf("deploy: 收藏夹对账出现 version-update 分类（键 %s），属工具缺陷请报告", ri.ContentKey)
+		case hub.KindBeatmapSet:
+			switch ri.Category {
+			case hub.ReconcileCreate:
+				if ri.Restorable && !restore[ri.ContentKey] {
+					continue // 恢复组默认排除（HB2：需用户显式勾选）
+				}
+				planItems = append(planItems, PlanItem{
+					Kind:       ri.Kind,
+					ContentKey: ri.ContentKey,
+					Action:     ActionCreate,
+					Summary:    beatmapSetSummary(ri.ContentKey),
+					Restore:    ri.Restorable,
+				})
+			case hub.ReconcileConflict:
+				planItems = append(planItems, PlanItem{
+					Kind:       ri.Kind,
+					ContentKey: ri.ContentKey,
+					Action:     ActionUpdate,
+					Summary:    beatmapSetSummary(ri.ContentKey),
+				})
+			case hub.ReconcileVersionUpdate:
+				// 版本更新 = 整集原子替换（§5.4 三步），执行面属后续施工块；
+				// 本版以 skip 项呈现（计划面可见 + 执行期如实计数，不静默吞）。
+				planItems = append(planItems, PlanItem{
+					Kind:       ri.Kind,
+					ContentKey: ri.ContentKey,
+					Action:     ActionSkip,
+					Summary:    beatmapSetSummary(ri.ContentKey),
+					SkipReason: "版本更新动作尚未启用（整集原子替换待施工，本版不投放）",
+				})
+			default:
+				return Plan{}, fmt.Errorf("deploy: 未知对账分类 %q（键 %s）", ri.Category, ri.ContentKey)
+			}
 		default:
-			return Plan{}, fmt.Errorf("deploy: 未知对账分类 %q（键 %s）", ri.Category, ri.ContentKey)
+			return Plan{}, fmt.Errorf("deploy: BuildPlan 不支持实体类型 %q（后续块扩面）", ri.Kind)
 		}
 	}
 	plan, err := NewPlan(target.ForkID, planItems)
@@ -155,4 +191,14 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 
 func collectionSummary(name string) string {
 	return "收藏夹 " + strconv.Quote(name)
+}
+
+// beatmapSetSummary 谱面集摘要：对账面只携带内容键（hash），摘要取其
+// 前缀（预览页的人类可读锚点；曲名等由 payload 查询面补充，§6.2）。
+func beatmapSetSummary(contentHash string) string {
+	prefix := contentHash
+	if len(prefix) > 12 {
+		prefix = prefix[:12]
+	}
+	return "谱面集 " + prefix + "…"
 }

@@ -2,10 +2,14 @@ package deploy
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
 	"lzsync/internal/filestore"
+	"lzsync/internal/forks"
 	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
@@ -68,6 +72,10 @@ type Report struct {
 // batchCollectionSize 收藏夹批大小上限（§3.3：收藏 ≤ 500 行/批）。
 const batchCollectionSize = 500
 
+// batchBeatmapSetSize 谱面集批大小上限（§3.3：谱面集 ≤ 50 集/批——含
+// 难度、Metadata、RealmNamedFileUsage 与对应 RealmFile 行的事务内存预算）。
+const batchBeatmapSetSize = 50
+
 // Runner 执行投放。
 type Runner struct {
 	deps Deps
@@ -86,8 +94,8 @@ func NewRunner(deps Deps) *Runner {
 // 重跑身份匹配与判定（改判入报告）。
 // 批间是取消点（ctx 取消 → 停止后续批，已提交批保留）；批失败 → 整批回滚
 // 并停止，报告部分完成（合法终态，不强制整体撤销）。
-// M1 范围：收藏夹（无 File 行依赖，§5.1；File 表行与模型引用成对写入的
-// 纪律在 M2 谱面集写入器落地）。
+// 写入面：收藏夹（M1）+ 谱面集（M2——RealmFile 行与模型引用同批事务，
+// §5.3 顺序铁律；版本更新的整集替换动作由后续施工块启用）。
 //
 // 目标库取 plan.Target（投放执行需要 RealmPath；字符串 forkID 不足以定位
 // 库文件——计划构建方 BuildPlan 已填，手工构造计划的调用方须自填）。
@@ -104,11 +112,13 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 		return report, fmt.Errorf("deploy: 计划目标 fork %q 与目标库 %q 不符", plan.TargetFork, target.ForkID)
 	}
 	for _, it := range plan.Items {
-		if it.Kind != hub.KindCollection {
-			return report, fmt.Errorf("deploy: M1 写入面仅收藏夹，计划含 %q（M2 扩面）", it.Kind)
+		switch it.Kind {
+		case hub.KindCollection, hub.KindBeatmapSet:
+		default:
+			return report, fmt.Errorf("deploy: 写入面暂支持收藏夹与谱面集，计划含 %q（后续块扩面）", it.Kind)
 		}
 	}
-	batches := splitBatches(plan.Items, batchCollectionSize)
+	batches := splitKindBatches(plan.Items)
 	total := len(batches)
 	emit := func(stage Stage, b, cur, n int) {
 		if prog != nil {
@@ -148,8 +158,13 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	}
 	report.BackupPath = backupPath
 
-	// 阶段 3：files CopyMissing 先行（S6；收藏夹 = 空文件集 no-op）。
-	hashes := planFileHashes(plan)
+	// 阶段 3：files CopyMissing 先行（S6 链接铁律；收藏夹 = 空文件集 no-op）。
+	// 哈希取自 hub payload 的 NamedFile（谱面集 Files；skin/score kind 后续
+	// 块接线时在 planFileHashes 内扩）。
+	hashes, err := planFileHashes(ctx, r.deps.Hub, plan)
+	if err != nil {
+		return report, err
+	}
 	emit(StageLink, 0, 0, len(hashes))
 	if len(hashes) > 0 {
 		if r.deps.Files == nil {
@@ -171,7 +186,7 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 			report.NotRun = flatten(batches[bi:])
 			return report, err
 		}
-		applied, repointed, batchSkips, err := r.runCollectionBatch(ctx, realm, batch, func(cur, n int) {
+		applied, repointed, batchSkips, err := r.runBatch(ctx, realm, plan.TargetFork, batch, func(cur, n int) {
 			emit(StageWrite, bi, cur, n)
 		})
 		if err == nil {
@@ -212,9 +227,10 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	return report, nil
 }
 
-// runCollectionBatch 执行一个收藏夹批：DriftGuard 骨架内逐项现场复核 +
-// 写入；任何写入异常整批回滚。skip 计数不触发回滚（合法落地形态）。
-func (r *Runner) runCollectionBatch(ctx context.Context, realm *realmc.Realm, batch []PlanItem,
+// runBatch 执行一个同 kind 批（§3.3 批 = 事务）：DriftGuard 骨架内逐项
+// 现场复核 + 写入；任何写入异常整批回滚。skip 计数不触发回滚（合法落地
+// 形态）。targetFork 用于 S8 判定（谱面集 OnlineID 携带面）。
+func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork string, batch []PlanItem,
 	emit func(cur, total int)) ([]ItemResult, map[int]string, map[string]int, error) {
 	dg, err := beginDriftGuard(realm)
 	if err != nil {
@@ -222,12 +238,24 @@ func (r *Runner) runCollectionBatch(ctx context.Context, realm *realmc.Realm, ba
 	}
 	defer dg.rollback()
 
-	w, err := prepareCollectionWriter(realm)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	var (
+		colW *collectionWriter
+		setW *beatmapSetWriter
+	)
 	// 白名单 ∩ 目标实际列的缺列预演（人话原因，§1.5-4：不静默吞）。
-	colMissing := w.missingColumns()
+	var colMissing, setMissing []string
+	switch batch[0].Kind {
+	case hub.KindCollection:
+		if colW, err = prepareCollectionWriter(realm); err != nil {
+			return nil, nil, nil, err
+		}
+		colMissing = colW.missingColumns()
+	case hub.KindBeatmapSet:
+		if setW, err = prepareBeatmapSetWriter(realm); err != nil {
+			return nil, nil, nil, err
+		}
+		setMissing = setW.missingColumns()
+	}
 
 	var applied []ItemResult
 	repointed := map[int]string{}
@@ -236,33 +264,71 @@ func (r *Runner) runCollectionBatch(ctx context.Context, realm *realmc.Realm, ba
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, err
 		}
-		c, origin, ok, err := r.deps.Hub.LoadCollection(ctx, item.ContentKey)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if !ok {
-			// hub 不删实体（§4.4）；缺行只可能是并发清除类操作，按跳过计。
-			skips["hub 实体表中无此收藏（计划与真相源不符，跳过）"]++
+		// 计划面预演的跳过项（如版本更新动作待启用）：如实计数，不落地。
+		if item.Action == ActionSkip {
+			skips[item.SkipReason]++
 			continue
 		}
-		_ = origin // M1 收藏夹无 S8 OnlineID 面；M2 扩面时消费 origin.ServerRealm
-		ap, skip, rep, err := w.exec(c, item.Action)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
-		}
-		if skip.count > 0 {
-			skips[skip.reason] += skip.count
-		} else {
-			applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
-			// 落地项的缺列逐列计数（每项 × 每缺列一条人话原因）。
-			for _, col := range colMissing {
-				skips["目标库缺列 "+col+"（该列值未写入）"]++
+		switch item.Kind {
+		case hub.KindCollection:
+			c, origin, ok, err := r.deps.Hub.LoadCollection(ctx, item.ContentKey)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !ok {
+				// hub 不删实体（§4.4）；缺行只可能是并发清除类操作，按跳过计。
+				skips["hub 实体表中无此收藏（计划与真相源不符，跳过）"]++
+				continue
+			}
+			_ = origin // M1 收藏夹无 S8 OnlineID 面；skin/score 扩面时消费 origin.ServerRealm
+			ap, skip, rep, err := colW.exec(c, item.Action)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
+			}
+			if skip.count > 0 {
+				skips[skip.reason] += skip.count
+			} else {
+				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
+				// 落地项的缺列逐列计数（每项 × 每缺列一条人话原因）。
+				for _, col := range colMissing {
+					skips["目标库缺列 "+col+"（该列值未写入）"]++
+				}
+			}
+			if rep != "" {
+				repointed[i] = rep
+			}
+		case hub.KindBeatmapSet:
+			bs, origin, ok, err := r.loadBeatmapSet(ctx, item.ContentKey)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !ok {
+				skips["hub 实体表中无此谱面集当前版本（计划与真相源不符，跳过）"]++
+				continue
+			}
+			ap, skip, rep, err := setW.exec(bs, s8SameRealm(origin.Fork, targetFork), item.Action)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
+			}
+			if skip.count > 0 {
+				skips[skip.reason] += skip.count
+			} else {
+				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
+				for _, col := range setMissing {
+					skips["目标库缺列 "+col+"（该列值未写入）"]++
+				}
+			}
+			if rep != "" {
+				repointed[i] = rep
 			}
 		}
-		if rep != "" {
-			repointed[i] = rep
-		}
 		emit(i+1, len(batch))
+	}
+	// 难度级跳过聚合（集落地但个别难度被拒：fork 专有规则集等）。
+	if setW != nil {
+		for reason, n := range setW.diffSkips {
+			skips[reason] += n
+		}
 	}
 	if err := dg.finish(); err != nil {
 		return nil, nil, nil, err
@@ -270,35 +336,132 @@ func (r *Runner) runCollectionBatch(ctx context.Context, realm *realmc.Realm, ba
 	return applied, repointed, skips, nil
 }
 
+// loadBeatmapSet 按内容键读取谱面集 canonical 值及其来源声明（只认版本
+// 链尾——历史版本永不进入投放面，HB1）。hub 增补单键领域读方法
+// （LoadBeatmapSet）后应切换；此处以 DB() 直查承载（LoadCollection 的
+// 同构语义，只读面；写 tombstone 的既有先例见 clearRestoredTombstones）。
+func (r *Runner) loadBeatmapSet(ctx context.Context, contentHash string) (hub.BeatmapSet, hub.Origin, bool, error) {
+	var (
+		payload    string
+		originGUID string
+		originFork string
+	)
+	err := r.deps.Hub.DB().QueryRowContext(ctx,
+		`SELECT payload, origin_guid, origin_fork FROM beatmap_set WHERE content_hash=? AND superseded_by IS NULL`,
+		contentHash).Scan(&payload, &originGUID, &originFork)
+	if errors.Is(err, sql.ErrNoRows) {
+		return hub.BeatmapSet{}, hub.Origin{}, false, nil
+	}
+	if err != nil {
+		return hub.BeatmapSet{}, hub.Origin{}, false,
+			fmt.Errorf("deploy: 读谱面集 %q: %w", contentHash, err)
+	}
+	var bs hub.BeatmapSet
+	if err := json.Unmarshal([]byte(payload), &bs); err != nil {
+		return hub.BeatmapSet{}, hub.Origin{}, false,
+			fmt.Errorf("deploy: 解码谱面集 %q payload: %w", contentHash, err)
+	}
+	return bs, hub.Origin{GUID: originGUID, Fork: originFork}, true, nil
+}
+
+// s8SameRealm 判定 canonical 来源与目标是否同服务器命名空间（S8：
+// origin_fork → ForkProfile.ServerRealm vs 目标 fork）。任一 fork 不在
+// 注册表时保守视为异域（宁少勿错，§5.4「能少不能错」）。
+func s8SameRealm(originFork, targetFork string) bool {
+	op, ok1 := forks.Profile(originFork)
+	tp, ok2 := forks.Profile(targetFork)
+	if !ok1 || !ok2 {
+		return false
+	}
+	return op.ServerRealm == tp.ServerRealm
+}
+
 // clearRestoredTombstones 投放成功后清除恢复项的 tombstone（§6.2：勾选
 // 投放即同时清除）。hub 侧尚无对应的领域写方法（ApplySnapshot 的「同键
 // 重现」闸是其只读对偶），此处以单句幂等 DELETE 经 DB() 执行——该写入
 // 无多表原子性诉求，不破坏 hub 的事务纪律；hub 增补领域方法后应切换。
 func (r *Runner) clearRestoredTombstones(ctx context.Context, plan Plan) error {
-	var keys []string
+	type restoreKey struct {
+		kind hub.EntityKind
+		key  string
+	}
+	var keys []restoreKey
 	for _, it := range plan.Items {
 		if it.Restore {
-			keys = append(keys, it.ContentKey)
+			keys = append(keys, restoreKey{it.Kind, it.ContentKey})
 		}
 	}
 	if len(keys) == 0 {
 		return nil
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].kind != keys[j].kind {
+			return keys[i].kind < keys[j].kind
+		}
+		return keys[i].key < keys[j].key
+	})
 	for _, k := range keys {
 		if _, err := r.deps.Hub.DB().ExecContext(ctx,
 			`DELETE FROM tombstone WHERE fork_id=? AND kind=? AND content_key=?`,
-			plan.TargetFork, hub.KindCollection, k); err != nil {
-			return fmt.Errorf("清 tombstone %s: %w", k, err)
+			plan.TargetFork, k.kind, k.key); err != nil {
+			return fmt.Errorf("清 tombstone %s: %w", k.key, err)
 		}
 	}
 	return nil
 }
 
-// planFileHashes 计划涉及的实体文件哈希（M1 收藏夹恒空；M2 谱面集/皮肤/
-// 成绩扩面时从 canonical Files/ReplayHashes 聚合）。
-func planFileHashes(plan Plan) []string {
-	return nil
+// planFileHashes 从 hub payload 收集计划涉及的实体文件哈希（§5.3 链接
+// 先行的输入）：谱面集取 Files 的 NamedFile（skin/score kind 后续块接线
+// 时在此扩面）。缺行不报错（批内现场按「计划与真相源不符」计数）。
+func planFileHashes(ctx context.Context, h *hub.Store, plan Plan) ([]string, error) {
+	var keys []string
+	for _, it := range plan.Items {
+		if it.Kind == hub.KindBeatmapSet && it.Action != ActionSkip {
+			keys = append(keys, it.ContentKey)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, k := range keys {
+		var payload string
+		err := h.DB().QueryRowContext(ctx,
+			`SELECT payload FROM beatmap_set WHERE content_hash=? AND superseded_by IS NULL`, k).Scan(&payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("deploy: 读谱面集 %s payload（链接先行）: %w", k, err)
+		}
+		var bs hub.BeatmapSet
+		if err := json.Unmarshal([]byte(payload), &bs); err != nil {
+			return nil, fmt.Errorf("deploy: 解码谱面集 %s payload（链接先行）: %w", k, err)
+		}
+		for _, f := range bs.Files {
+			if !seen[f.Hash] {
+				seen[f.Hash] = true
+				out = append(out, f.Hash)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// splitKindBatches 按对象类型分组切批（§3.3 批切分策略：收藏 ≤500 行/批、
+// 谱面集 ≤50 集/批）；批内 kind 单一（runBatch 按首项 kind 准备写入器）。
+func splitKindBatches(items []PlanItem) [][]PlanItem {
+	var cols, sets []PlanItem
+	for _, it := range items {
+		if it.Kind == hub.KindBeatmapSet {
+			sets = append(sets, it)
+		} else {
+			cols = append(cols, it)
+		}
+	}
+	return append(splitBatches(cols, batchCollectionSize), splitBatches(sets, batchBeatmapSetSize)...)
 }
 
 func splitBatches(items []PlanItem, size int) [][]PlanItem {
