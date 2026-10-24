@@ -75,6 +75,9 @@ const batchCollectionSize = 500
 // batchSkinSize 皮肤批大小上限（§3.3：皮肤 ≤ 500 行/批）。
 const batchSkinSize = 500
 
+// batchScoreSize 成绩批大小上限（§3.3：成绩 ≤ 500 行/批）。
+const batchScoreSize = 500
+
 // batchBeatmapSetSize 谱面集批大小上限（§3.3：谱面集 ≤ 50 集/批——含
 // 难度、Metadata、RealmNamedFileUsage 与对应 RealmFile 行的事务内存预算）。
 const batchBeatmapSetSize = 50
@@ -99,7 +102,8 @@ func NewRunner(deps Deps) *Runner {
 // 并停止，报告部分完成（合法终态，不强制整体撤销）。
 // 写入面：收藏夹（M1）+ 谱面集（M2 create/update + 版本更新整集原子替换
 // §5.4 三步——RealmFile 行与模型引用同批事务，§5.3 顺序铁律）+ 皮肤
-// （M2，§5.1：Set 行白名单列 + Files usage，链接先行）。
+// （M2，§5.1：Set 行白名单列 + Files usage，链接先行）+ 成绩（M2，§5.2
+// 按 BeatmapHash 挂载，全部跳过分支计数）。
 //
 // 目标库取 plan.Target（投放执行需要 RealmPath；字符串 forkID 不足以定位
 // 库文件——计划构建方 BuildPlan 已填，手工构造计划的调用方须自填）。
@@ -117,9 +121,9 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	}
 	for _, it := range plan.Items {
 		switch it.Kind {
-		case hub.KindCollection, hub.KindBeatmapSet, hub.KindSkin:
+		case hub.KindCollection, hub.KindBeatmapSet, hub.KindSkin, hub.KindScore:
 		default:
-			return report, fmt.Errorf("deploy: 写入面暂支持收藏夹、谱面集与皮肤，计划含 %q（后续块扩面）", it.Kind)
+			return report, fmt.Errorf("deploy: 写入面暂支持收藏夹、谱面集、皮肤与成绩，计划含 %q（后续块扩面）", it.Kind)
 		}
 	}
 	batches := splitKindBatches(plan.Items)
@@ -163,8 +167,7 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	report.BackupPath = backupPath
 
 	// 阶段 3：files CopyMissing 先行（S6 链接铁律；无文件面 = no-op）。
-	// 哈希取自 hub payload 的 NamedFile（谱面集/皮肤 Files；成绩 .osr
-	// kind 接入时在 planFileHashes 内扩）。
+	// 哈希取自 hub payload 的 NamedFile（谱面集/皮肤 Files、成绩回放 .osr）。
 	hashes, err := planFileHashes(ctx, r.deps.Hub, plan)
 	if err != nil {
 		return report, err
@@ -243,12 +246,13 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 	defer dg.rollback()
 
 	var (
-		colW  *collectionWriter
-		setW  *beatmapSetWriter
-		skinW *skinWriter
+		colW   *collectionWriter
+		setW   *beatmapSetWriter
+		skinW  *skinWriter
+		scoreW *scoreWriter
 	)
 	// 白名单 ∩ 目标实际列的缺列预演（人话原因，§1.5-4：不静默吞）。
-	var colMissing, setMissing, skinMissing []string
+	var colMissing, setMissing, skinMissing, scoreMissing []string
 	switch batch[0].Kind {
 	case hub.KindCollection:
 		if colW, err = prepareCollectionWriter(realm); err != nil {
@@ -265,6 +269,11 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 			return nil, nil, nil, err
 		}
 		skinMissing = skinW.missingColumns()
+	case hub.KindScore:
+		if scoreW, err = prepareScoreWriter(realm); err != nil {
+			return nil, nil, nil, err
+		}
+		scoreMissing = scoreW.missingColumns()
 	}
 
 	var applied []ItemResult
@@ -350,6 +359,36 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 			} else {
 				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
 				for _, col := range skinMissing {
+					skips["目标库缺列 "+col+"（该列值未写入）"]++
+				}
+			}
+			if rep != "" {
+				repointed[i] = rep
+			}
+		case hub.KindScore:
+			// ContentKey 是组合内容键 (BeatmapHash, Hash) 的 ScoreContentKey
+			// 编码（§4.2 第一层），按首个 "|" 拆分。
+			bh, replay, err := splitScoreContentKey(item.ContentKey)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
+			}
+			sc, origin, ok, err := r.deps.Hub.LoadScore(ctx, bh, replay)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !ok {
+				skips["hub 实体表中无此成绩（计划与真相源不符，跳过）"]++
+				continue
+			}
+			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), item.Action)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
+			}
+			if skip.count > 0 {
+				skips[skip.reason] += skip.count
+			} else {
+				applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
+				for _, col := range scoreMissing {
 					skips["目标库缺列 "+col+"（该列值未写入）"]++
 				}
 			}
@@ -445,9 +484,26 @@ func (r *Runner) clearRestoredTombstones(ctx context.Context, plan Plan) error {
 	return nil
 }
 
+// splitScoreContentKey 拆解成绩组合内容键（hub.ScoreContentKey 的解析侧：
+// 按首个 "|" 拆分；beatmapHash 允许空串——空锚成绩正是 §5.2-2 跳过分支
+// 的输入，replayHash 段必须非空）。
+func splitScoreContentKey(key string) (beatmapHash, replayHash string, err error) {
+	for i := 0; i < len(key); i++ {
+		if key[i] != '|' {
+			continue
+		}
+		bh, rh := key[:i], key[i+1:]
+		if rh == "" {
+			break
+		}
+		return bh, rh, nil
+	}
+	return "", "", fmt.Errorf("deploy: 非法的成绩组合内容键 %q（期望 BeatmapHash|Hash）", key)
+}
+
 // planFileHashes 从 hub payload 收集计划涉及的实体文件哈希（§5.3 链接
-// 先行的输入）：谱面集与皮肤取 Files 的 NamedFile（成绩 kind 接入时在此
-// 扩面）。缺行不报错（批内现场按「计划与真相源不符」计数）。
+// 先行的输入）：谱面集/皮肤取 Files、成绩取回放 .osr 的 Files。缺行不
+// 报错（批内现场按「计划与真相源不符」计数）。
 func planFileHashes(ctx context.Context, h *hub.Store, plan Plan) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
@@ -459,7 +515,7 @@ func planFileHashes(ctx context.Context, h *hub.Store, plan Plan) ([]string, err
 			}
 		}
 	}
-	var setKeys, skinKeys []string
+	var setKeys, skinKeys, scoreKeys []string
 	for _, it := range plan.Items {
 		if it.Action == ActionSkip {
 			continue
@@ -469,6 +525,8 @@ func planFileHashes(ctx context.Context, h *hub.Store, plan Plan) ([]string, err
 			setKeys = append(setKeys, it.ContentKey)
 		case hub.KindSkin:
 			skinKeys = append(skinKeys, it.ContentKey)
+		case hub.KindScore:
+			scoreKeys = append(scoreKeys, it.ContentKey)
 		}
 	}
 	for _, k := range setKeys {
@@ -503,29 +561,53 @@ func planFileHashes(ctx context.Context, h *hub.Store, plan Plan) ([]string, err
 		}
 		addFiles(sk.Files)
 	}
+	for _, k := range scoreKeys {
+		bh, replay, err := splitScoreContentKey(k)
+		if err != nil {
+			return nil, err
+		}
+		var payload string
+		err = h.DB().QueryRowContext(ctx,
+			`SELECT payload FROM score WHERE beatmap_hash=? AND content_hash=?`, bh, replay).Scan(&payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("deploy: 读成绩 %s payload（链接先行）: %w", k, err)
+		}
+		var sc hub.Score
+		if err := json.Unmarshal([]byte(payload), &sc); err != nil {
+			return nil, fmt.Errorf("deploy: 解码成绩 %s payload（链接先行）: %w", k, err)
+		}
+		addFiles(sc.Files)
+	}
 	sort.Strings(out)
 	return out, nil
 }
 
 // splitKindBatches 按对象类型分组切批（§3.3 批切分策略：收藏 ≤500 行/批、
-// 谱面集 ≤50 集/批、皮肤 ≤500 行/批）；批内 kind 单一（runBatch 按首项
-// kind 准备写入器）。批序 = 收藏 → 谱面集 → 皮肤（成绩批接入后排谱面集
-// 之后——成绩挂接的难度索引惰性构建于谱面写入之后，§5.2-3）。
+// 谱面集 ≤50 集/批、皮肤/成绩 ≤500 行/批）；批内 kind 单一（runBatch 按
+// 首项 kind 准备写入器）。批序 = 收藏 → 谱面集 → 皮肤 → 成绩：成绩挂接
+// 的难度索引惰性构建于谱面写入之后（§5.2-3 ??= 语义，本次刚同步进来的
+// 难度也能挂上）。
 func splitKindBatches(items []PlanItem) [][]PlanItem {
-	var cols, sets, skins []PlanItem
+	var cols, sets, skins, scores []PlanItem
 	for _, it := range items {
 		switch it.Kind {
 		case hub.KindBeatmapSet:
 			sets = append(sets, it)
 		case hub.KindSkin:
 			skins = append(skins, it)
+		case hub.KindScore:
+			scores = append(scores, it)
 		default:
 			cols = append(cols, it)
 		}
 	}
-	return append(append(splitBatches(cols, batchCollectionSize),
+	return append(append(append(splitBatches(cols, batchCollectionSize),
 		splitBatches(sets, batchBeatmapSetSize)...),
-		splitBatches(skins, batchSkinSize)...)
+		splitBatches(skins, batchSkinSize)...),
+		splitBatches(scores, batchScoreSize)...)
 }
 
 func splitBatches(items []PlanItem, size int) [][]PlanItem {
