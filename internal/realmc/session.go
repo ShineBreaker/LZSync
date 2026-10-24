@@ -359,6 +359,34 @@ func (r *Realm) ReleaseObject(obj unsafe.Pointer) {
 	r.lib.realmRelease(obj)
 }
 
+// ForEach 在已开启的读/写事务内遍历 class 全部行，对每行调用 fn。
+// obj 句柄仅在本次回调内有效（回调返回即释放，不得跨回调保存）。
+// fn 返回非 nil 错误立即中止遍历并原样上抛；行数为零是合法路径
+//（fn 不被调用）。收集投影的全表枚举依赖此原语（design §3.2 步骤②）。
+func (r *Realm) ForEach(classKey uint32, fn func(obj unsafe.Pointer) error) error {
+	results := r.lib.realmObjectFindAll(r.h, classKey)
+	if results == nil {
+		return fmt.Errorf("realm_object_find_all: %w", r.lib.lastError())
+	}
+	defer r.lib.realmRelease(results)
+	var n uint64
+	if !r.lib.realmResultsCount(results, &n) {
+		return fmt.Errorf("realm_results_count: %w", r.lib.lastError())
+	}
+	for i := uint64(0); i < n; i++ {
+		obj := r.lib.realmResultsGetObject(results, i)
+		if obj == nil {
+			return fmt.Errorf("realm_results_get_object(%d): %w", i, r.lib.lastError())
+		}
+		err := fn(obj)
+		r.lib.realmRelease(obj)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // CreateObject 在写事务内建新行（无主键类，realm.h:1428）。
 func (r *Realm) CreateObject(classKey uint32) (unsafe.Pointer, error) {
 	obj := r.lib.realmObjectCreate(r.h, classKey)
