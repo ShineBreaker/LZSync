@@ -187,6 +187,20 @@ export async function renderRun(root: HTMLElement): Promise<void> {
       return `${kind}：${acts}`;
     });
     box.append(kvRow("已提交批 applied", appliedParts.length > 0 ? appliedParts.join("；") : "无"));
+    // R6：delta gimmick 谱面流出告警（§5.4）——显著呈现 + 计数 + 逐条明细
+    //（与对比预演的计划标记一致；已同步不阻断，风险在后续编辑保存）。
+    const gimmick = report.GimmickWarnings ?? [];
+    if (gimmick.length > 0) {
+      box.append(
+        message(
+          "error",
+          `⚠ ${gimmick.length} 个谱面集含 delta gimmick section：经非 delta 端编辑保存会静默丢失 gimmick 数据（已照常同步——官方端只读不编辑则安全）`,
+        ),
+      );
+      for (const w of gimmick) {
+        box.append(kvRow("告警项", `${kindLabel(String(w.Kind))} ${w.Summary}（${w.ContentKey}）`));
+      }
+    }
     // 跳过按原因分组计数（SkipCollector 口径，§3.3——不静默吞掉）。
     const skips = report.Skipped ?? [];
     if (skips.length > 0) {

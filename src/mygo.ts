@@ -21,6 +21,7 @@ export interface DeployReport {
   FailedBatches: BatchFailure[];
   NotRun: PlanItem[];
   Repointed: RepointedItem[];
+  GimmickWarnings: PlanItem[];
   BackupPath: string;
 }
 
@@ -125,6 +126,7 @@ export interface PlanItem {
   NeedsConfirm: boolean;
   Restore: boolean;
   OldContentKey: string;
+  Warning: string;
 }
 
 /** ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。 */
@@ -151,6 +153,7 @@ export interface Report {
   FilesAdopted: number;
   FilesSkipped: number;
   AdoptModeCounts: Record<string, number>;
+  IniKeysCollected: number;
 }
 
 /** Selection 预览页勾选结果的一项（类型 + 内容键）。 */
