@@ -86,15 +86,16 @@ type FieldDiff struct {
 	ForkValue string
 }
 
-// DiffRow 对比预览页单行（§6.2 差异列表的行模型）。
+// DiffRow 对比预览页单行（§6.2 差异列表的行模型）。Kind 是数据类型 Tab
+// 的数据面维度（谱面集/难度/收藏/皮肤/成绩），前端按其分组渲染。
 type DiffRow struct {
 	Kind           hub.EntityKind
 	ContentKey     string
 	Category       Category
-	Summary        string      // 人类可读摘要（曲名/收藏名/日期）
+	Summary        string      // 人类可读摘要（曲名/收藏名/皮肤名/日期/分数）
 	ConflictFields []FieldDiff // Category == CategoryConflict 时填充
 	IdentityKey    string      // 版本更新时的谱面身份键（online:/meta: 前缀）
-	Evidence       string      // 版本更新时的证据强度（EvidenceStrong/Weak）
+	Evidence       string      // 版本更新时的证据强度（EvidenceStrong/Weak）；弱键 = 需用户确认项
 	SkipReason     string      // 跳过原因预演（adapter 规则在预览期即跑）
 	DeletedAt      int64       // 恢复组的删除时间（Unix 毫秒）
 	DefaultChecked bool        // §6.2 默认勾选规则预计算
@@ -158,9 +159,10 @@ type CompareService interface {
 	// DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 命中，
 	// 默认不勾选，展示删除时间）。
 	DeletedEntries(target string) ([]DiffRow, error)
-	// BuildPlan 把勾选结果组装为投放计划（ NeedsConfirm 项必须已经用户
-	// 拍板——勾选即视为拍板；M1 仅收藏夹产生实际动作，其余项计入 skip
-	// 与原因，不静默吞掉）。
+	// BuildPlan 把勾选结果组装为投放计划（覆盖全部启用 kind：收藏夹/
+	// 谱面集/皮肤/成绩）。NeedsConfirm 项（元数据弱键疑似）必须已经用户
+	// 拍板——勾选即视为拍板（NeedsConfirm 置位留痕）；「恢复（已删除）」
+	// 组同理，勾选即显式拍板投放并清 tombstone。
 	BuildPlan(target string, sel []Selection) (deploy.Plan, error)
 	// CurrentPlan 当前持久化的投放计划（无计划返回 ErrNoPlan）。
 	CurrentPlan() (deploy.Plan, error)

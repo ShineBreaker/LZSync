@@ -489,3 +489,223 @@ func TestDiffEntryToRowMapping(t *testing.T) {
 		t.Fatalf("目标独有无动作不勾选: %+v", row)
 	}
 }
+
+// TestRealComparePreviewM2Kinds M2 三类（skin/score）接入预演：create/
+// conflict/restore 三分类、tombstone 恢复组默认不勾选、摘要携带皮肤名与
+// 成绩要素（§6.2 类型 Tab 数据面）。快照 fork 用真实 fork ID（hub 的
+// fork_id 命名空间与注册表一致，BuildPlan 目标须命中 presence）。
+func TestRealComparePreviewM2Kinds(t *testing.T) {
+	b, h, _ := newRealForTest(t, t.TempDir())
+	ctx := context.Background()
+	t0 := time.UnixMilli(1770000000000)
+	// delta（源）：皮肤 S1（新增）、S2（冲突源值）、S3（目标将删除→恢复组）；
+	// 成绩 SC1（新增）、SC2（冲突源值）、SC3（恢复组）。
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "delta", CollectedAt: t0,
+		Skins: []hub.Skin{
+			{ID: "gs1", Hash: "sk1", Name: "S1 皮肤", Creator: "作者甲"},
+			{ID: "gs2", Hash: "sk2", Name: "S2 皮肤", Creator: "作者乙"},
+			{ID: "gs3", Hash: "sk3", Name: "S3 皮肤", Creator: "作者丙"},
+		},
+		Scores: []hub.Score{
+			{ID: "sc1", BeatmapHash: "bh1", Hash: "sc1", RulesetShortName: "osu",
+				TotalScore: 123456, RankInt: 3, Date: t0},
+			{ID: "sc2", BeatmapHash: "bh2", Hash: "sc2", RulesetShortName: "taiko",
+				TotalScore: 999, RankInt: 2, Date: t0},
+			{ID: "sc3", BeatmapHash: "bh3", Hash: "sc3", RulesetShortName: "fruits",
+				TotalScore: 42, RankInt: 1, Date: t0},
+		},
+	}); err != nil {
+		t.Fatalf("收集 delta: %v", err)
+	}
+	// lazer（目标）：持有 S2/SC2 的旧值（→冲突）与 S3/SC3（→随后删除进恢复组）。
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "lazer", CollectedAt: t0.Add(time.Hour),
+		Skins: []hub.Skin{
+			{ID: "gs2", Hash: "sk2", Name: "S2 皮肤（改）", Creator: "作者乙"},
+			{ID: "gs3", Hash: "sk3", Name: "S3 皮肤", Creator: "作者丙"},
+		},
+		Scores: []hub.Score{
+			{ID: "sc2", BeatmapHash: "bh2", Hash: "sc2", RulesetShortName: "taiko",
+				TotalScore: 500, RankInt: 2, Date: t0},
+			{ID: "sc3", BeatmapHash: "bh3", Hash: "sc3", RulesetShortName: "fruits",
+				TotalScore: 42, RankInt: 1, Date: t0},
+		},
+	}); err != nil {
+		t.Fatalf("收集 lazer: %v", err)
+	}
+	// lazer 删除 S3/SC3 后再收集 → tombstone；delta 再收集恢复 canonical（HB3）。
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "lazer", CollectedAt: t0.Add(2 * time.Hour),
+		Skins: []hub.Skin{{ID: "gs2", Hash: "sk2", Name: "S2 皮肤（改）", Creator: "作者乙"}},
+		Scores: []hub.Score{{ID: "sc2", BeatmapHash: "bh2", Hash: "sc2", RulesetShortName: "taiko",
+			TotalScore: 500, RankInt: 2, Date: t0}},
+	}); err != nil {
+		t.Fatalf("再收集 lazer: %v", err)
+	}
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "delta", CollectedAt: t0.Add(3 * time.Hour),
+		Skins: []hub.Skin{
+			{ID: "gs1", Hash: "sk1", Name: "S1 皮肤", Creator: "作者甲"},
+			{ID: "gs2", Hash: "sk2", Name: "S2 皮肤", Creator: "作者乙"},
+			{ID: "gs3", Hash: "sk3", Name: "S3 皮肤", Creator: "作者丙"},
+		},
+		Scores: []hub.Score{
+			{ID: "sc1", BeatmapHash: "bh1", Hash: "sc1", RulesetShortName: "osu",
+				TotalScore: 123456, RankInt: 3, Date: t0},
+			{ID: "sc2", BeatmapHash: "bh2", Hash: "sc2", RulesetShortName: "taiko",
+				TotalScore: 999, RankInt: 2, Date: t0},
+			{ID: "sc3", BeatmapHash: "bh3", Hash: "sc3", RulesetShortName: "fruits",
+				TotalScore: 42, RankInt: 1, Date: t0},
+		},
+	}); err != nil {
+		t.Fatalf("再收集 delta: %v", err)
+	}
+
+	rows, err := b.Compare.PreviewDeploy("lazer")
+	if err != nil {
+		t.Fatalf("PreviewDeploy: %v", err)
+	}
+	type want struct {
+		cat     Category
+		checked bool
+	}
+	skinWant := map[string]want{
+		"sk1": {CategoryCreate, true},
+		"sk2": {CategoryConflict, true},
+		"sk3": {CategoryRestore, false},
+	}
+	scoreWant := map[string]want{
+		"bh1|sc1": {CategoryCreate, true},
+		"bh2|sc2": {CategoryConflict, true},
+		"bh3|sc3": {CategoryRestore, false},
+	}
+	skinGot, scoreGot := map[string]want{}, map[string]want{}
+	for _, r := range rows {
+		w := want{r.Category, r.DefaultChecked}
+		switch r.Kind {
+		case hub.KindSkin:
+			skinGot[r.ContentKey] = w
+		case hub.KindScore:
+			scoreGot[r.ContentKey] = w
+		}
+	}
+	if len(skinGot) != len(skinWant) || len(scoreGot) != len(scoreWant) {
+		t.Fatalf("skin/score 预演行 = skin%v score%v，期望各 3 行", skinGot, scoreGot)
+	}
+	for key, w := range skinWant {
+		if skinGot[key] != w {
+			t.Fatalf("皮肤 %s = %+v，期望 %+v", key, skinGot[key], w)
+		}
+	}
+	for key, w := range scoreWant {
+		if scoreGot[key] != w {
+			t.Fatalf("成绩 %s = %+v，期望 %+v", key, scoreGot[key], w)
+		}
+	}
+	for _, r := range rows {
+		if r.Kind == hub.KindSkin && r.ContentKey == "sk1" {
+			if r.Summary != "皮肤「S1 皮肤」（作者甲）" {
+				t.Fatalf("皮肤摘要 = %q", r.Summary)
+			}
+		}
+		if r.Kind == hub.KindScore && r.ContentKey == "bh1|sc1" {
+			if r.Summary != "成绩 osu · 123456 分 · 2026-02-02" {
+				t.Fatalf("成绩摘要 = %q", r.Summary)
+			}
+		}
+		if r.Category == CategoryRestore && r.DeletedAt == 0 {
+			t.Fatalf("恢复组应携带删除时间: %+v", r)
+		}
+	}
+	// 冲突字段级对比：皮肤 Name/Creator、成绩 TotalScore（§4.2 清单）。
+	conflictFields := map[string][]string{}
+	for _, r := range rows {
+		if r.Category != CategoryConflict {
+			continue
+		}
+		for _, f := range r.ConflictFields {
+			conflictFields[string(r.Kind)+"."+f.Field] = append(conflictFields[string(r.Kind)+"."+f.Field], f.HubValue)
+		}
+	}
+	if len(conflictFields["skin.Name"]) == 0 || len(conflictFields["score.TotalScore"]) == 0 {
+		t.Fatalf("冲突字段应含皮肤 Name 与成绩 TotalScore: %v", conflictFields)
+	}
+
+	// DeletedEntries 覆盖全部启用 kind（皮肤/成绩恢复组在列）。
+	deleted, err := b.Compare.DeletedEntries("lazer")
+	if err != nil {
+		t.Fatalf("DeletedEntries: %v", err)
+	}
+	kinds := map[hub.EntityKind]int{}
+	for _, d := range deleted {
+		kinds[d.Kind]++
+	}
+	if kinds[hub.KindSkin] != 1 || kinds[hub.KindScore] != 1 {
+		t.Fatalf("恢复组应含 skin/score 各 1 项: %v", kinds)
+	}
+
+	// BuildPlan 放开 M2 三类：皮肤/成绩的 create 与 conflict 产生实际动作，
+	// 恢复组勾选 = 拍板（Restore 标记）。
+	if _, err := b.Library.AssignFork("/tmp/lzsync-test-target/client.realm", "lazer"); err != nil {
+		t.Fatalf("AssignFork: %v", err)
+	}
+	sel := []Selection{
+		{Kind: hub.KindSkin, ContentKey: "sk1"},
+		{Kind: hub.KindSkin, ContentKey: "sk2"},
+		{Kind: hub.KindSkin, ContentKey: "sk3"},
+		{Kind: hub.KindScore, ContentKey: "bh1|sc1"},
+		{Kind: hub.KindScore, ContentKey: "bh2|sc2"},
+	}
+	plan, err := b.Compare.BuildPlan("lazer", sel)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	got := map[string]deploy.PlanItem{}
+	for _, it := range plan.Items {
+		got[string(it.Kind)+"\x00"+it.ContentKey] = it
+	}
+	if it := got["skin\x00sk1"]; it.Action != deploy.ActionCreate || it.Restore {
+		t.Fatalf("皮肤新增应为 create: %+v", it)
+	}
+	if it := got["skin\x00sk2"]; it.Action != deploy.ActionUpdate {
+		t.Fatalf("皮肤冲突应为 update（hub 覆盖）: %+v", it)
+	}
+	if it := got["skin\x00sk3"]; it.Action != deploy.ActionCreate || !it.Restore {
+		t.Fatalf("皮肤恢复组勾选应为 create+Restore: %+v", it)
+	}
+	if it := got["score\x00bh1|sc1"]; it.Action != deploy.ActionCreate {
+		t.Fatalf("成绩新增应为 create: %+v", it)
+	}
+	if it := got["score\x00bh2|sc2"]; it.Action != deploy.ActionUpdate {
+		t.Fatalf("成绩冲突应为 update: %+v", it)
+	}
+}
+
+// TestPlanItemFromVersionUpdate 版本更新的计划项映射：ContentKey 落 hub
+// 链尾键、旧版本键落 OldContentKey；弱键勾选留 NeedsConfirm 痕（§5.4）。
+func TestPlanItemFromVersionUpdate(t *testing.T) {
+	sum := &summarizer{setTitles: map[string]string{
+		"new-hash": "Artist - Title（Author）",
+	}}
+	strong := planItemFrom(hub.ReconcileItem{
+		Kind: hub.KindBeatmapSet, ContentKey: "old-hash", CurrentKey: "new-hash",
+		Category: hub.ReconcileVersionUpdate, IdentityKey: "online:1",
+		Evidence: EvidenceStrong,
+	}, sum)
+	if strong.Action != deploy.ActionVersionReplace ||
+		strong.ContentKey != "new-hash" || strong.OldContentKey != "old-hash" || strong.NeedsConfirm {
+		t.Fatalf("强键版本替换项不符: %+v", strong)
+	}
+	weak := planItemFrom(hub.ReconcileItem{
+		Kind: hub.KindBeatmapSet, ContentKey: "old-hash", CurrentKey: "new-hash",
+		Category: hub.ReconcileVersionUpdate, IdentityKey: "meta:A|T|U",
+		Evidence: EvidenceWeak,
+	}, sum)
+	if !weak.NeedsConfirm || weak.Action != deploy.ActionVersionReplace {
+		t.Fatalf("弱键勾选（拍板）应留 NeedsConfirm 并按替换执行: %+v", weak)
+	}
+	if weak.Summary != "Artist - Title（Author）" {
+		t.Fatalf("版本替换摘要应取链尾曲名: %q", weak.Summary)
+	}
+}

@@ -1,9 +1,10 @@
 package appsvc
 
-// 真实后端实现：库身份走 forks、对账走 hub（ReconcileAgainst/Tombstones），
-// fork↔fork 对比与收集/投放编排分别委托 diff / collect / deploy 层——
-// 这些层的契约桩尚未施工时如实上抛 ErrNotImplemented，UI 由 Mock 后端
-// 承载（M-4）。层实现落地后本文件零改动即接通真实链路。
+// 真实后端实现：库身份走 forks、对账走 hub（ReconcileAgainst/Tombstones
+// + skin/score 过渡直查，见 reconcile_skin_score.go），fork↔fork 对比与
+// 收集/投放编排分别委托 diff / collect / deploy 层——这些层的契约桩尚未
+// 施工时如实上抛 ErrNotImplemented，UI 由 Mock 后端承载（M-4）。层实现
+// 落地后本文件零改动即接通真实链路。
 
 import (
 	"context"
@@ -27,8 +28,43 @@ import (
 	"lzsync/internal/realmc"
 )
 
-// kinds M1 对账类型面：收藏夹 + 谱面集（skin/score 等待后续 schema 迁移）。
-var kinds = []hub.EntityKind{hub.KindCollection, hub.KindBeatmapSet}
+// reconcileKinds hub.ReconcileAgainst 已放开的对账类型（collection/
+// beatmap_set）；skin/score 的对账查询面尚未在 hub/diff 放开，由本层
+// reconcileSkins/reconcileScores 直查过渡承载（见 reconcile_skin_score.go）。
+var reconcileKinds = []hub.EntityKind{hub.KindCollection, hub.KindBeatmapSet}
+
+// uiKinds 预演/恢复组数据面覆盖的全部实体类型（§6.2 类型 Tab 的数据面：
+// 谱面集/难度/收藏/皮肤/成绩）。难度不产独立对账行——难度生命周期挂在
+// 可软删的父集上整集管理（§4.2），仅占 Tab 位与 tombstone 遍历。
+var uiKinds = []hub.EntityKind{
+	hub.KindBeatmapSet, hub.KindBeatmap, hub.KindCollection, hub.KindSkin, hub.KindScore,
+}
+
+// allReconcileItems 组装 hub→fork 的全量对账结果：hub 公共对账面（两类）
+// + skin/score 过渡直查，按 (Kind, ContentKey) 确定性排序。
+func (s *realCompare) allReconcileItems(ctx context.Context, target string) ([]hub.ReconcileItem, error) {
+	items, err := s.deps.Hub.ReconcileAgainst(ctx, target, reconcileKinds)
+	if err != nil {
+		return nil, err
+	}
+	skins, err := s.reconcileSkins(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	items = append(items, skins...)
+	scores, err := s.reconcileScores(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	items = append(items, scores...)
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Kind != items[j].Kind {
+			return items[i].Kind < items[j].Kind
+		}
+		return items[i].ContentKey < items[j].ContentKey
+	})
+	return items, nil
+}
 
 // registry 已注册库（forkID → 解析结果）。M1 内存态；盘面持久待设置页
 // 落 config.json 时一并施工（notes 已记）。
@@ -296,9 +332,11 @@ type realCompare struct {
 	plan deploy.Plan // 持久化的当前计划（plan.json）
 }
 
-// PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）。
+// PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）：
+// 覆盖全部启用 kind（collection/beatmap_set 走 hub 公共对账面，skin/score
+// 走本层过渡直查）。
 func (s *realCompare) PreviewDeploy(target string) ([]DiffRow, error) {
-	items, err := s.deps.Hub.ReconcileAgainst(context.Background(), target, kinds)
+	items, err := s.allReconcileItems(context.Background(), target)
 	if err != nil {
 		return nil, err
 	}
@@ -310,9 +348,10 @@ func (s *realCompare) PreviewDeploy(target string) ([]DiffRow, error) {
 	return rows, nil
 }
 
-// CompareForks fork↔fork 快照对比（委托 diff 层：两份 presence 差集）。
+// CompareForks fork↔fork 快照对比（委托 diff 层：两份 presence 差集；
+// kinds 传递全部启用 kind，diff 层落地后零改动接通）。
 func (s *realCompare) CompareForks(source, target string) ([]DiffRow, error) {
-	entries, err := diff.CompareForks(context.Background(), s.deps.Hub, source, target, kinds)
+	entries, err := diff.CompareForks(context.Background(), s.deps.Hub, source, target, uiKinds)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +362,9 @@ func (s *realCompare) CompareForks(source, target string) ([]DiffRow, error) {
 	return rows, nil
 }
 
-// DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 全量，HB2）。
+// DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 全量，HB2）：
+// 遍历全部启用 kind（含暂无对账行的 beatmap——presence/tombstone 天然按
+// kind 泛化，缺项自然为空）。
 func (s *realCompare) DeletedEntries(target string) ([]DiffRow, error) {
 	tombs, err := s.deps.Hub.Tombstones(context.Background(), target)
 	if err != nil {
@@ -331,7 +372,7 @@ func (s *realCompare) DeletedEntries(target string) ([]DiffRow, error) {
 	}
 	sum := newSummarizer(s.deps.Hub)
 	rows := []DiffRow{}
-	for _, kind := range kinds {
+	for _, kind := range uiKinds {
 		for key, deletedAt := range tombs[kind] {
 			rows = append(rows, DiffRow{
 				Kind:           kind,
@@ -353,8 +394,9 @@ func (s *realCompare) DeletedEntries(target string) ([]DiffRow, error) {
 }
 
 // BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。
-// M1 实际动作面 = 收藏夹 create/update；其余类型与版本更新归入 skip 并
-// 给出原因（谱面集/版本替换的写路径属 M2，§5.1 分阶段启用）。
+// M2 动作面 = 收藏夹 + 谱面集（create/update/version-replace）+ 皮肤 +
+// 成绩（create/update）——与 deploy 执行面（writer_set/writer_skin/
+// writer_score）对齐；键位/规则集设置/ModPreset 属 M3 写路径（§5.1）。
 func (s *realCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, error) {
 	if target == "" {
 		return deploy.Plan{}, errors.New("appsvc: 生成计划缺少目标 fork")
@@ -368,7 +410,7 @@ func (s *realCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, er
 	}
 	// 以当前预演结果校验勾选（预览与执行之间目标库可能漂移，执行期还有
 	// 现场复核兜底，§3.3）。
-	items, err := s.deps.Hub.ReconcileAgainst(context.Background(), target, kinds)
+	items, err := s.allReconcileItems(context.Background(), target)
 	if err != nil {
 		return deploy.Plan{}, err
 	}
@@ -408,10 +450,11 @@ func (s *realCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, er
 	return plan, nil
 }
 
-// planItemFrom 单条对账结果 → 计划项（M1 动作面收缩，超出部分计 skip）。
+// planItemFrom 单条对账结果 → 计划项（M2 动作面：收藏夹/谱面集/皮肤/成绩）。
 // 勾选恢复组 = 用户显式拍板投放（Restore 标记，投放成功清 tombstone）；
-// 勾选弱键疑似 = 已拍板按版本更新处理（NeedsConfirm 置位留痕，M1 实际
-// 动作仍属 M2 写路径）。
+// 勾选弱键疑似 = 已拍板按版本更新处理（NeedsConfirm 置位留痕，§5.4）。
+// 版本更新的 ContentKey 采用 hub 链尾键（写入面 canonical 载荷的读取键），
+// 目标现场旧版本键落 OldContentKey 供执行期重寻址（§3.3）。
 func planItemFrom(it hub.ReconcileItem, sum *summarizer) deploy.PlanItem {
 	item := deploy.PlanItem{
 		Kind:       it.Kind,
@@ -419,17 +462,42 @@ func planItemFrom(it hub.ReconcileItem, sum *summarizer) deploy.PlanItem {
 		Summary:    sum.summary(it.Kind, it.ContentKey),
 		Restore:    it.Restorable,
 	}
-	if it.Kind != hub.KindCollection {
-		item.Action, item.SkipReason = deploy.ActionSkip, "谱面集/难度投放属 M2 写路径（§5.1 分阶段），M1 仅收藏夹"
+	// 版本更新（谱面集专属语义，§4.4）：强键默认执行；弱键勾选即拍板。
+	if it.Category == hub.ReconcileVersionUpdate {
+		item.ContentKey, item.OldContentKey = it.CurrentKey, it.ContentKey
+		item.Action = deploy.ActionVersionReplace
+		item.Summary = sum.summary(it.Kind, it.CurrentKey)
+		if it.Evidence == EvidenceWeak {
+			item.NeedsConfirm = true
+		}
 		return item
 	}
-	switch it.Category {
-	case hub.ReconcileCreate:
-		item.Action = deploy.ActionCreate
-	case hub.ReconcileConflict:
-		item.Action = deploy.ActionUpdate // 冲突默认 hub 覆盖（就地更新白名单列，§5.4）
+	switch it.Kind {
+	case hub.KindCollection, hub.KindSkin, hub.KindScore:
+		// 无版本链实体：create（恢复组勾选即拍板）/conflict（默认 hub 覆盖，
+		// 就地更新白名单列，§5.4）；无版本更新语义。
+		switch it.Category {
+		case hub.ReconcileCreate:
+			item.Action = deploy.ActionCreate
+		case hub.ReconcileConflict:
+			item.Action = deploy.ActionUpdate
+		default:
+			item.Action, item.SkipReason = deploy.ActionSkip,
+				string(it.Kind)+" 无版本更新语义（内容键即身份，§4.2）"
+		}
+	case hub.KindBeatmapSet:
+		switch it.Category {
+		case hub.ReconcileCreate:
+			item.Action = deploy.ActionCreate
+		case hub.ReconcileConflict:
+			item.Action = deploy.ActionUpdate // 冲突默认 hub 覆盖（就地更新白名单列，§5.4）
+		default:
+			item.Action, item.SkipReason = deploy.ActionSkip, "未知对账分类 "+string(it.Category)
+		}
 	default:
-		item.Action, item.SkipReason = deploy.ActionSkip, "收藏夹无版本更新语义（内容键即 Name）"
+		// 难度（对账面不产独立行）与 M3 类型：不静默吞掉（§1.5-4）。
+		item.Action, item.SkipReason = deploy.ActionSkip,
+			string(it.Kind)+" 投放属 M3 写路径（§5.1 分阶段启用）"
 	}
 	return item
 }
@@ -513,19 +581,59 @@ func reconcileToRow(it hub.ReconcileItem, sum *summarizer) DiffRow {
 	return row
 }
 
-// summarizer 内容键 → 人类可读摘要（§6.2）。收藏夹内容键即 Name
-//（§4.2 第一层），键本身就是摘要，无需查库；谱面集摘要走 hub 公共
-// 查询面（当前版本集合的 Title/Artist 规范值）。
+// summarizer 内容键 → 人类可读摘要（§6.2）。收藏夹内容键即 Name（§4.2
+// 第一层），键本身就是摘要，无需查库；谱面集/皮肤/成绩摘要走 hub 查询面
+//（当前版本集合的 Title/Artist 规范值、皮肤 Name/Creator、成绩规则集/
+// 分数/日期）。
 type summarizer struct {
 	setTitles map[string]string // hash → "Artist - Title（Author）"
+	skinNames map[string]string // hash → "Name（Creator）"
+	scoreSum  map[string]string // 组合键 → "规则集 · N 分 · 日期"
 }
 
 func newSummarizer(h *hub.Store) *summarizer {
-	s := &summarizer{setTitles: map[string]string{}}
-	if sets, err := h.CurrentBeatmapSets(context.Background()); err == nil {
+	s := &summarizer{
+		setTitles: map[string]string{},
+		skinNames: map[string]string{},
+		scoreSum:  map[string]string{},
+	}
+	ctx := context.Background()
+	if sets, err := h.CurrentBeatmapSets(ctx); err == nil {
 		for _, e := range sets {
 			s.setTitles[e.Set.Hash] = fmt.Sprintf("%s - %s（%s）", e.Set.Artist, e.Set.Title, e.Set.AuthorUsername)
 		}
+	}
+	if rows, err := h.DB().QueryContext(ctx,
+		`SELECT content_hash, payload FROM skin`); err == nil {
+		for rows.Next() {
+			var k, v string
+			if err := rows.Scan(&k, &v); err != nil {
+				break // 摘要尽力而为：单行失败退回内容键前缀
+			}
+			var sk hub.Skin
+			if json.Unmarshal([]byte(v), &sk) == nil {
+				s.skinNames[k] = fmt.Sprintf("皮肤「%s」", sk.Name)
+				if sk.Creator != "" {
+					s.skinNames[k] += "（" + sk.Creator + "）"
+				}
+			}
+		}
+		rows.Close()
+	}
+	if rows, err := h.DB().QueryContext(ctx,
+		`SELECT beatmap_hash, content_hash, payload FROM score`); err == nil {
+		for rows.Next() {
+			var bh, ch, v string
+			if err := rows.Scan(&bh, &ch, &v); err != nil {
+				break
+			}
+			var sc hub.Score
+			if json.Unmarshal([]byte(v), &sc) == nil {
+				s.scoreSum[hub.ScoreContentKey(bh, ch)] = fmt.Sprintf("成绩 %s · %d 分 · %s",
+					sc.RulesetShortName, sc.TotalScore, sc.Date.Format("2006-01-02"))
+			}
+		}
+		rows.Close()
 	}
 	return s
 }
@@ -539,6 +647,16 @@ func (s *summarizer) summary(kind hub.EntityKind, key string) string {
 			return t
 		}
 		return "谱面集 " + shortKey(key)
+	case hub.KindSkin:
+		if t, ok := s.skinNames[key]; ok {
+			return t
+		}
+		return "皮肤 " + shortKey(key)
+	case hub.KindScore:
+		if t, ok := s.scoreSum[key]; ok {
+			return t
+		}
+		return "成绩 " + shortKey(key)
 	default:
 		return string(kind) + " " + shortKey(key)
 	}
