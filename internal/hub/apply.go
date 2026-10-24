@@ -19,7 +19,13 @@ type Snapshot struct {
 	BeatmapSets []BeatmapSet
 	Skins       []Skin  // v2：M2 皮肤实体（Hash 为空的行由投影端跳过，§4.2）
 	Scores      []Score // v2：M2 成绩实体（组合内容键见 ScoreContentKey）
-	Skips       []SkipStat // 投影期跳过（进 collect_log）
+	// v3：M3 设置类实体（§5.1-M3）。键位/规则集设置全收（hub 保留原文，
+	// 目标端兼容过滤在投放侧做，D7/D20 同款哲学）；ModPreset 软删行由
+	// 投影端跳过（S4）。
+	KeyBindings     []KeyBinding
+	RulesetSettings []RulesetSetting
+	ModPresets      []ModPreset
+	Skips           []SkipStat // 投影期跳过（进 collect_log）
 }
 
 // ScoreContentKey 把成绩组合内容键 (BeatmapHash, Hash)（§4.2 第一层）
@@ -28,6 +34,62 @@ type Snapshot struct {
 // 序列化约定，解析侧按首个 "|" 拆分。
 func ScoreContentKey(beatmapHash, hash string) string {
 	return beatmapHash + "|" + hash
+}
+
+// keyBindingVariantNull 是 key_binding 表 Variant 列的归一化哨兵
+// （realm 侧 int? 的 null = 无变体；真实域是 mania 键数等非负值，-1 不碰撞）。
+const keyBindingVariantNull = -1
+
+// encodeContentKey 把组合内容键段编码为单列内容键（presence / tombstone /
+// 投放计划项的统一键形）。JSON 数组编码：段序固定、null 保真、任意字符串
+// 无歧义——ScoreContentKey 的 "|" 拼接依赖两段均为定长 hex 的前提，设置类
+// 实体的键段是任意字符串（用户命名的 ModPreset/设置 Key），拼接会被
+// 分隔符碰撞破坏，故取 JSON。
+func encodeContentKey(parts ...any) string {
+	b, err := json.Marshal(parts)
+	if err != nil {
+		// 数组装 string/int/指针，Marshal 不可能失败；保守返回空串由
+		// 调用方的唯一性前提兜底（空串键不与任何合法编码冲突）。
+		return ""
+	}
+	return string(b)
+}
+
+// KeyBindingContentKey 键位组合内容键 (RulesetName, Variant, ActionInt)
+// （§4.2 第一层）的单列编码；nil 段保真为 null（全局键位/无变体）。
+func KeyBindingContentKey(rulesetName *string, variant *int, actionInt int) string {
+	return encodeContentKey(rulesetName, variant, actionInt)
+}
+
+// RulesetSettingContentKey 规则集设置组合内容键 (RulesetName, Variant,
+// Key)（§4.2 第一层）的单列编码。
+func RulesetSettingContentKey(rulesetName string, variant int, key string) string {
+	return encodeContentKey(rulesetName, variant, key)
+}
+
+// ModPresetContentKey 模组预设业务键 (RulesetShortName, Name)（§4.2：
+// 无内容哈希取业务键）的单列编码。
+func ModPresetContentKey(rulesetShortName, name string) string {
+	return encodeContentKey(rulesetShortName, name)
+}
+
+// decodeKeyBindingContentKey 是 KeyBindingContentKey 的解析侧（Load 按单列
+// 键取行时拆回复合主键参数；nil 段还原 null 语义）。
+func decodeKeyBindingContentKey(key string) (rulesetName *string, variant *int, actionInt int, err error) {
+	var parts [3]json.RawMessage
+	if dErr := json.Unmarshal([]byte(key), &parts); dErr != nil {
+		return nil, nil, 0, fmt.Errorf("hub: 非法的键位内容键 %q: %w", key, dErr)
+	}
+	if dErr := json.Unmarshal(parts[0], &rulesetName); dErr != nil {
+		return nil, nil, 0, fmt.Errorf("hub: 键位内容键 %q 的 RulesetName 段非法: %w", key, dErr)
+	}
+	if dErr := json.Unmarshal(parts[1], &variant); dErr != nil {
+		return nil, nil, 0, fmt.Errorf("hub: 键位内容键 %q 的 Variant 段非法: %w", key, dErr)
+	}
+	if dErr := json.Unmarshal(parts[2], &actionInt); dErr != nil {
+		return nil, nil, 0, fmt.Errorf("hub: 键位内容键 %q 的 ActionInt 段非法: %w", key, dErr)
+	}
+	return rulesetName, variant, actionInt, nil
 }
 
 // ApplyResult 是 ApplySnapshot 的执行摘要。
@@ -101,6 +163,24 @@ func (s *Store) ApplySnapshot(ctx context.Context, snap Snapshot) (ApplyResult, 
 			return res, err
 		}
 		res.EntitiesWritten[KindScore]++
+	}
+	for i := range snap.KeyBindings {
+		if err := upsertKeyBinding(ctx, tx, &snap.KeyBindings[i], snap.ForkID, now); err != nil {
+			return res, err
+		}
+		res.EntitiesWritten[KindKeyBinding]++
+	}
+	for i := range snap.RulesetSettings {
+		if err := upsertRulesetSetting(ctx, tx, &snap.RulesetSettings[i], snap.ForkID, now); err != nil {
+			return res, err
+		}
+		res.EntitiesWritten[KindRulesetSetting]++
+	}
+	for i := range snap.ModPresets {
+		if err := upsertModPreset(ctx, tx, &snap.ModPresets[i], snap.ForkID, now); err != nil {
+			return res, err
+		}
+		res.EntitiesWritten[KindModPreset]++
 	}
 
 	// 效果 2 + 3：presence 整段重写 + 差集 tombstone（HB2）。
@@ -222,8 +302,76 @@ ON CONFLICT(beatmap_hash, content_hash) DO UPDATE SET
 	return nil
 }
 
-// rewritePresence 按 fork 整段重写四类 presence（快照语义，幂等），并就
-// 上次快照差集生成 tombstone（HB2）。防误标三道闸：
+// upsertKeyBinding 键位实体行（v3，组合内容键 = (RulesetName, Variant,
+// ActionInt)；NULL 语义段归一化哨兵见 ddlV3 注释）。同 HB3 语义。
+func upsertKeyBinding(ctx context.Context, tx *sql.Tx, kb *KeyBinding, fork string, now int64) error {
+	payload, err := json.Marshal(kb)
+	if err != nil {
+		return fmt.Errorf("hub: 序列化键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt), err)
+	}
+	rulesetName, variant := keyBindingKeyCols(kb.RulesetName, kb.Variant)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO key_binding(ruleset_name, variant, action_int, payload, origin_guid, origin_fork, first_seen, updated_at)
+VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(ruleset_name, variant, action_int) DO UPDATE SET
+  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
+		rulesetName, variant, kb.ActionInt, string(payload), kb.ID, fork, now, now); err != nil {
+		return fmt.Errorf("hub: upsert 键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt), err)
+	}
+	return nil
+}
+
+// keyBindingKeyCols 键位可空键段的表列归一化（nil → ”/-1 哨兵）。
+func keyBindingKeyCols(rulesetName *string, variant *int) (string, int64) {
+	name := ""
+	if rulesetName != nil {
+		name = *rulesetName
+	}
+	v := int64(keyBindingVariantNull)
+	if variant != nil {
+		v = int64(*variant)
+	}
+	return name, v
+}
+
+// upsertRulesetSetting 规则集设置实体行（v3，组合内容键 = (RulesetName,
+// Variant, Key)；realm 侧无 Guid 列，origin_guid 不设）。同 HB3 语义。
+func upsertRulesetSetting(ctx context.Context, tx *sql.Tx, rs *RulesetSetting, fork string, now int64) error {
+	payload, err := json.Marshal(rs)
+	if err != nil {
+		return fmt.Errorf("hub: 序列化规则集设置 %q: %w", RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO ruleset_setting(ruleset_name, variant, key, payload, origin_fork, first_seen, updated_at)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(ruleset_name, variant, key) DO UPDATE SET
+  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
+		rs.RulesetName, rs.Variant, rs.Key, string(payload), fork, now, now); err != nil {
+		return fmt.Errorf("hub: upsert 规则集设置 %q: %w", RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), err)
+	}
+	return nil
+}
+
+// upsertModPreset 模组预设实体行（v3，业务键 = (RulesetShortName, Name)，
+// §4.2 无内容哈希取业务键）。同 HB3 语义。
+func upsertModPreset(ctx context.Context, tx *sql.Tx, mp *ModPreset, fork string, now int64) error {
+	payload, err := json.Marshal(mp)
+	if err != nil {
+		return fmt.Errorf("hub: 序列化模组预设 %q: %w", ModPresetContentKey(mp.RulesetShortName, mp.Name), err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO mod_preset(ruleset_short_name, name, payload, origin_guid, origin_fork, first_seen, updated_at)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(ruleset_short_name, name) DO UPDATE SET
+  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
+		mp.RulesetShortName, mp.Name, string(payload), mp.ID, fork, now, now); err != nil {
+		return fmt.Errorf("hub: upsert 模组预设 %q: %w", ModPresetContentKey(mp.RulesetShortName, mp.Name), err)
+	}
+	return nil
+}
+
+// rewritePresence 按 fork 整段重写各实体类 presence（快照语义，幂等），
+// 并就上次快照差集生成 tombstone（HB2）。防误标三道闸：
 //   - 「投影完整成功才落库」由 Snapshot 构造方保证（见 Snapshot 注释）；
 //   - 消失键已被版本链取代（链尾仍在本次快照中）→ 不算删除（仅
 //     beatmap_set 有版本链，skin/score 按普通差集）；
@@ -244,6 +392,9 @@ func rewritePresence(ctx context.Context, tx *sql.Tx, snap *Snapshot, now int64)
 		newPlan(KindBeatmapSet, len(snap.BeatmapSets)),
 		newPlan(KindSkin, len(snap.Skins)),
 		newPlan(KindScore, len(snap.Scores)),
+		newPlan(KindKeyBinding, len(snap.KeyBindings)),
+		newPlan(KindRulesetSetting, len(snap.RulesetSettings)),
+		newPlan(KindModPreset, len(snap.ModPresets)),
 	}
 	appendPlan := func(p *kindPayload, key string, v any) error {
 		j, mErr := json.Marshal(v)
@@ -275,6 +426,24 @@ func rewritePresence(ctx context.Context, tx *sql.Tx, snap *Snapshot, now int64)
 	for i := range snap.Scores {
 		sc := &snap.Scores[i]
 		if aErr := appendPlan(&plans[3], ScoreContentKey(sc.BeatmapHash, sc.Hash), sc); aErr != nil {
+			return 0, 0, aErr
+		}
+	}
+	for i := range snap.KeyBindings {
+		kb := &snap.KeyBindings[i]
+		if aErr := appendPlan(&plans[4], KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt), kb); aErr != nil {
+			return 0, 0, aErr
+		}
+	}
+	for i := range snap.RulesetSettings {
+		rs := &snap.RulesetSettings[i]
+		if aErr := appendPlan(&plans[5], RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), rs); aErr != nil {
+			return 0, 0, aErr
+		}
+	}
+	for i := range snap.ModPresets {
+		mp := &snap.ModPresets[i]
+		if aErr := appendPlan(&plans[6], ModPresetContentKey(mp.RulesetShortName, mp.Name), mp); aErr != nil {
 			return 0, 0, aErr
 		}
 	}

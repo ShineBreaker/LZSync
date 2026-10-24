@@ -2,7 +2,7 @@ package hub
 
 // SchemaVersion 当前 hub.db schema 版本（版本化迁移自管，§3.4；hub 是
 // LZSync 自有格式，与游戏库 schema 完全无关，S3 不受影响）。
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // ddl 是 schema v1 全部建表语句（§4.4 表族）。时间戳一律 Unix 毫秒。
 // 契约要点：
@@ -130,7 +130,56 @@ CREATE TABLE IF NOT EXISTS score(
 );
 `
 
+// ddlV3 是 schema v3 增量（M3 设置类实体，design.md §5.1-M3）：key_binding
+// / ruleset_setting / mod_preset 三表，组合内容键做复合主键（§4.2 第一层，
+// score 两列复合主键的同款延续；不做单列拼接主键）。只做加法，v1/v2
+// 语句一字不改。全部 IF NOT EXISTS，中断重跑幂等。presence/tombstone 仍
+// 天然按 kind 泛化——内容键经包内编码函数（KeyBindingContentKey 等）单列
+// 化，NULL 语义段（全局键位/无变体）在编码里保真，不进表列。
+//
+// 归一化哨兵：key_binding 的 RulesetName（realm 侧 string?，null = 全局
+// 键位）落库为 ”；Variant（int?，null = 无变体）落库为 -1（真实域是
+// mania 键数等非负值，-1 不碰撞）。ruleset_setting 的 realm 侧 Variant
+// 是非空 int，无需哨兵；RulesetSetting 无 Guid 列（realm 侧无主键表，
+// lazer-baseline §2.13），origin_guid 列不设。mod_preset 无内容哈希列，
+// 取业务键 (RulesetShortName, Name)（§4.2）。
+const ddlV3 = `
+CREATE TABLE IF NOT EXISTS key_binding(
+  ruleset_name TEXT NOT NULL,
+  variant      INTEGER NOT NULL,
+  action_int   INTEGER NOT NULL,
+  payload      TEXT NOT NULL,
+  origin_guid  TEXT NOT NULL,
+  origin_fork  TEXT NOT NULL,
+  first_seen   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY(ruleset_name, variant, action_int)
+);
+
+CREATE TABLE IF NOT EXISTS ruleset_setting(
+  ruleset_name TEXT NOT NULL,
+  variant      INTEGER NOT NULL,
+  key          TEXT NOT NULL,
+  payload      TEXT NOT NULL,
+  origin_fork  TEXT NOT NULL,
+  first_seen   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY(ruleset_name, variant, key)
+);
+
+CREATE TABLE IF NOT EXISTS mod_preset(
+  ruleset_short_name TEXT NOT NULL,
+  name               TEXT NOT NULL,
+  payload            TEXT NOT NULL,
+  origin_guid        TEXT NOT NULL,
+  origin_fork        TEXT NOT NULL,
+  first_seen         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  PRIMARY KEY(ruleset_short_name, name)
+);
+`
+
 // migrations 是版本化迁移链：migrations[i] 把库从 schema 版本 i+1 升到
 // i+2（migrations[0] = v1→v2）。新增版本 = 追加一段 DDL 并抬高
 // SchemaVersion；禁止改写既有条目（旧库可能已按其落盘）。
-var migrations = []string{ddlV2}
+var migrations = []string{ddlV2, ddlV3}

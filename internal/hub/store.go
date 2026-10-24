@@ -199,6 +199,130 @@ func (s *Store) LoadScore(ctx context.Context, beatmapHash, hash string) (Score,
 	return sc, Origin{GUID: originGUID, Fork: originFork}, true, nil
 }
 
+// LoadKeyBinding 按内容键编码（KeyBindingContentKey）读取键位 canonical
+// 值及其来源声明（v3）。不存在返回 (零值, Origin{}, false, nil)。
+func (s *Store) LoadKeyBinding(ctx context.Context, contentKey string) (KeyBinding, Origin, bool, error) {
+	rulesetName, variant, actionInt, err := decodeKeyBindingContentKey(contentKey)
+	if err != nil {
+		return KeyBinding{}, Origin{}, false, err
+	}
+	var (
+		payload    string
+		originGUID string
+		originFork string
+	)
+	name, variantCol := keyBindingKeyCols(rulesetName, variant)
+	qErr := s.db.QueryRowContext(ctx,
+		`SELECT payload, origin_guid, origin_fork FROM key_binding WHERE ruleset_name=? AND variant=? AND action_int=?`,
+		name, variantCol, actionInt).Scan(&payload, &originGUID, &originFork)
+	if errors.Is(qErr, sql.ErrNoRows) {
+		return KeyBinding{}, Origin{}, false, nil
+	}
+	if qErr != nil {
+		return KeyBinding{}, Origin{}, false, fmt.Errorf("hub: 读键位 %q: %w", contentKey, qErr)
+	}
+	var kb KeyBinding
+	if err := json.Unmarshal([]byte(payload), &kb); err != nil {
+		return KeyBinding{}, Origin{}, false, fmt.Errorf("hub: 解码键位 %q payload: %w", contentKey, err)
+	}
+	return kb, Origin{GUID: originGUID, Fork: originFork}, true, nil
+}
+
+// LoadRulesetSetting 按内容键编码（RulesetSettingContentKey）读取规则集
+// 设置 canonical 值及其来源声明（v3）。RulesetSetting 无 Guid 列，Origin
+// 的 GUID 恒为空串。
+func (s *Store) LoadRulesetSetting(ctx context.Context, contentKey string) (RulesetSetting, Origin, bool, error) {
+	var parts [3]json.RawMessage
+	if err := json.Unmarshal([]byte(contentKey), &parts); err != nil {
+		return RulesetSetting{}, Origin{}, false,
+			fmt.Errorf("hub: 非法的规则集设置内容键 %q: %w", contentKey, err)
+	}
+	var (
+		rulesetName string
+		variant     int
+		key         string
+	)
+	if err := decode3(parts, &rulesetName, &variant, &key, contentKey); err != nil {
+		return RulesetSetting{}, Origin{}, false, err
+	}
+	var (
+		payload    string
+		originFork string
+	)
+	qErr := s.db.QueryRowContext(ctx,
+		`SELECT payload, origin_fork FROM ruleset_setting WHERE ruleset_name=? AND variant=? AND key=?`,
+		rulesetName, variant, key).Scan(&payload, &originFork)
+	if errors.Is(qErr, sql.ErrNoRows) {
+		return RulesetSetting{}, Origin{}, false, nil
+	}
+	if qErr != nil {
+		return RulesetSetting{}, Origin{}, false, fmt.Errorf("hub: 读规则集设置 %q: %w", contentKey, qErr)
+	}
+	var rs RulesetSetting
+	if err := json.Unmarshal([]byte(payload), &rs); err != nil {
+		return RulesetSetting{}, Origin{}, false, fmt.Errorf("hub: 解码规则集设置 %q payload: %w", contentKey, err)
+	}
+	return rs, Origin{Fork: originFork}, true, nil
+}
+
+// LoadModPreset 按业务键编码（ModPresetContentKey）读取模组预设 canonical
+// 值及其来源声明（v3）。
+func (s *Store) LoadModPreset(ctx context.Context, contentKey string) (ModPreset, Origin, bool, error) {
+	var parts [2]json.RawMessage
+	if err := json.Unmarshal([]byte(contentKey), &parts); err != nil {
+		return ModPreset{}, Origin{}, false,
+			fmt.Errorf("hub: 非法的模组预设内容键 %q: %w", contentKey, err)
+	}
+	var rulesetShortName, name string
+	if err := decode2(parts, &rulesetShortName, &name, contentKey); err != nil {
+		return ModPreset{}, Origin{}, false, err
+	}
+	var (
+		payload    string
+		originGUID string
+		originFork string
+	)
+	qErr := s.db.QueryRowContext(ctx,
+		`SELECT payload, origin_guid, origin_fork FROM mod_preset WHERE ruleset_short_name=? AND name=?`,
+		rulesetShortName, name).Scan(&payload, &originGUID, &originFork)
+	if errors.Is(qErr, sql.ErrNoRows) {
+		return ModPreset{}, Origin{}, false, nil
+	}
+	if qErr != nil {
+		return ModPreset{}, Origin{}, false, fmt.Errorf("hub: 读模组预设 %q: %w", contentKey, qErr)
+	}
+	var mp ModPreset
+	if err := json.Unmarshal([]byte(payload), &mp); err != nil {
+		return ModPreset{}, Origin{}, false, fmt.Errorf("hub: 解码模组预设 %q payload: %w", contentKey, err)
+	}
+	return mp, Origin{GUID: originGUID, Fork: originFork}, true, nil
+}
+
+// decode3/decode2 是内容键 JSON 段的解码 helper（Load 按单列键取行的
+// 拆键侧；段数不匹配的键直接报错）。
+func decode3(parts [3]json.RawMessage, a *string, b *int, c *string, key string) error {
+	if err := json.Unmarshal(parts[0], a); err != nil {
+		return fmt.Errorf("hub: 内容键 %q 第 1 段非法: %w", key, err)
+	}
+	if err := json.Unmarshal(parts[1], b); err != nil {
+		return fmt.Errorf("hub: 内容键 %q 第 2 段非法: %w", key, err)
+	}
+	if err := json.Unmarshal(parts[2], c); err != nil {
+		return fmt.Errorf("hub: 内容键 %q 第 3 段非法: %w", key, err)
+	}
+	return nil
+}
+
+func decode2(parts [2]json.RawMessage, a, b *string, key string) error {
+	if err := json.Unmarshal(parts[0], a); err != nil {
+		return fmt.Errorf("hub: 内容键 %q 第 1 段非法: %w", key, err)
+	}
+	if err := json.Unmarshal(parts[1], b); err != nil {
+		return fmt.Errorf("hub: 内容键 %q 第 2 段非法: %w", key, err)
+	}
+	return nil
+}
+
 // BeatmapSetEntry 是当前版本谱面集查询结果行。
 type BeatmapSetEntry struct {
 	Set    BeatmapSet

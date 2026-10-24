@@ -670,7 +670,7 @@ func mkScore(bh, hash, guid string) Score {
 	return Score{
 		ID: guid, BeatmapHash: bh, Hash: hash,
 		RulesetShortName: "osu", ClientVersion: "2026.1005.0",
-		TotalScore:        1_000_000,
+		TotalScore:            1_000_000,
 		TotalScoreWithoutMods: 900_000,
 		TotalScoreVersion:     30000019,
 		LegacyTotalScore:      &legacy,
@@ -864,8 +864,8 @@ func TestBeatmapC2ColumnsRoundtrip(t *testing.T) {
 			},
 			Metadata: Metadata{
 				Title: "TI", TitleUnicode: "TIU", Artist: "AR", ArtistUnicode: "ARU",
-				Author:      RealmUser{OnlineID: 77, Username: "AU", CountryString: "JP"},
-				Source:      "anime", Tags: "a b", UserTags: []string{"tag1"},
+				Author: RealmUser{OnlineID: 77, Username: "AU", CountryString: "JP"},
+				Source: "anime", Tags: "a b", UserTags: []string{"tag1"},
 				PreviewTime: 12345, AudioFile: "audio.mp3", BackgroundFile: "bg.jpg",
 			},
 			UserSettingsOffset: -12.5,
@@ -913,5 +913,251 @@ func TestBeatmapC2ColumnsRoundtrip(t *testing.T) {
 		bm.Metadata.PreviewTime != 12345 ||
 		bm.Metadata.AudioFile != "audio.mp3" || bm.Metadata.BackgroundFile != "bg.jpg" {
 		t.Errorf("Metadata 内联往返不一致: %+v", bm.Metadata)
+	}
+}
+
+// --- v3：M3 设置类实体（key_binding / ruleset_setting / mod_preset） ---
+
+// mkSettingsSnapshot 三类实体各一行的标准快照（覆盖可空键段与业务键两态）。
+func mkSettingsSnapshot(fork string, kbGUID string) Snapshot {
+	osuName := "osu"
+	mania4 := 4
+	mania7 := 7
+	return Snapshot{
+		ForkID: fork, CollectedAt: t0,
+		KeyBindings: []KeyBinding{
+			// 全局键位（RulesetName/Variant 均 nil）+ 规则集级 + mania 双变体
+			//（同 ActionInt 不同 Variant 是不同内容键）。
+			{ID: kbGUID + "-global", RulesetName: nil, Variant: nil, ActionInt: 100, KeyCombination: "Ctrl,Shift+Z"},
+			{ID: kbGUID + "-osu", RulesetName: &osuName, Variant: nil, ActionInt: 7, KeyCombination: "Z"},
+			{ID: kbGUID + "-mania4", RulesetName: &osuName, Variant: &mania4, ActionInt: 12, KeyCombination: "F"},
+			{ID: kbGUID + "-mania7", RulesetName: &osuName, Variant: &mania7, ActionInt: 12, KeyCombination: "D,F,J,K"},
+		},
+		RulesetSettings: []RulesetSetting{
+			{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
+			{RulesetName: "mania", Variant: 4, Key: "speed_change_style", Value: "1"},
+		},
+		ModPresets: []ModPreset{
+			{ID: kbGUID + "-preset", RulesetShortName: "osu", Name: "My Preset|with|pipes",
+				Description: "score preset", ModsJson: `[{"acronym":"HD","settings":{}}]`},
+		},
+	}
+}
+
+func TestApplySnapshotSettingsRoundtrip(t *testing.T) {
+	s := openMem(t)
+	snap := mkSettingsSnapshot("A", "g-v3")
+	res := applySnap(t, s, snap)
+	for kind, want := range map[EntityKind]int{
+		KindKeyBinding: 4, KindRulesetSetting: 2, KindModPreset: 1,
+	} {
+		if got := res.EntitiesWritten[kind]; got != want {
+			t.Errorf("EntitiesWritten[%s] = %d，期望 %d", kind, got, want)
+		}
+	}
+
+	// 键位：nil 键段（全局/无变体）经编码键与复合主键两路往返保真。
+	global, origin, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(nil, nil, 100))
+	if err != nil || !ok {
+		t.Fatalf("LoadKeyBinding(全局) = (%v,%v)", ok, err)
+	}
+	if global.ID != "g-v3-global" || global.RulesetName != nil || global.Variant != nil ||
+		global.ActionInt != 100 || global.KeyCombination != "Ctrl,Shift+Z" {
+		t.Errorf("全局键位往返不一致: %+v", global)
+	}
+	if origin != (Origin{GUID: "g-v3-global", Fork: "A"}) {
+		t.Errorf("全局键位 Origin = %+v", origin)
+	}
+	// 规则集级（RulesetName 非空、Variant nil）与 mania 双变体。
+	osuName := "osu"
+	mania4 := 4
+	kb, _, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, nil, 7))
+	if err != nil || !ok || kb.ID != "g-v3-osu" || kb.KeyCombination != "Z" {
+		t.Errorf("规则集级键位往返不一致: (%+v,%v)", kb, err)
+	}
+	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, &mania4, 12))
+	if err != nil || !ok || kb.ID != "g-v3-mania4" || kb.KeyCombination != "F" {
+		t.Errorf("mania 4K 键位往返不一致: (%+v,%v)", kb, err)
+	}
+	mania7 := 7
+	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, &mania7, 12))
+	if err != nil || !ok || kb.ID != "g-v3-mania7" || kb.KeyCombination != "D,F,J,K" {
+		t.Errorf("mania 7K 键位往返不一致: (%+v,%v)", kb, err)
+	}
+
+	// 规则集设置：三元组复合主键 + payload 逐字段。
+	rs, origin, ok, err := s.LoadRulesetSetting(context.Background(), RulesetSettingContentKey("mania", 4, "speed_change_style"))
+	if err != nil || !ok {
+		t.Fatalf("LoadRulesetSetting = (%v,%v)", ok, err)
+	}
+	if rs.RulesetName != "mania" || rs.Variant != 4 || rs.Key != "speed_change_style" || rs.Value != "1" {
+		t.Errorf("规则集设置往返不一致: %+v", rs)
+	}
+	if origin != (Origin{GUID: "", Fork: "A"}) {
+		t.Errorf("规则集设置 Origin = %+v（无 Guid 列，GUID 恒空）", origin)
+	}
+
+	// 模组预设：业务键（含 "|" 字符的 Name——JSON 编码无歧义性的用例）。
+	mp, origin, ok, err := s.LoadModPreset(context.Background(), ModPresetContentKey("osu", "My Preset|with|pipes"))
+	if err != nil || !ok {
+		t.Fatalf("LoadModPreset = (%v,%v)", ok, err)
+	}
+	if mp.ID != "g-v3-preset" || mp.RulesetShortName != "osu" || mp.Name != "My Preset|with|pipes" ||
+		mp.Description != "score preset" || mp.ModsJson != `[{"acronym":"HD","settings":{}}]` || mp.DeletePending {
+		t.Errorf("模组预设往返不一致: %+v", mp)
+	}
+	if origin != (Origin{GUID: "g-v3-preset", Fork: "A"}) {
+		t.Errorf("模组预设 Origin = %+v", origin)
+	}
+
+	// presence：三类各按编码键占位。
+	for kind, want := range map[EntityKind]int{
+		KindKeyBinding: 4, KindRulesetSetting: 2, KindModPreset: 1,
+	} {
+		if n := countRows(t, s, `SELECT COUNT(*) FROM presence WHERE fork_id=? AND kind=?`, "A", kind); n != want {
+			t.Errorf("presence(%s) 行数 = %d，期望 %d", kind, n, want)
+		}
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM presence WHERE fork_id=? AND kind=? AND content_key=?`,
+		"A", KindModPreset, ModPresetContentKey("osu", "My Preset|with|pipes")); n != 1 {
+		t.Errorf("mod_preset presence 编码键行数 = %d，期望 1", n)
+	}
+
+	// HB3：同键从 fork B 再收集 → origin_fork 随行更新、guid 首次固定。
+	applySnap(t, s, mkSettingsSnapshot("B", "g-b"))
+	if _, oc, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(nil, nil, 100)); err != nil || !ok ||
+		oc != (Origin{GUID: "g-v3-global", Fork: "B"}) {
+		t.Errorf("HB3 键位 Origin = (%+v,%v)", oc, err)
+	}
+	if _, oc, ok, err := s.LoadModPreset(context.Background(), ModPresetContentKey("osu", "My Preset|with|pipes")); err != nil || !ok ||
+		oc != (Origin{GUID: "g-v3-preset", Fork: "B"}) {
+		t.Errorf("HB3 模组预设 Origin = (%+v,%v)", oc, err)
+	}
+
+	// 幂等重跑：无增量、行数不涨。
+	res = applySnap(t, s, snap)
+	if res.TombstonesAdded != 0 || res.TombstonesCleared != 0 {
+		t.Errorf("重跑增量 = (+%d,-%d)，期望全 0", res.TombstonesAdded, res.TombstonesCleared)
+	}
+	for table, want := range map[string]int{
+		"key_binding": 4, "ruleset_setting": 2, "mod_preset": 1,
+	} {
+		if n := countRows(t, s, `SELECT COUNT(*) FROM `+table); n != want {
+			t.Errorf("%s 行数 = %d，期望 %d", table, n, want)
+		}
+	}
+}
+
+func TestSettingsTombstoneLifecycle(t *testing.T) {
+	s := openMem(t)
+	applySnap(t, s, mkSettingsSnapshot("A", "g-v3"))
+	// 二次收集：键位/设置/预设各消失一行 → 差集生成 tombstone（HB2）。
+	snap2 := mkSettingsSnapshot("A", "g-v3")
+	snap2.KeyBindings = snap2.KeyBindings[1:]
+	snap2.RulesetSettings = snap2.RulesetSettings[1:]
+	snap2.ModPresets = nil
+	res := applySnap(t, s, snap2)
+	if res.TombstonesAdded != 3 {
+		t.Fatalf("TombstonesAdded = %d，期望 3", res.TombstonesAdded)
+	}
+	for kind, key := range map[EntityKind]string{
+		KindKeyBinding:     KeyBindingContentKey(nil, nil, 100),
+		KindRulesetSetting: RulesetSettingContentKey("osu", 0, "hud_position"),
+		KindModPreset:      ModPresetContentKey("osu", "My Preset|with|pipes"),
+	} {
+		if n := countRows(t, s, `SELECT COUNT(*) FROM tombstone WHERE fork_id=? AND kind=? AND content_key=?`,
+			"A", kind, key); n != 1 {
+			t.Errorf("tombstone(%s) 行数 = %d，期望 1", kind, n)
+		}
+	}
+	// 同键重现 → 清除（第三道闸）：全量快照三次收集全部恢复。
+	res = applySnap(t, s, mkSettingsSnapshot("A", "g-v3"))
+	if res.TombstonesCleared != 3 || res.TombstonesAdded != 0 {
+		t.Fatalf("全量重现增量 = (+%d,-%d)，期望 (0,3)", res.TombstonesAdded, res.TombstonesCleared)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM tombstone WHERE fork_id=?`, "A"); n != 0 {
+		t.Errorf("残留 tombstone = %d，期望 0", n)
+	}
+}
+
+// TestSettingsContentKeyEncoding 内容键编码函数的往返与边界（nil 段保真、
+// 分隔符类字符无歧义、空串段不与 null 段混淆）。
+func TestSettingsContentKeyEncoding(t *testing.T) {
+	osuName := "osu"
+	mania4, mania7 := 4, 7
+	cases := []struct {
+		key  string
+		want string
+		rule *string
+		vnt  *int
+		act  int
+	}{
+		{KeyBindingContentKey(nil, nil, 100), `[null,null,100]`, nil, nil, 100},
+		{KeyBindingContentKey(&osuName, nil, 7), `["osu",null,7]`, &osuName, nil, 7},
+		{KeyBindingContentKey(&osuName, &mania4, 12), `["osu",4,12]`, &osuName, &mania4, 12},
+		{KeyBindingContentKey(&osuName, &mania7, 12), `["osu",7,12]`, &osuName, &mania7, 12},
+	}
+	for _, c := range cases {
+		if c.key != c.want {
+			t.Errorf("KeyBindingContentKey = %s，期望 %s", c.key, c.want)
+		}
+		rule, vnt, act, err := decodeKeyBindingContentKey(c.key)
+		if err != nil {
+			t.Fatalf("decodeKeyBindingContentKey(%s): %v", c.key, err)
+		}
+		if !ptrEqStr(rule, c.rule) || !ptrEqInt(vnt, c.vnt) || act != c.act {
+			t.Errorf("键位键往返不一致: (%+v,%+v,%d)", rule, vnt, act)
+		}
+	}
+	if got := RulesetSettingContentKey("osu", 0, "hud|position"); got != `["osu",0,"hud|position"]` {
+		t.Errorf("RulesetSettingContentKey = %s", got)
+	}
+	if got := ModPresetContentKey("osu", "a\"b"); got != `["osu","a\"b"]` {
+		t.Errorf("ModPresetContentKey = %s", got)
+	}
+	// 空串段与 null 段不混淆（编码位不同）。
+	if KeyBindingContentKey(strPtr(""), nil, 1) == KeyBindingContentKey(nil, nil, 1) {
+		t.Errorf("空串 RulesetName 与 null 编码冲突")
+	}
+	// 非法键形态如实报错。
+	if _, _, _, err := decodeKeyBindingContentKey("not-json"); err == nil {
+		t.Errorf("非法键位内容键未报错")
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func ptrEqStr(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func ptrEqInt(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// TestMigrateV1ToV3Settings v1 库迁移链直通 v3：三表就位可写、既有数据存活。
+func TestMigrateV1ToV3Settings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.db")
+	buildV1DB(t, path)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开 v1 库触发迁移: %v", err)
+	}
+	defer s.Close()
+	if v, err := s.SchemaVersion(); err != nil || v != SchemaVersion {
+		t.Fatalf("迁移后 schema 版本 = (%d,%v)，期望 (%d,nil)", v, err, SchemaVersion)
+	}
+	if _, _, ok, err := s.LoadCollection(context.Background(), "Fav"); err != nil || !ok {
+		t.Fatalf("迁移后收藏 = (%v,%v)，期望存在", ok, err)
+	}
+	applySnap(t, s, mkSettingsSnapshot("A", "g-m"))
+	if _, _, ok, err := s.LoadModPreset(context.Background(), ModPresetContentKey("osu", "My Preset|with|pipes")); err != nil || !ok {
+		t.Fatalf("迁移后三表可写可读: (%v,%v)", ok, err)
 	}
 }
