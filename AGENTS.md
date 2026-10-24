@@ -34,6 +34,7 @@ just package     # mygo build 完整打包 → build/linux-amd64/
 just gates       # 四道门禁一次跑全
 just run         # 打包并启动主程序（调试入口）
 just dev         # mygo dev 热重载（vite 5173）
+guix build -f lzsync.scm   # 先 just package；产 store 包（wrap 好 webview/realm 环境，可独立运行/安装）
 ```
 
 ## 架构边界与硬约束
