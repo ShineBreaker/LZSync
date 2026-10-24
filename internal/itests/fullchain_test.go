@@ -223,7 +223,7 @@ func TestFullChainAllKindsBothLibraries(t *testing.T) {
 	}
 
 	// ---- 计划：BuildPlan（版本替换 + 谱面集/皮肤 create）+ 手工补成绩项 ----
-	plan, err := deploy.BuildPlan(ctx, e.hub, refB, deploy.BuildOptions{})
+	plan, err := deploy.BuildPlan(ctx, e.hub, refB, deploy.BuildOptions{Files: e.engine.Store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}

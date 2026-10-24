@@ -75,7 +75,7 @@ func TestVersionReplaceUnbindsLocalScores(t *testing.T) {
 	}
 
 	// 计划面：强键默认进（弱键默认不进的面由 deploy 包单测覆盖）。
-	plan, err := deploy.BuildPlan(ctx, e.hub, refB, deploy.BuildOptions{})
+	plan, err := deploy.BuildPlan(ctx, e.hub, refB, deploy.BuildOptions{Files: e.engine.Store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestVersionReplaceRepointed(t *testing.T) {
 	refV2 := buildLib(t, fixture.ForkLazer, fixture.VersionLazer, seedV2)
 	e.collectInto(refV2)
 
-	plan, err := deploy.BuildPlan(ctx, e.hub, refB, deploy.BuildOptions{})
+	plan, err := deploy.BuildPlan(ctx, e.hub, refB, deploy.BuildOptions{Files: e.engine.Store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
