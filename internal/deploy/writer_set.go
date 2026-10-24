@@ -697,11 +697,21 @@ func resolveRulesetObj(r *realmc.Realm, rulesetCK uint32, rulesetCols map[string
 		r.ReleaseObject(obj)
 		return nil, false, err
 	}
+	// ShortName 是身份键且属结构列必备（两写入器 prepare 均已必备检查，
+	// 恒在 map，同 setCols["Hash"] 直接索引先例）；其余标量列缺列走降级
+	//（该列值不写入，missingColumns 预演已计数）——与 Available 同款逐列
+	// ok 检查，S1 白名单∩自查不依赖底层 errno 兜底回滚。
 	writes := []func() error{
 		func() error { return r.SetString(obj, rulesetCols["ShortName"], shortName) },
-		func() error { return r.SetInt64(obj, rulesetCols["OnlineID"], def.onlineID) },
-		func() error { return r.SetString(obj, rulesetCols["Name"], def.name) },
-		func() error { return r.SetString(obj, rulesetCols["InstantiationInfo"], def.instantiationInfo) },
+	}
+	if key, ok := rulesetCols["OnlineID"]; ok {
+		writes = append(writes, func() error { return r.SetInt64(obj, key, def.onlineID) })
+	}
+	if key, ok := rulesetCols["Name"]; ok {
+		writes = append(writes, func() error { return r.SetString(obj, key, def.name) })
+	}
+	if key, ok := rulesetCols["InstantiationInfo"]; ok {
+		writes = append(writes, func() error { return r.SetString(obj, key, def.instantiationInfo) })
 	}
 	if key, ok := rulesetCols["Available"]; ok {
 		writes = append(writes, func() error { return r.SetBool(obj, key, true) })

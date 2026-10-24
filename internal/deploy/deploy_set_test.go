@@ -988,6 +988,103 @@ func contains(s, sub string) bool {
 	})()
 }
 
+// TestDeployBeatmapSetRulesetMissingScalarCols Ruleset 表缺标量列（OnlineID/
+// Name/InstantiationInfo，保留身份键 ShortName 与 Available）时的官方规则集
+// 新建降级：逐列 ok 检查缺列跳过（该列值不写入，缺列计数上报），不再依赖
+// 底层 errno=3009 兜底回滚整批（S1 白名单∩自查与 missingColumns 预演一致）。
+func TestDeployBeatmapSetRulesetMissingScalarCols(t *testing.T) {
+	lib := mustLib(t)
+	ctx := context.Background()
+
+	schema, err := fixture.SchemaFor(fixture.ForkLazer, fixture.VersionLazer)
+	if err != nil {
+		t.Fatalf("SchemaFor: %v", err)
+	}
+	for i, c := range schema.Classes {
+		if c.Name != "Ruleset" {
+			continue
+		}
+		var kept []realmc.PropertyDef
+		for _, p := range c.Properties {
+			if p.Name == "OnlineID" || p.Name == "Name" || p.Name == "InstantiationInfo" {
+				continue
+			}
+			kept = append(kept, p)
+		}
+		schema.Classes[i].Properties = kept
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.realm")
+	r, err := lib.OpenWithSchema(path, schema, fixture.VersionLazer)
+	if err != nil {
+		t.Fatalf("建 Ruleset 缺列库: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("关闭缺列库: %v", err)
+	}
+	refB := forks.LibraryRef{
+		ForkID: fixture.ForkLazer, DataDir: dir, RealmPath: path,
+		DiskVersion: fixture.VersionLazer, VersionSource: forks.VersionFromOpen,
+	}
+
+	files := map[string][]byte{}
+	set, err := fixture.MaterializeSet(8101, "RMC Artist", "RMC Title", "mapperRMC",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("ruleset-missing-col osu bytes")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet: %v", err)
+	}
+	set.ID = "81333333-3333-4333-8333-333333333383"
+	set.Beatmaps[0].ID = "81444444-4444-4444-8444-444444444484"
+
+	h := openMemHub(t)
+	// canonical 来源取 delta（与目标 lazer 同域 "ppy"，S8 面不干扰）。
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkDelta, CollectedAt: t0,
+		BeatmapSets: []hub.BeatmapSet{set}})
+	plan, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy(Ruleset 缺列库): %v（report=%+v）", err, report)
+	}
+	if len(report.Applied) != 1 {
+		t.Fatalf("Applied = %+v（期望 1——缺列走降级不整批回滚）", report.Applied)
+	}
+	missing := map[string]int{}
+	for _, st := range report.Skipped {
+		for _, col := range []string{"Ruleset.OnlineID", "Ruleset.Name", "Ruleset.InstantiationInfo"} {
+			if contains(st.Reason, col) {
+				missing[col] += st.Count
+			}
+		}
+	}
+	if missing["Ruleset.OnlineID"] != 1 || missing["Ruleset.Name"] != 1 ||
+		missing["Ruleset.InstantiationInfo"] != 1 {
+		t.Errorf("Ruleset 缺列计数 = %v（期望各 1），Skipped=%+v", missing, report.Skipped)
+	}
+
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		if got := classRowCount(t, sr, "Ruleset"); got != 1 {
+			t.Errorf("Ruleset 行数 = %d（期望 1——按需新建走降级）", got)
+		}
+		ck := sr.class("Ruleset")
+		obj, err := sr.r.FindFirstByString(ck, sr.prop("Ruleset", "ShortName"), "osu")
+		if err != nil || obj == nil {
+			t.Fatalf("查降级新建的 osu 规则集行: %v", err)
+		}
+		defer sr.r.ReleaseObject(obj)
+		if got := sr.boolOf(obj, "Ruleset", "Available"); !got {
+			t.Error("降级新建规则集 Available = false（期望 true——该列未缺）")
+		}
+	})
+}
+
 // TestDeployBeatmapSetVersionReplace 版本更新分类（版本链尾 ≠ 目标
 // presence 版本，强键）→ ActionVersionReplace 计划项 → 投放落地 §5.4 三步
 // （本测试聚焦集行形态：新版本整链 + 旧集软删保留），重续幂等。
