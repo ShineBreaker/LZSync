@@ -2,9 +2,9 @@ package collect
 
 // 只读投影（design §4.1）：动态只读会话 → hub.Snapshot。跳过集逐条计数
 // （不静默吞，§1.5-4）；目标库缺某列时该列不进 DTO（列缺失自然降级，
-// ezrealmsync-design §3.3）。M1 类型面 = collection / beatmap_set /
-// beatmap（hub schema v1）；skin 的收集（含内置皮肤与 fork 专有皮肤
-// 跳过）随 hub 后续 schema 版本启用，当前不打开 Skin 类。
+// ezrealmsync-design §3.3）。M2 类型面 = collection / beatmap_set /
+// beatmap / skin / score（hub schema v2），谱面与皮肤/成绩均按 C2
+// 白名单全列投影。
 
 import (
 	"encoding/hex"
@@ -20,10 +20,16 @@ import (
 
 // 投影跳过原因（稳定字符串，进 hub.SkipStat 与 collect_log）。
 const (
-	skipSoftDeleted  = "软删谱面集（DeletePending）"
-	skipProtectedSet = "Protected 系统谱面集"
-	skipExternalSet  = "Ez 外部托管谱面集"
-	skipHiddenDiff   = "Hidden 难度"
+	skipSoftDeleted    = "软删谱面集（DeletePending）"
+	skipProtectedSet   = "Protected 系统谱面集"
+	skipExternalSet    = "Ez 外部托管谱面集"
+	skipHiddenDiff     = "Hidden 难度"
+	skipSkinSoftDel    = "软删皮肤（DeletePending）"
+	skipProtectedSkin  = "Protected 内置皮肤"
+	skipOwnSkin        = "fork 专有皮肤（OwnSkins 指纹）"
+	skipSkinNoHash     = "皮肤 Hash 为空（无法判定身份）"
+	skipScoreSoftDel   = "软删成绩（DeletePending）"
+	skipScoreNoBeatmap = "成绩 BeatmapHash 为空（无谱面锚点）"
 )
 
 // ezExtSetHashPrefix 是 Ez 外部托管集 Hash 前缀（fork-ez2lazer §5.1）。
@@ -83,14 +89,11 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 	count := func(reason string) { skips[reason]++ }
 
 	total := 0
-	if ck, ok := rd.class("BeatmapSet"); ok {
-		if n, err := r.ObjectCount(ck); err == nil {
-			total += int(n)
-		}
-	}
-	if ck, ok := rd.class("BeatmapCollection"); ok {
-		if n, err := r.ObjectCount(ck); err == nil {
-			total += int(n)
+	for _, cls := range []string{"BeatmapSet", "BeatmapCollection", "Skin", "Score"} {
+		if ck, ok := rd.class(cls); ok {
+			if n, err := r.ObjectCount(ck); err == nil {
+				total += int(n)
+			}
 		}
 	}
 	current := 0
@@ -101,7 +104,7 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 	}
 
 	// 谱面集（含难度归属与文件清单；链接列表列缺列时自然为空——
-	// fixture 镜像即此形态，真实库则走列表）。
+	// 真实库与 M2 镜像走列表）。
 	isEz := target.ForkID == "ez2lazer"
 	if setKey, ok := rd.class("BeatmapSet"); ok {
 		if err := r.ForEach(setKey, func(obj unsafe.Pointer) error {
@@ -145,12 +148,146 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 		}
 	}
 
+	// 皮肤（跳过规则 §4.1：软删 / Protected 内置 / fork 专有指纹 /
+	// 空 Hash；指纹清单来自 forks 注册表）。
+	ownSkins := ownSkinsOf(target.ForkID)
+	if skinKey, ok := rd.class("Skin"); ok {
+		if err := r.ForEach(skinKey, func(obj unsafe.Pointer) error {
+			defer func() { current++; report() }()
+			return projectSkin(rd, obj, &snap, count, ownSkins)
+		}); err != nil {
+			return hub.Snapshot{}, fmt.Errorf("投影 Skin: %w", err)
+		}
+	}
+
+	// 成绩（跳过规则 §4.1：软删 / 空 BeatmapHash；User embedded、Mods/
+	// Statistics 原样字符串、Files=.osr usage）。
+	if scoreKey, ok := rd.class("Score"); ok {
+		if err := r.ForEach(scoreKey, func(obj unsafe.Pointer) error {
+			defer func() { current++; report() }()
+			return projectScore(rd, obj, &snap, count)
+		}); err != nil {
+			return hub.Snapshot{}, fmt.Errorf("投影 Score: %w", err)
+		}
+	}
+
 	// 跳过计数 → 稳定顺序的 SkipStat 切片（collect_log 可断言）。
 	for reason, n := range skips {
 		snap.Skips = append(snap.Skips, hub.SkipStat{Reason: reason, Count: n})
 	}
 	sort.Slice(snap.Skips, func(i, j int) bool { return snap.Skips[i].Reason < snap.Skips[j].Reason })
 	return snap, nil
+}
+
+// ownSkinsOf 取目标 fork 注册表声明的专有皮肤指纹（§4.3：fork 知识只在
+// forks 包）。当前四端注册表未登记专有皮肤——规则处于待数据激活态，
+// 注册表填充后无需改本处。
+func ownSkinsOf(forkID string) []forks.SkinFingerprint {
+	if p, ok := forks.Profile(forkID); ok {
+		return p.OwnSkins
+	}
+	return nil
+}
+
+// skinIsOwn 判定皮肤是否命中 fork 专有指纹（Name+Creator 等值，§4.1）。
+func skinIsOwn(own []forks.SkinFingerprint, name, creator string) bool {
+	for _, f := range own {
+		if f.Name == name && f.Creator == creator {
+			return true
+		}
+	}
+	return false
+}
+
+// projectSkin 投影单个皮肤行（跳过规则前置，命中即计数返回；正常入
+// hub 的行 DeletePending/Protected 恒 false，列集完整性保留）。
+func projectSkin(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(string), own []forks.SkinFingerprint) error {
+	const cls = "Skin"
+	classKey, _ := rd.class(cls)
+	if rd.boolOrFalse(obj, cls, classKey, "DeletePending") {
+		count(skipSkinSoftDel)
+		return nil
+	}
+	if rd.boolOrFalse(obj, cls, classKey, "Protected") {
+		count(skipProtectedSkin)
+		return nil
+	}
+	name, creator := rd.objStr(obj, cls, "Name"), rd.objStr(obj, cls, "Creator")
+	if skinIsOwn(own, name, creator) {
+		count(skipOwnSkin)
+		return nil
+	}
+	hash := rd.objStr(obj, cls, "Hash")
+	if hash == "" {
+		count(skipSkinNoHash)
+		return nil
+	}
+	snap.Skins = append(snap.Skins, hub.Skin{
+		ID:                rd.guid(obj, cls, classKey, "ID"),
+		Hash:              hash,
+		Name:              name,
+		Creator:           creator,
+		InstantiationInfo: rd.objStr(obj, cls, "InstantiationInfo"),
+		Files:             readNamedFiles(rd, obj, cls),
+	})
+	return nil
+}
+
+// projectScore 投影单个成绩行（跳过规则前置；全列含 User embedded、
+// Pauses 列表、Files=.osr usage 与 nullable 的 LegacyTotalScore/PP）。
+func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func(string)) error {
+	const cls = "Score"
+	classKey, _ := rd.class(cls)
+	if rd.boolOrFalse(obj, cls, classKey, "DeletePending") {
+		count(skipScoreSoftDel)
+		return nil
+	}
+	beatmapHash := rd.objStr(obj, cls, "BeatmapHash")
+	if beatmapHash == "" {
+		count(skipScoreNoBeatmap)
+		return nil
+	}
+	date := time.Time{}
+	if k, ok := rd.prop(cls, classKey, "Date"); ok {
+		if null, err := rd.r.IsNull(obj, k); err == nil && !null {
+			date, _ = rd.r.GetTimestamp(obj, k)
+		}
+	}
+	sc := hub.Score{
+		ID:                           rd.guid(obj, cls, classKey, "ID"),
+		BeatmapHash:                  beatmapHash,
+		Hash:                         rd.objStr(obj, cls, "Hash"),
+		RulesetShortName:             rd.linkedShortName(obj, cls, "Ruleset"),
+		ClientVersion:                rd.objStr(obj, cls, "ClientVersion"),
+		TotalScore:                   rd.intOrZero(obj, cls, classKey, "TotalScore"),
+		TotalScoreWithoutMods:        rd.intOrZero(obj, cls, classKey, "TotalScoreWithoutMods"),
+		TotalScoreVersion:            int(rd.intOrZero(obj, cls, classKey, "TotalScoreVersion")),
+		BackgroundReprocessingFailed: rd.boolOrFalse(obj, cls, classKey, "BackgroundReprocessingFailed"),
+		MaxCombo:                     int(rd.intOrZero(obj, cls, classKey, "MaxCombo")),
+		Accuracy:                     rd.objFloat64(obj, cls, "Accuracy"),
+		Date:                         date,
+		OnlineID:                     rd.intOrZero(obj, cls, classKey, "OnlineID"),
+		LegacyOnlineID:               rd.intOrZero(obj, cls, classKey, "LegacyOnlineID"),
+		User:                         readEmbeddedUser(rd, obj, cls, "User"),
+		ModsJson:                     rd.objStr(obj, cls, "Mods"),
+		StatisticsJson:               rd.objStr(obj, cls, "Statistics"),
+		MaximumStatisticsJson:        rd.objStr(obj, cls, "MaximumStatistics"),
+		RankInt:                      int(rd.intOrZero(obj, cls, classKey, "Rank")),
+		Combo:                        int(rd.intOrZero(obj, cls, classKey, "Combo")),
+		IsLegacyScore:                rd.boolOrFalse(obj, cls, classKey, "IsLegacyScore"),
+		Files:                        readNamedFiles(rd, obj, cls),
+	}
+	if v := rd.objInt64Ptr(obj, cls, "LegacyTotalScore"); v != nil {
+		sc.LegacyTotalScore = v
+	}
+	if v := rd.objFloat64Ptr(obj, cls, "PP"); v != nil {
+		sc.PP = v
+	}
+	if pauses := readPauses(rd, obj, cls); len(pauses) > 0 {
+		sc.Pauses = pauses
+	}
+	snap.Scores = append(snap.Scores, sc)
+	return nil
 }
 
 // projectBeatmapSet 投影单个谱面集行（跳过规则前置，命中即计数返回）。
@@ -187,8 +324,15 @@ func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count
 			bs.DateAdded, _ = rd.r.GetTimestamp(obj, k)
 		}
 	}
+	if v := rd.objTSPtr(obj, cls, "DateSubmitted"); v != nil {
+		bs.DateSubmitted = v
+	}
+	if v := rd.objTSPtr(obj, cls, "DateRanked"); v != nil {
+		bs.DateRanked = v
+	}
 
-	// 难度列表（真实库 Beatmaps 前向对象列表；缺列为空）。
+	// 难度列表（Beatmaps 前向对象列表；缺列为空）。首难度的 Metadata 是
+	// 谱面身份键字段载体（§4.2 第二层）。
 	if listKey, ok := rd.prop(cls, classKey, "Beatmaps"); ok {
 		if lst, err := rd.r.GetList(obj, listKey); err == nil {
 			if n, err := lst.Size(); err == nil {
@@ -200,8 +344,9 @@ func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count
 					if b, ok := projectBeatmap(rd, bm, count); ok {
 						bs.Beatmaps = append(bs.Beatmaps, b)
 						if len(bs.Beatmaps) == 1 {
-							// 首难度的 Metadata 是谱面身份键字段载体（§4.2 第二层）。
-							fillMetadata(rd, bm, &bs)
+							bs.Artist = b.Metadata.Artist
+							bs.Title = b.Metadata.Title
+							bs.AuthorUsername = b.Metadata.Author.Username
 						}
 					}
 					rd.r.ReleaseObject(bm)
@@ -212,35 +357,14 @@ func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count
 	}
 
 	// 文件清单（RealmNamedFileUsage embedded 列表；缺列为空）。
-	if listKey, ok := rd.prop(cls, classKey, "Files"); ok {
-		if lst, err := rd.r.GetList(obj, listKey); err == nil {
-			if n, err := lst.Size(); err == nil {
-				for i := uint64(0); i < n; i++ {
-					usage, err := lst.GetLinkedObject(i)
-					if err != nil || usage == nil {
-						continue
-					}
-					nf := hub.NamedFile{Filename: rd.objStr(usage, "RealmNamedFileUsage", "Filename")}
-					if fileKey, ok := rd.class("File"); ok {
-						if file, err := rd.r.GetLinkedObject(usage, mustProp(rd, "RealmNamedFileUsage", fileKey, "File")); err == nil && file != nil {
-							nf.Hash = rd.objStr(file, "File", "Hash")
-							rd.r.ReleaseObject(file)
-						}
-					}
-					bs.Files = append(bs.Files, nf)
-					rd.r.ReleaseObject(usage)
-				}
-			}
-			lst.Close()
-		}
-	}
+	bs.Files = readNamedFiles(rd, obj, cls)
 
 	snap.BeatmapSets = append(snap.BeatmapSets, bs)
 	return nil
 }
 
-// projectBeatmap 投影单个难度行（Hidden 跳过；父集跳过时难度随集消失，
-// 不重复计数）。
+// projectBeatmap 投影单个难度行（C2 白名单全列：Hidden 跳过；父集跳过时
+// 难度随集消失，不重复计数）。
 func projectBeatmap(rd *reader, obj unsafe.Pointer, count func(string)) (hub.Beatmap, bool) {
 	const cls = "Beatmap"
 	classKey, _ := rd.class(cls)
@@ -248,41 +372,193 @@ func projectBeatmap(rd *reader, obj unsafe.Pointer, count func(string)) (hub.Bea
 		count(skipHiddenDiff)
 		return hub.Beatmap{}, false
 	}
-	return hub.Beatmap{
-		ID:             rd.guid(obj, cls, classKey, "ID"),
-		Hash:           rd.objStr(obj, cls, "Hash"),
-		MD5Hash:        rd.objStr(obj, cls, "MD5Hash"),
-		DifficultyName: rd.objStr(obj, cls, "DifficultyName"),
-	}, true
+	bm := hub.Beatmap{
+		ID:                 rd.guid(obj, cls, classKey, "ID"),
+		Hash:               rd.objStr(obj, cls, "Hash"),
+		MD5Hash:            rd.objStr(obj, cls, "MD5Hash"),
+		OnlineMD5Hash:      rd.objStr(obj, cls, "OnlineMD5Hash"),
+		DifficultyName:     rd.objStr(obj, cls, "DifficultyName"),
+		RulesetShortName:   rd.linkedShortName(obj, cls, "Ruleset"),
+		StatusInt:          int(rd.intOrZero(obj, cls, classKey, "Status")),
+		OnlineID:           int(rd.intOrZero(obj, cls, classKey, "OnlineID")),
+		Length:             rd.objFloat64(obj, cls, "Length"),
+		BPM:                rd.objFloat64(obj, cls, "BPM"),
+		StarRating:         rd.objFloat64(obj, cls, "StarRating"),
+		EndTimeObjectCount: int(rd.intOrZero(obj, cls, classKey, "EndTimeObjectCount")),
+		TotalObjectCount:   int(rd.intOrZero(obj, cls, classKey, "TotalObjectCount")),
+		BeatDivisor:        int(rd.intOrZero(obj, cls, classKey, "BeatDivisor")),
+	}
+	if v := rd.objTSPtr(obj, cls, "LastLocalUpdate"); v != nil {
+		bm.LastLocalUpdate = v
+	}
+	if v := rd.objTSPtr(obj, cls, "LastOnlineUpdate"); v != nil {
+		bm.LastOnlineUpdate = v
+	}
+	if v := rd.objTSPtr(obj, cls, "LastPlayed"); v != nil {
+		bm.LastPlayed = v
+	}
+	if v := rd.objFloat64Ptr(obj, cls, "EditorTimestamp"); v != nil {
+		bm.EditorTimestamp = v
+	}
+	bm.Difficulty = readEmbeddedDifficulty(rd, obj, cls)
+	bm.Metadata = readMetadata(rd, obj, cls)
+	bm.UserSettingsOffset = readUserSettingsOffset(rd, obj, cls)
+	return bm, true
 }
 
-// fillMetadata 从首难度的 Metadata 关系行读谱面身份键字段（Artist/Title
-// 直读；AuthorUsername 走 Author → embedded RealmUser.Username，§2.6）。
-// 缺列/无关系行为空（弱键配对自然失配，不构成错误）。
-func fillMetadata(rd *reader, bm unsafe.Pointer, bs *hub.BeatmapSet) {
-	classKey, ok := rd.class("Beatmap")
+// readNamedFiles 读对象的 Files 列表（RealmNamedFileUsage embedded →
+// File.Hash + Filename；缺列/空链接自然为空，§4.1 降级）。
+func readNamedFiles(rd *reader, obj unsafe.Pointer, cls string) []hub.NamedFile {
+	classKey, ok := rd.class(cls)
 	if !ok {
-		return
+		return nil
 	}
-	mdKey, ok := rd.prop("Beatmap", classKey, "Metadata")
+	listKey, ok := rd.prop(cls, classKey, "Files")
 	if !ok {
-		return
+		return nil
 	}
-	md, err := rd.r.GetLinkedObject(bm, mdKey)
-	if err != nil || md == nil {
-		return
+	var out []hub.NamedFile
+	lst, err := rd.r.GetList(obj, listKey)
+	if err != nil {
+		return nil
+	}
+	defer lst.Close()
+	n, err := lst.Size()
+	if err != nil {
+		return nil
+	}
+	for i := uint64(0); i < n; i++ {
+		usage, err := lst.GetLinkedObject(i)
+		if err != nil || usage == nil {
+			continue
+		}
+		nf := hub.NamedFile{Filename: rd.objStr(usage, "RealmNamedFileUsage", "Filename")}
+		if fileKey, ok := rd.class("File"); ok {
+			if file, err := rd.r.GetLinkedObject(usage, mustProp(rd, "RealmNamedFileUsage", fileKey, "File")); err == nil && file != nil {
+				nf.Hash = rd.objStr(file, "File", "Hash")
+				rd.r.ReleaseObject(file)
+			}
+		}
+		out = append(out, nf)
+		rd.r.ReleaseObject(usage)
+	}
+	return out
+}
+
+// readEmbeddedDifficulty 读难度的 BeatmapDifficulty embedded（六个数值
+// 列；无挂接/缺列为零值）。
+func readEmbeddedDifficulty(rd *reader, obj unsafe.Pointer, cls string) hub.Difficulty {
+	diff, ok := rd.linked(obj, cls, "Difficulty")
+	if !ok {
+		return hub.Difficulty{}
+	}
+	defer rd.r.ReleaseObject(diff)
+	return hub.Difficulty{
+		DrainRate:         rd.objFloat32(diff, "BeatmapDifficulty", "DrainRate"),
+		CircleSize:        rd.objFloat32(diff, "BeatmapDifficulty", "CircleSize"),
+		OverallDifficulty: rd.objFloat32(diff, "BeatmapDifficulty", "OverallDifficulty"),
+		ApproachRate:      rd.objFloat32(diff, "BeatmapDifficulty", "ApproachRate"),
+		SliderMultiplier:  rd.objFloat64(diff, "BeatmapDifficulty", "SliderMultiplier"),
+		SliderTickRate:    rd.objFloat64(diff, "BeatmapDifficulty", "SliderTickRate"),
+	}
+}
+
+// readMetadata 读难度的 Metadata 关系行（C2 白名单全列：Author 走 embedded
+// RealmUser，UserTags 走 string 列表，§2.6）。缺列/无关系行为零值。
+func readMetadata(rd *reader, obj unsafe.Pointer, cls string) hub.Metadata {
+	md, ok := rd.linked(obj, cls, "Metadata")
+	if !ok {
+		return hub.Metadata{}
 	}
 	defer rd.r.ReleaseObject(md)
-	bs.Artist = rd.objStr(md, "BeatmapMetadata", "Artist")
-	bs.Title = rd.objStr(md, "BeatmapMetadata", "Title")
-	if mdClass, ok := rd.class("BeatmapMetadata"); ok {
-		if authorKey, ok := rd.prop("BeatmapMetadata", mdClass, "Author"); ok {
-			if author, err := rd.r.GetLinkedObject(md, authorKey); err == nil && author != nil {
-				bs.AuthorUsername = rd.objStr(author, "RealmUser", "Username")
-				rd.r.ReleaseObject(author)
+	out := hub.Metadata{
+		Title:          rd.objStr(md, "BeatmapMetadata", "Title"),
+		TitleUnicode:   rd.objStr(md, "BeatmapMetadata", "TitleUnicode"),
+		Artist:         rd.objStr(md, "BeatmapMetadata", "Artist"),
+		ArtistUnicode:  rd.objStr(md, "BeatmapMetadata", "ArtistUnicode"),
+		Source:         rd.objStr(md, "BeatmapMetadata", "Source"),
+		Tags:           rd.objStr(md, "BeatmapMetadata", "Tags"),
+		PreviewTime:    int(rd.objInt64OrZero(md, "BeatmapMetadata", "PreviewTime")),
+		AudioFile:      rd.objStr(md, "BeatmapMetadata", "AudioFile"),
+		BackgroundFile: rd.objStr(md, "BeatmapMetadata", "BackgroundFile"),
+	}
+	if author, ok := rd.linked(md, "BeatmapMetadata", "Author"); ok {
+		out.Author = readUserRow(rd, author)
+		rd.r.ReleaseObject(author)
+	}
+	if mdKey, ok := rd.class("BeatmapMetadata"); ok {
+		if tagsKey, ok := rd.prop("BeatmapMetadata", mdKey, "UserTags"); ok {
+			if lst, err := rd.r.GetList(md, tagsKey); err == nil {
+				if n, err := lst.Size(); err == nil {
+					for i := uint64(0); i < n; i++ {
+						if tag, err := lst.GetString(i); err == nil {
+							out.UserTags = append(out.UserTags, tag)
+						}
+					}
+				}
+				lst.Close()
 			}
 		}
 	}
+	return out
+}
+
+// readUserSettingsOffset 读难度的 BeatmapUserSettings embedded（唯一列
+// Offset 的扁平投影；无挂接为零值）。
+func readUserSettingsOffset(rd *reader, obj unsafe.Pointer, cls string) float64 {
+	us, ok := rd.linked(obj, cls, "UserSettings")
+	if !ok {
+		return 0
+	}
+	defer rd.r.ReleaseObject(us)
+	return rd.objFloat64(us, "BeatmapUserSettings", "Offset")
+}
+
+// readEmbeddedUser 读成绩的 User embedded（RealmUser 三列）。
+func readEmbeddedUser(rd *reader, obj unsafe.Pointer, cls, prop string) hub.RealmUser {
+	user, ok := rd.linked(obj, cls, prop)
+	if !ok {
+		return hub.RealmUser{}
+	}
+	defer rd.r.ReleaseObject(user)
+	return readUserRow(rd, user)
+}
+
+// readUserRow 读 RealmUser 行句柄的三列（调用方负责释放句柄）。
+func readUserRow(rd *reader, user unsafe.Pointer) hub.RealmUser {
+	return hub.RealmUser{
+		OnlineID:      int(rd.objInt64OrZero(user, "RealmUser", "OnlineID")),
+		Username:      rd.objStr(user, "RealmUser", "Username"),
+		CountryString: rd.objStr(user, "RealmUser", "CountryString"),
+	}
+}
+
+// readPauses 读成绩的 Pauses int 列表（缺列为空）。
+func readPauses(rd *reader, obj unsafe.Pointer, cls string) []int32 {
+	classKey, ok := rd.class(cls)
+	if !ok {
+		return nil
+	}
+	listKey, ok := rd.prop(cls, classKey, "Pauses")
+	if !ok {
+		return nil
+	}
+	lst, err := rd.r.GetList(obj, listKey)
+	if err != nil {
+		return nil
+	}
+	defer lst.Close()
+	n, err := lst.Size()
+	if err != nil {
+		return nil
+	}
+	out := make([]int32, 0, n)
+	for i := uint64(0); i < n; i++ {
+		if v, err := lst.GetInt64(i); err == nil {
+			out = append(out, int32(v))
+		}
+	}
+	return out
 }
 
 // ---- reader 的类型化读面（缺列/NULL 一律零值降级） ----
@@ -333,6 +609,127 @@ func (rd *reader) intOrZero(obj unsafe.Pointer, cls string, classKey uint32, nam
 		return 0
 	}
 	return v
+}
+
+// objInt64OrZero 是 intOrZero 的按名形态（class 内部解析）。
+func (rd *reader) objInt64OrZero(obj unsafe.Pointer, cls, name string) int64 {
+	classKey, ok := rd.class(cls)
+	if !ok {
+		return 0
+	}
+	return rd.intOrZero(obj, cls, classKey, name)
+}
+
+func (rd *reader) objFloat32(obj unsafe.Pointer, cls, name string) float32 {
+	k, clsOK := rd.propByName(cls, name)
+	if !clsOK {
+		return 0
+	}
+	if null, err := rd.r.IsNull(obj, k); err == nil && null {
+		return 0
+	}
+	v, err := rd.r.GetFloat32(obj, k)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func (rd *reader) objFloat64(obj unsafe.Pointer, cls, name string) float64 {
+	k, ok := rd.propByName(cls, name)
+	if !ok {
+		return 0
+	}
+	if null, err := rd.r.IsNull(obj, k); err == nil && null {
+		return 0
+	}
+	v, err := rd.r.GetFloat64(obj, k)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// objTSPtr 读可空时间列（缺列/NULL → nil；非空取值指针）。
+func (rd *reader) objTSPtr(obj unsafe.Pointer, cls, name string) *time.Time {
+	k, ok := rd.propByName(cls, name)
+	if !ok {
+		return nil
+	}
+	if null, err := rd.r.IsNull(obj, k); err != nil || null {
+		return nil
+	}
+	v, err := rd.r.GetTimestamp(obj, k)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
+// objInt64Ptr 读可空 long 列（LegacyTotalScore；缺列/NULL → nil）。
+func (rd *reader) objInt64Ptr(obj unsafe.Pointer, cls, name string) *int64 {
+	k, ok := rd.propByName(cls, name)
+	if !ok {
+		return nil
+	}
+	if null, err := rd.r.IsNull(obj, k); err == nil && null {
+		return nil
+	}
+	v, err := rd.r.GetInt64(obj, k)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
+// objFloat64Ptr 读可空 double 列（PP/EditorTimestamp；缺列/NULL → nil）。
+func (rd *reader) objFloat64Ptr(obj unsafe.Pointer, cls, name string) *float64 {
+	k, ok := rd.propByName(cls, name)
+	if !ok {
+		return nil
+	}
+	if null, err := rd.r.IsNull(obj, k); err == nil && null {
+		return nil
+	}
+	v, err := rd.r.GetFloat64(obj, k)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
+// propByName 按类名 + 列名取 key（class 不存在或缺列返回 false）。
+func (rd *reader) propByName(cls, name string) (int64, bool) {
+	classKey, ok := rd.class(cls)
+	if !ok {
+		return 0, false
+	}
+	return rd.prop(cls, classKey, name)
+}
+
+// linked 取单值对象链接/embedded 属性的目标行句柄（空链接返回 false；
+// 句柄由调用方 ReleaseObject 释放）。
+func (rd *reader) linked(obj unsafe.Pointer, cls, prop string) (unsafe.Pointer, bool) {
+	k, ok := rd.propByName(cls, prop)
+	if !ok {
+		return nil, false
+	}
+	target, err := rd.r.GetLinkedObject(obj, k)
+	if err != nil || target == nil {
+		return nil, false
+	}
+	return target, true
+}
+
+// linkedShortName 读链接列指向的 Ruleset 行 ShortName（Score.Ruleset 与
+// Beatmap.Ruleset 共用；空链接/缺列/缺目标列为空串）。
+func (rd *reader) linkedShortName(obj unsafe.Pointer, cls, linkProp string) string {
+	target, ok := rd.linked(obj, cls, linkProp)
+	if !ok {
+		return ""
+	}
+	defer rd.r.ReleaseObject(target)
+	return rd.objStr(target, "Ruleset", "ShortName")
 }
 
 func (rd *reader) guid(obj unsafe.Pointer, cls string, classKey uint32, name string) string {

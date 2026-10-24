@@ -114,7 +114,7 @@ func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog Prog
 
 	// ③ 单事务入 hub（HB2：到这步为止的任何失败都不落任何快照/tombstone）。
 	if prog != nil {
-		prog(StageApply, 0, len(snap.Collections)+len(snap.BeatmapSets))
+		prog(StageApply, 0, len(snap.Collections)+len(snap.BeatmapSets)+len(snap.Skins)+len(snap.Scores))
 	}
 	applyRes, err := r.deps.Hub.ApplySnapshot(ctx, snap)
 	if err != nil {
