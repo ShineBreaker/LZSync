@@ -337,6 +337,9 @@ func seedOneSet(s *seeder, set hub.BeatmapSet) error {
 	}
 	defer s.r.ReleaseObject(setObj)
 
+	if err := s.setGuid(setObj, "BeatmapSet", "ID", set.ID); err != nil {
+		return err
+	}
 	if err := s.setStr(setObj, "BeatmapSet", "Hash", set.Hash); err != nil {
 		return err
 	}
@@ -409,6 +412,9 @@ func seedOneBeatmap(s *seeder, bm hub.Beatmap, set hub.BeatmapSet, setObj unsafe
 	fail := func(err error) (unsafe.Pointer, error) {
 		s.r.ReleaseObject(bmObj)
 		return nil, err
+	}
+	if err := s.setGuid(bmObj, "Beatmap", "ID", bm.ID); err != nil {
+		return fail(err)
 	}
 	for _, c := range []struct{ name, val string }{
 		{"Hash", bm.Hash}, {"MD5Hash", bm.MD5Hash}, {"OnlineMD5Hash", bm.OnlineMD5Hash},
@@ -674,6 +680,9 @@ func seedCollections(s *seeder, cols []hub.Collection) error {
 func seedScores(s *seeder, spec Spec) error {
 	for _, sc := range spec.Seed.Scores {
 		if err := s.row("Score", func(obj unsafe.Pointer) error {
+			if err := s.setGuid(obj, "Score", "ID", sc.Guid); err != nil {
+				return err
+			}
 			strCols := []struct{ name, val string }{
 				{"BeatmapHash", sc.BeatmapHash},
 				{"Hash", sc.Hash},

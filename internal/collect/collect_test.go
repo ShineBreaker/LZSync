@@ -10,9 +10,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"lzsync/internal/filestore"
@@ -304,5 +307,315 @@ func TestCollectSkipsEzExternalSets(t *testing.T) {
 	}
 	if got := h.presenceCount("ez2lazer", hub.KindBeatmapSet); got != 1 {
 		t.Errorf("presence(beatmap_set) = %d，期望 1", got)
+	}
+}
+
+// guidNorm 归一化 Guid 比较（播种夹具带连字符、投影读回 32 位 hex）。
+func guidNorm(s string) string {
+	return strings.ToLower(strings.ReplaceAll(s, "-", ""))
+}
+
+// skipCount 从报告取某原因的跳过计数（不存在返回 -1，便于区分「零次」与
+// 「未出现」）。
+func skipCount(report Report, reason string) int {
+	for _, s := range report.Skips {
+		if s.Reason == reason {
+			return s.Count
+		}
+	}
+	return -1
+}
+
+// TestSkinIsOwnFingerprint fork 专有皮肤指纹规则单测（Name+Creator 双等值；
+// 注册表数据属 forks 包，越界不补——规则语义在此独立验证）。
+func TestSkinIsOwnFingerprint(t *testing.T) {
+	own := []forks.SkinFingerprint{{Name: "Ez Default", Creator: "Ez2Lazer"}}
+	for _, tc := range []struct {
+		name, creator string
+		want          bool
+	}{
+		{"Ez Default", "Ez2Lazer", true},
+		{"Ez Default", "someone", false},  // 仅 Name 命中不算
+		{"other", "Ez2Lazer", false},      // 仅 Creator 命中不算
+		{"My Skin", "maker", false},
+	} {
+		if got := skinIsOwn(own, tc.name, tc.creator); got != tc.want {
+			t.Errorf("skinIsOwn(%q,%q) = %v，期望 %v", tc.name, tc.creator, got, tc.want)
+		}
+	}
+	if skinIsOwn(nil, "Ez Default", "Ez2Lazer") {
+		t.Error("空指纹清单不应命中")
+	}
+}
+
+// TestCollectM2EntitiesFullColumns M2 收集验收（design §7-M2 / §8.2-5）：
+// 全列谱面/皮肤/成绩入 hub 逐字段断言；跳过规则逐条断言计数与原因；
+// collect_log 计数含新实体；幂等重跑一致。
+func TestCollectM2EntitiesFullColumns(t *testing.T) {
+	files := map[string][]byte{}
+	fullSet, err := fixture.MaterializeSet(7001, "M2 Artist", "M2 Title", "m2mapper",
+		[]fixture.DiffMaterial{
+			{Name: "Easy", OsuBytes: []byte("m2 easy osu bytes")},
+			{Name: "Tough", OsuBytes: []byte("m2 tough osu bytes")},
+		}, []byte("m2-audio-bytes"), files)
+	if err != nil {
+		t.Fatalf("MaterializeSet: %v", err)
+	}
+	fullSet.ID = "77777777-7777-7777-7777-777777777777"
+	fullSet.Beatmaps[0].ID = "88888888-8888-8888-8888-888888888888"
+	fullSet.Beatmaps[1].ID = "99999999-9999-9999-9999-999999999999"
+	fullSet.Beatmaps[1].Hidden = true // Hidden 难度跳过夹具
+
+	// 谱面集跳过夹具：软删集（难度随集消失不重复计数）与 Protected 系统集。
+	softDelSet := hub.BeatmapSet{
+		ID: "aaaaaaa1-0000-0000-0000-000000000001", Hash: sha256Fixture(t, "m2-softdel-set-concat"),
+		OnlineID: 7002, DeletePending: true,
+	}
+	protectedSet := hub.BeatmapSet{
+		ID: "aaaaaaa2-0000-0000-0000-000000000002", Hash: sha256Fixture(t, "m2-protected-set-concat"),
+		OnlineID: 7003, Protected: true,
+	}
+
+	// 成绩：全列正常行 + 软删行 + 空 BeatmapHash 行。
+	score, err := fixture.MaterializeScore(fullSet.Beatmaps[0], "lazer 2026.1002.0", []byte("m2 replay bytes"), files)
+	if err != nil {
+		t.Fatalf("MaterializeScore: %v", err)
+	}
+	score.Guid = "bbbbbbbb-0000-0000-0000-000000000001"
+	score.TotalScore = 1234567
+	score.TotalScoreWithoutMods = 1200000
+	score.MaxCombo = 999
+	score.RankInt = 1 // SS
+	score.Combo = 42
+	score.ModsJson = `[{"acronym":"HD","settings":{}}]`
+	score.StatisticsJson = `{"great":1000,"miss":0}`
+	score.MaximumStatisticsJson = `{"great":1000}`
+	softDelScore := fixture.SeedScore{
+		Guid: "bbbbbbbb-0000-0000-0000-000000000002", BeatmapHash: fullSet.Beatmaps[0].Hash,
+		Hash: sha256Fixture(t, "m2-softdel-score-replay"), DeletePending: true,
+	}
+	noAnchorScore := fixture.SeedScore{
+		Guid: "bbbbbbbb-0000-0000-0000-000000000003",
+		Hash: sha256Fixture(t, "m2-noanchor-score-replay"),
+	}
+
+	// 皮肤：全列用户行 + 软删行 + 空 Hash 行（内置六皮肤由 fixture 恒播）。
+	skin, err := fixture.MaterializeSkin("M2 Skin", "skinner", []fixture.SkinFileMaterial{
+		{Filename: "skin.ini", Bytes: []byte("[General]\nName:M2 Skin\n")},
+		{Filename: "layout.json", Bytes: []byte(`{"version":2}`)},
+		{Filename: "hit.png", Bytes: []byte("m2-hit-png-bytes")},
+	}, files)
+	if err != nil {
+		t.Fatalf("MaterializeSkin: %v", err)
+	}
+	skin.Guid = "cccccccc-0000-0000-0000-000000000001"
+	softDelSkin := fixture.SeedSkin{
+		Name: "Dead Skin", Creator: "dead", Hash: sha256Fixture(t, "m2-dead-skin-concat"),
+		DeletePending: true,
+	}
+	noHashSkin := fixture.SeedSkin{Name: "NoHash Skin", Creator: "nohash"}
+
+	seed := fixture.Seed{
+		BeatmapSets: []hub.BeatmapSet{fullSet, softDelSet, protectedSet},
+		Scores:      []fixture.SeedScore{score, softDelScore, noAnchorScore},
+		Skins:       []fixture.SeedSkin{skin, softDelSkin, noHashSkin},
+		Files:       files,
+	}
+	dataDir := t.TempDir()
+	ref, err := fixture.Build(context.Background(), fixture.Spec{
+		ForkID: fixture.ForkLazer, SchemaVersion: fixture.VersionLazer,
+		DataDir: dataDir, Seed: seed,
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build: %v", err)
+	}
+
+	h := newHarness(t, nil)
+	report, err := h.runner.Collect(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	// 实体入仓计数（跳过行不入仓）。
+	for kind, want := range map[hub.EntityKind]int{
+		hub.KindCollection: 0, hub.KindBeatmapSet: 1, hub.KindBeatmap: 1,
+		hub.KindSkin: 1, hub.KindScore: 1,
+	} {
+		if got := report.Entities[kind]; got != want {
+			t.Errorf("Entities[%s] = %d，期望 %d", kind, got, want)
+		}
+	}
+
+	// 跳过规则逐条：计数与原因。
+	for reason, want := range map[string]int{
+		skipSoftDeleted:     1, // 软删集（难度随集消失）
+		skipProtectedSet:    1,
+		skipHiddenDiff:      1,
+		skipSkinSoftDel:     1,
+		skipProtectedSkin:   6, // 内置六皮肤（fixture 恒播）
+		skipSkinNoHash:      1,
+		skipScoreSoftDel:    1,
+		skipScoreNoBeatmap:  1,
+	} {
+		if got := skipCount(report, reason); got != want {
+			t.Errorf("跳过[%s] = %d，期望 %d（Skips=%+v）", reason, got, want, report.Skips)
+		}
+	}
+	if skipCount(report, skipOwnSkin) != -1 {
+		t.Errorf("lazer 注册表未登记 OwnSkins，不应出现 fork 专有皮肤跳过（Skips=%+v）", report.Skips)
+	}
+
+	// collect_log：entity_counts 含五类实体、skip_reasons 可解析。
+	var countsJSON, skipsJSON string
+	if err := h.hub.DB().QueryRow(
+		`SELECT entity_counts, skip_reasons FROM collect_log ORDER BY finished_at DESC LIMIT 1`,
+	).Scan(&countsJSON, &skipsJSON); err != nil {
+		t.Fatalf("读 collect_log: %v", err)
+	}
+	var counts map[hub.EntityKind]int
+	if err := json.Unmarshal([]byte(countsJSON), &counts); err != nil {
+		t.Fatalf("解码 entity_counts: %v", err)
+	}
+	if counts[hub.KindSkin] != 1 || counts[hub.KindScore] != 1 || counts[hub.KindBeatmap] != 1 {
+		t.Errorf("collect_log entity_counts = %v，期望含 skin=1/score=1/beatmap=1", counts)
+	}
+	var logSkips []hub.SkipStat
+	if err := json.Unmarshal([]byte(skipsJSON), &logSkips); err != nil {
+		t.Fatalf("解码 skip_reasons: %v", err)
+	}
+	if len(logSkips) != len(report.Skips) {
+		t.Errorf("collect_log skip_reasons %d 条，报告 %d 条，应一致", len(logSkips), len(report.Skips))
+	}
+
+	// 皮肤逐字段断言（hub canonical ← 投影）。
+	wantSkin := hub.Skin{
+		ID: guidNorm(skin.Guid), Hash: skin.Hash, Name: skin.Name, Creator: skin.Creator,
+		InstantiationInfo: skin.InstantiationInfo, Files: skin.Files,
+	}
+	gotSkin, originSkin, ok, err := h.hub.LoadSkin(context.Background(), skin.Hash)
+	if err != nil || !ok {
+		t.Fatalf("LoadSkin(%s) = ok=%v err=%v", skin.Hash, ok, err)
+	}
+	if !reflect.DeepEqual(gotSkin, wantSkin) {
+		t.Errorf("hub 皮肤 payload = %+v，期望 %+v", gotSkin, wantSkin)
+	}
+	if originSkin.Fork != "lazer" || originSkin.GUID != guidNorm(skin.Guid) {
+		t.Errorf("皮肤 origin = %+v，期望 {lazer, 源 Guid}（HB3）", originSkin)
+	}
+
+	// 成绩逐字段断言。
+	wantScore := hub.Score{
+		ID:                   guidNorm(score.Guid),
+		BeatmapHash:          score.BeatmapHash,
+		Hash:                 score.Hash,
+		RulesetShortName:     score.RulesetShortName,
+		ClientVersion:        score.ClientVersion,
+		TotalScore:           score.TotalScore,
+		TotalScoreWithoutMods: score.TotalScoreWithoutMods,
+		TotalScoreVersion:    int(score.TotalScoreVersion),
+		Accuracy:             score.Accuracy,
+		Date:                 score.Date,
+		PP:                   score.PP,
+		OnlineID:             score.OnlineID,
+		LegacyOnlineID:       score.LegacyOnlineID,
+		User:                 score.User,
+		ModsJson:             score.ModsJson,
+		StatisticsJson:       score.StatisticsJson,
+		MaximumStatisticsJson: score.MaximumStatisticsJson,
+		Pauses:               score.Pauses,
+		RankInt:              int(score.RankInt),
+		Combo:                int(score.Combo),
+		MaxCombo:             int(score.MaxCombo),
+		Files:                []hub.NamedFile{{Hash: score.Hash, Filename: "replay.osr"}},
+	}
+	gotScore, originScore, ok, err := h.hub.LoadScore(context.Background(), score.BeatmapHash, score.Hash)
+	if err != nil || !ok {
+		t.Fatalf("LoadScore = ok=%v err=%v", ok, err)
+	}
+	if !reflect.DeepEqual(gotScore, wantScore) {
+		t.Errorf("hub 成绩 payload = %+v，期望 %+v", gotScore, wantScore)
+	}
+	if originScore.Fork != "lazer" || originScore.GUID != guidNorm(score.Guid) {
+		t.Errorf("成绩 origin = %+v，期望 {lazer, 源 Guid}（HB3）", originScore)
+	}
+
+	// 谱面集逐字段断言（Hidden 难度被剔出 Beatmaps；Files 保留全部集内文件）。
+	wantSet := fullSet
+	wantSet.ID = guidNorm(fullSet.ID)
+	wantSet.Beatmaps = []hub.Beatmap{fullSet.Beatmaps[0]}
+	wantSet.Beatmaps[0].ID = guidNorm(fullSet.Beatmaps[0].ID)
+	sets, err := h.hub.CurrentBeatmapSets(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentBeatmapSets: %v", err)
+	}
+	if len(sets) != 1 {
+		t.Fatalf("当前版本谱面集 = %d，期望 1", len(sets))
+	}
+	if !reflect.DeepEqual(sets[0].Set, wantSet) {
+		t.Errorf("hub 谱面集 payload = %+v，期望 %+v", sets[0].Set, wantSet)
+	}
+	if sets[0].Set.Artist != "M2 Artist" || sets[0].Set.Title != "M2 Title" || sets[0].Set.AuthorUsername != "m2mapper" {
+		t.Errorf("谱面身份键字段 = %q/%q/%q，期望首难度 Metadata 承载（§4.2）",
+			sets[0].Set.Artist, sets[0].Set.Title, sets[0].Set.AuthorUsername)
+	}
+
+	// 难度行逐字段断言（beatmap 表 canonical，非集内嵌视图）。
+	var bmPayload string
+	if err := h.hub.DB().QueryRow(
+		`SELECT payload FROM beatmap WHERE content_hash=?`, fullSet.Beatmaps[0].Hash,
+	).Scan(&bmPayload); err != nil {
+		t.Fatalf("读 beatmap payload: %v", err)
+	}
+	var gotBM hub.Beatmap
+	if err := json.Unmarshal([]byte(bmPayload), &gotBM); err != nil {
+		t.Fatalf("解码 beatmap payload: %v", err)
+	}
+	wantBM := fullSet.Beatmaps[0]
+	wantBM.ID = guidNorm(wantBM.ID)
+	if !reflect.DeepEqual(gotBM, wantBM) {
+		t.Errorf("hub 难度 payload = %+v，期望 %+v", gotBM, wantBM)
+	}
+	// Hidden 难度与跳过集的难度不得入仓。
+	for _, bad := range []string{fullSet.Beatmaps[1].Hash} {
+		var n int
+		if err := h.hub.DB().QueryRow(
+			`SELECT COUNT(*) FROM beatmap WHERE content_hash=?`, bad).Scan(&n); err != nil {
+			t.Fatalf("查隐藏难度行: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("Hidden 难度 %s 入仓 %d 行，期望 0", bad, n)
+		}
+	}
+
+	// presence：五类实体快照完整。
+	for kind, want := range map[hub.EntityKind]int{
+		hub.KindCollection: 0, hub.KindBeatmapSet: 1, hub.KindSkin: 1, hub.KindScore: 1,
+	} {
+		if got := h.presenceCount("lazer", kind); got != want {
+			t.Errorf("presence(%s) = %d，期望 %d", kind, got, want)
+		}
+	}
+
+	// 幂等重跑：实体/presence/payload 一致，无 tombstone（HB2 前置）。
+	report2, err := h.runner.Collect(context.Background(), ref, nil)
+	if err != nil {
+		t.Fatalf("二次 Collect: %v", err)
+	}
+	if got := report2.Entities[hub.KindSkin]; got != 1 {
+		t.Errorf("二次收集 skin = %d，期望 1", got)
+	}
+	if got := report2.Entities[hub.KindScore]; got != 1 {
+		t.Errorf("二次收集 score = %d，期望 1", got)
+	}
+	skin2, _, ok, err := h.hub.LoadSkin(context.Background(), skin.Hash)
+	if err != nil || !ok || !reflect.DeepEqual(skin2, wantSkin) {
+		t.Errorf("二次收集后皮肤 payload 不一致: ok=%v err=%v", ok, err)
+	}
+	var tombs int
+	if err := h.hub.DB().QueryRow(`SELECT count(*) FROM tombstone`).Scan(&tombs); err != nil {
+		t.Fatalf("tombstone 计数: %v", err)
+	}
+	if tombs != 0 {
+		t.Errorf("无删除场景 tombstone = %d，期望 0", tombs)
 	}
 }

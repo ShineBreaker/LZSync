@@ -58,6 +58,7 @@ type Seed struct {
 // SeedScore 成绩种子（C2 白名单全列；跳过夹具行：DeletePending=true 或
 // BeatmapHash 为空，由投影端按 §4.1 计数丢弃）。
 type SeedScore struct {
+	Guid                  string // 行 Guid（断言锚点；空 = 全零）
 	BeatmapHash           string // 强锚点：打分时难度的 Hash（lazer-baseline §6.3）；空 = 无锚点跳过夹具
 	RulesetShortName      string
 	ClientVersion         string

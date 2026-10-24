@@ -139,6 +139,7 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 			if tsKey, ok := rd.prop("BeatmapCollection", colKey, "LastModified"); ok {
 				if null, err := r.IsNull(obj, tsKey); err == nil && !null {
 					c.LastModified, _ = r.GetTimestamp(obj, tsKey)
+					c.LastModified = c.LastModified.UTC()
 				}
 			}
 			snap.Collections = append(snap.Collections, c)
@@ -251,6 +252,7 @@ func projectScore(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count func
 	if k, ok := rd.prop(cls, classKey, "Date"); ok {
 		if null, err := rd.r.IsNull(obj, k); err == nil && !null {
 			date, _ = rd.r.GetTimestamp(obj, k)
+			date = date.UTC()
 		}
 	}
 	sc := hub.Score{
@@ -322,6 +324,7 @@ func projectBeatmapSet(rd *reader, obj unsafe.Pointer, snap *hub.Snapshot, count
 	if k, ok := rd.prop(cls, classKey, "DateAdded"); ok {
 		if null, err := rd.r.IsNull(obj, k); err == nil && !null {
 			bs.DateAdded, _ = rd.r.GetTimestamp(obj, k)
+			bs.DateAdded = bs.DateAdded.UTC()
 		}
 	}
 	if v := rd.objTSPtr(obj, cls, "DateSubmitted"); v != nil {
@@ -663,6 +666,7 @@ func (rd *reader) objTSPtr(obj unsafe.Pointer, cls, name string) *time.Time {
 	if err != nil {
 		return nil
 	}
+	v = v.UTC() // realm 读回带本地 zone；投影 DTO 统一 UTC（payload 可复现）
 	return &v
 }
 
