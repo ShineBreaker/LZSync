@@ -176,7 +176,8 @@ type mockCompare struct {
 }
 
 // mockPreviewRows hub → fork 投放预演样本（对 target=delta）：覆盖五类
-// 徽标与默认勾选规则。
+// 徽标、五类 kind（谱面集/难度不产独立对账行——难度生命周期挂集整集
+// 管理，§4.2，Mock 不伪造该数据面）与默认勾选规则。
 func mockPreviewRows() []DiffRow {
 	return []DiffRow{
 		{Kind: hub.KindCollection, ContentKey: "新谱面收藏", Category: CategoryCreate,
@@ -192,10 +193,10 @@ func mockPreviewRows() []DiffRow {
 			Summary: "Cranky - Terpsichore（Reol）", DefaultChecked: true},
 		{Kind: hub.KindBeatmapSet, ContentKey: "hash-old-ver-0002", Category: CategoryVersionUpdate,
 			Summary: "ginkiha - EOS（kamome sano）", IdentityKey: "online:1656406",
-			Evidence: EvidenceStrong, DefaultChecked: true},
+			CurrentKey: "hash-eos-new-0002", Evidence: EvidenceStrong, DefaultChecked: true},
 		{Kind: hub.KindBeatmapSet, ContentKey: "hash-weak-0003", Category: CategoryVersionUpdate,
 			Summary: "Unknown Artist - Demo（mapper）", IdentityKey: "meta:UA|Demo|mapper",
-			Evidence: EvidenceWeak, DefaultChecked: false,
+			CurrentKey: "hash-demo-new-0003", Evidence: EvidenceWeak, DefaultChecked: false,
 			SkipReason: "元数据弱键「疑似」版本更新，需用户拍板（§5.4 三选一）"},
 		{Kind: hub.KindBeatmapSet, ContentKey: "hash-conflict-0004", Category: CategoryConflict,
 			Summary: "IA - Suna no Wakusei（nhato）", DefaultChecked: true,
@@ -203,10 +204,27 @@ func mockPreviewRows() []DiffRow {
 				{Field: "StatusInt", HubValue: "1", ForkValue: "0"},
 				{Field: "DateAdded", HubValue: "1769000000000", ForkValue: "1768000000000"},
 			}},
+		{Kind: hub.KindSkin, ContentKey: "hash-skin-new-0005", Category: CategoryCreate,
+			Summary: "皮肤「Argon（modified）」（peppy）", DefaultChecked: true},
+		{Kind: hub.KindSkin, ContentKey: "hash-skin-conflict-0006", Category: CategoryConflict,
+			Summary: "皮肤「Custom HD」（作者甲）", DefaultChecked: true,
+			ConflictFields: []FieldDiff{{Field: "Name", HubValue: "Custom HD", ForkValue: "Custom HD（旧名）"}}},
+		{Kind: hub.KindSkin, ContentKey: "hash-skin-deleted-0007", Category: CategoryRestore,
+			Summary: "皮肤「Retired Skin」（作者乙）", DefaultChecked: false,
+			DeletedAt: time.Now().Add(-120 * time.Hour).UnixMilli()},
+		{Kind: hub.KindScore, ContentKey: "bh-new|sc-0008", Category: CategoryCreate,
+			Summary: "成绩 osu · 987654 分 · 2026-02-01", DefaultChecked: true},
+		{Kind: hub.KindScore, ContentKey: "bh-old|sc-0009", Category: CategoryConflict,
+			Summary: "成绩 taiko · 123456 分 · 2026-01-15", DefaultChecked: true,
+			ConflictFields: []FieldDiff{{Field: "TotalScore", HubValue: "123456", ForkValue: "123450"}}},
+		{Kind: hub.KindScore, ContentKey: "bh-gone|sc-0010", Category: CategoryRestore,
+			Summary: "成绩 fruits · 4242 分 · 2025-12-30", DefaultChecked: false,
+			DeletedAt: time.Now().Add(-24 * time.Hour).UnixMilli()},
 	}
 }
 
-// mockForkDiffRows fork↔fork 样本（lazer → delta）。
+// mockForkDiffRows fork↔fork 样本（lazer → delta）：覆盖五类 kind 与
+// target-only（仅 fork↔fork 模式产出）。
 func mockForkDiffRows() []DiffRow {
 	return []DiffRow{
 		{Kind: hub.KindCollection, ContentKey: "新谱面收藏", Category: CategoryCreate,
@@ -215,11 +233,15 @@ func mockForkDiffRows() []DiffRow {
 			Summary: "收藏夹「delta 独有收藏」", DefaultChecked: false},
 		{Kind: hub.KindBeatmapSet, ContentKey: "hash-old-ver-0002", Category: CategoryVersionUpdate,
 			Summary: "ginkiha - EOS（kamome sano）", IdentityKey: "online:1656406",
-			Evidence: EvidenceStrong, DefaultChecked: true},
+			CurrentKey: "hash-eos-new-0002", Evidence: EvidenceStrong, DefaultChecked: true},
 		{Kind: hub.KindCollection, ContentKey: "常用练习", Category: CategoryConflict,
 			Summary: "收藏夹「常用练习」", DefaultChecked: true,
 			ConflictFields: []FieldDiff{{Field: "BeatmapMD5Hashes",
 				HubValue: "md5-a,md5-b,md5-c", ForkValue: "md5-a,md5-b"}}},
+		{Kind: hub.KindSkin, ContentKey: "hash-skin-new-0005", Category: CategoryCreate,
+			Summary: "皮肤「Argon（modified）」（peppy）", DefaultChecked: true},
+		{Kind: hub.KindScore, ContentKey: "bh-new|sc-0008", Category: CategoryTargetOnly,
+			Summary: "成绩 osu · 987654 分 · 2026-02-01", DefaultChecked: false},
 	}
 }
 
@@ -251,11 +273,18 @@ func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
 		{Kind: hub.KindBeatmapSet, ContentKey: "hash-deleted-0009", Category: CategoryRestore,
 			Summary: "DECO*27 - Ghost Rule（Marathon）", DefaultChecked: false,
 			DeletedAt: time.Now().Add(-240 * time.Hour).UnixMilli()},
+		{Kind: hub.KindSkin, ContentKey: "hash-skin-deleted-0007", Category: CategoryRestore,
+			Summary: "皮肤「Retired Skin」（作者乙）", DefaultChecked: false,
+			DeletedAt: time.Now().Add(-120 * time.Hour).UnixMilli()},
+		{Kind: hub.KindScore, ContentKey: "bh-gone|sc-0010", Category: CategoryRestore,
+			Summary: "成绩 fruits · 4242 分 · 2025-12-30", DefaultChecked: false,
+			DeletedAt: time.Now().Add(-24 * time.Hour).UnixMilli()},
 	}, nil
 }
 
-// BuildPlan 勾选 → 计划（内存持久；M1 动作面与真实后端同构：仅收藏夹
-// 产生 create/update，其余计 skip + 原因；走 deploy.NewPlan 校验）。
+// BuildPlan 勾选 → 计划（内存持久；动作面与真实后端同构：M2 三类放行
+// ——谱面集 create/update/version-replace、皮肤/成绩 create/update，
+// 勾选恢复组 = 显式拍板；走 deploy.NewPlan 校验）。
 func (m *mockCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, error) {
 	if target == "" {
 		return deploy.Plan{}, errors.New("appsvc: 生成计划缺少目标 fork")
@@ -295,17 +324,29 @@ func (m *mockCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, er
 			continue
 		}
 		item := deploy.PlanItem{Kind: row.Kind, ContentKey: row.ContentKey, Summary: row.Summary}
-		if row.Kind != hub.KindCollection {
-			item.Action, item.SkipReason = deploy.ActionSkip, "谱面集/难度投放属 M2 写路径（§5.1 分阶段），M1 仅收藏夹"
+		if row.Category == CategoryVersionUpdate {
+			// 版本更新（谱面集专属，§4.4）：链尾键为写入键，行键即目标旧版本键。
+			item.ContentKey, item.OldContentKey = row.CurrentKey, row.ContentKey
+			item.Action = deploy.ActionVersionReplace
+			if row.Evidence == EvidenceWeak {
+				item.NeedsConfirm = true // 勾选即拍板留痕（§5.4）
+			}
 		} else {
-			switch row.Category {
-			case CategoryCreate, CategoryRestore: // 勾选恢复组 = 用户显式拍板投放并清 tombstone（§5.4）
-				item.Action = deploy.ActionCreate
-				item.Restore = row.Category == CategoryRestore
-			case CategoryConflict:
-				item.Action = deploy.ActionUpdate
+			switch row.Kind {
+			case hub.KindCollection, hub.KindSkin, hub.KindScore, hub.KindBeatmapSet:
+				switch row.Category {
+				case CategoryCreate, CategoryRestore: // 勾选恢复组 = 用户显式拍板投放并清 tombstone（§5.4）
+					item.Action = deploy.ActionCreate
+					item.Restore = row.Category == CategoryRestore
+				case CategoryConflict:
+					item.Action = deploy.ActionUpdate // 默认 hub 覆盖（§5.4）
+				default:
+					item.Action, item.SkipReason = deploy.ActionSkip,
+						string(row.Kind)+" 无版本更新语义（内容键即身份，§4.2）"
+				}
 			default:
-				item.Action, item.SkipReason = deploy.ActionSkip, "收藏夹无版本更新语义（内容键即 Name）"
+				item.Action, item.SkipReason = deploy.ActionSkip,
+					string(row.Kind)+" 投放属 M3 写路径（§5.1 分阶段启用）"
 			}
 		}
 		raw = append(raw, item)
@@ -385,7 +426,8 @@ func (m *mockSync) Collect(forkID string) (collect.Report, error) {
 		}
 	}
 	return collect.Report{
-		Entities:        map[hub.EntityKind]int{hub.KindCollection: 28, hub.KindBeatmapSet: 1314, hub.KindBeatmap: 5210},
+		Entities: map[hub.EntityKind]int{hub.KindCollection: 28, hub.KindBeatmapSet: 1314,
+			hub.KindBeatmap: 5210, hub.KindSkin: 17, hub.KindScore: 8632},
 		Skips:           []hub.SkipStat{{Reason: "Protected 系统谱面集", Count: 4}, {Reason: "Ez 外部托管谱面集", Count: 2}},
 		FilesAdopted:    34,
 		FilesSkipped:    0,

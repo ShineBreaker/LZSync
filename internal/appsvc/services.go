@@ -96,6 +96,7 @@ type DiffRow struct {
 	ConflictFields []FieldDiff // Category == CategoryConflict 时填充
 	IdentityKey    string      // 版本更新时的谱面身份键（online:/meta: 前缀）
 	Evidence       string      // 版本更新时的证据强度（EvidenceStrong/Weak）；弱键 = 需用户确认项
+	CurrentKey     string      // 版本更新时的 hub 链尾内容键（勾选 → version-replace 的写入键）
 	SkipReason     string      // 跳过原因预演（adapter 规则在预览期即跑）
 	DeletedAt      int64       // 恢复组的删除时间（Unix 毫秒）
 	DefaultChecked bool        // §6.2 默认勾选规则预计算

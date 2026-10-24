@@ -558,6 +558,7 @@ func reconcileToRow(it hub.ReconcileItem, sum *summarizer) DiffRow {
 	}
 	row.ConflictFields = fields
 	row.IdentityKey, row.Evidence = it.IdentityKey, it.Evidence
+	row.CurrentKey = it.CurrentKey
 	row.DeletedAt = it.DeletedAt
 	// 默认勾选（§6.2）：新增/冲突默认勾选（冲突默认 hub 覆盖，§5.4）；
 	// 版本更新强键勾选、弱键需拍板不勾；恢复组默认不勾。

@@ -96,6 +96,7 @@ func TestMockCompareCategoriesAndDefaults(t *testing.T) {
 		t.Fatalf("PreviewDeploy: %v", err)
 	}
 	want := map[string]struct{ count, checked int }{}
+	kinds := map[hub.EntityKind]int{}
 	for _, r := range rows {
 		w := want[string(r.Category)]
 		w.count++
@@ -103,6 +104,7 @@ func TestMockCompareCategoriesAndDefaults(t *testing.T) {
 			w.checked++
 		}
 		want[string(r.Category)] = w
+		kinds[r.Kind]++
 	}
 	for _, cat := range []string{"create", "conflict", "version-update", "restore"} {
 		if _, ok := want[cat]; !ok {
@@ -124,6 +126,21 @@ func TestMockCompareCategoriesAndDefaults(t *testing.T) {
 	}
 	if weak != 0 {
 		t.Fatalf("弱键「疑似」默认不应勾选（§5.4）")
+	}
+	// 五类 kind 数据面：谱面集/收藏/皮肤/成绩各有行；难度不产独立对账行
+	//（生命周期挂集整集管理，§4.2），Mock 不伪造该数据面。
+	for _, k := range []hub.EntityKind{hub.KindBeatmapSet, hub.KindCollection, hub.KindSkin, hub.KindScore} {
+		if kinds[k] == 0 {
+			t.Fatalf("预演缺少 %s 类型行: %v", k, kinds)
+		}
+	}
+	if kinds[hub.KindBeatmap] != 0 {
+		t.Fatalf("难度不应有独立对账行（§4.2）: %v", kinds)
+	}
+	for _, r := range rows {
+		if r.Category == CategoryVersionUpdate && r.CurrentKey == "" {
+			t.Fatalf("版本更新行应携带 hub 链尾键（勾选 → version-replace 的写入键）: %+v", r)
+		}
 	}
 	deleted, err := b.Compare.DeletedEntries("delta")
 	if err != nil || len(deleted) == 0 {
@@ -149,7 +166,7 @@ func TestMockBuildPlanAndPersistence(t *testing.T) {
 	if _, err := b.Compare.CurrentPlan(); !errors.Is(err, ErrNoPlan) {
 		t.Fatalf("无计划时应返回 ErrNoPlan，实际 %v", err)
 	}
-	// 全部行都勾上（含恢复组 = 用户显式拍板）。
+	// 全部行都勾上（含恢复组 = 用户显式拍板；含弱键疑似 = 三选一拍板「替换」）。
 	sel := make([]Selection, 0, len(rows))
 	for _, r := range rows {
 		sel = append(sel, Selection{Kind: r.Kind, ContentKey: r.ContentKey})
@@ -161,22 +178,47 @@ func TestMockBuildPlanAndPersistence(t *testing.T) {
 	if plan.TargetFork != "delta" {
 		t.Fatalf("计划目标 = %q", plan.TargetFork)
 	}
-	var actions, skips int
+	var actions, skips, replaces, confirms, restores int
+	kindsActed := map[hub.EntityKind]bool{}
 	for _, it := range plan.Items {
 		if it.Action == deploy.ActionSkip {
 			skips++
 			if it.SkipReason == "" {
 				t.Fatalf("skip 项必须携带原因（不静默吞掉，§1.5-4）")
 			}
-		} else {
-			actions++
+			continue
+		}
+		actions++
+		kindsActed[it.Kind] = true
+		switch {
+		case it.Action == deploy.ActionVersionReplace:
+			replaces++
+			if it.OldContentKey == "" || it.OldContentKey == it.ContentKey {
+				t.Fatalf("version-replace 项必须携带差异旧版本键: %+v", it)
+			}
+			if it.NeedsConfirm {
+				confirms++
+			}
+		case it.Restore:
+			restores++
 		}
 	}
 	if actions == 0 {
-		t.Fatalf("计划应含收藏夹实际动作项")
+		t.Fatalf("计划应含实际动作项")
 	}
-	if skips == 0 {
-		t.Fatalf("谱面集勾选应计为 skip + M2 原因")
+	if skips != 0 {
+		t.Fatalf("M2 三类放行后不应再有 M1 收缩 skip，实际 %d 项", skips)
+	}
+	if replaces != 2 || confirms != 1 {
+		t.Fatalf("版本替换 = %d（期望 2：强键+弱键拍板）、其中弱键留痕 = %d（期望 1）", replaces, confirms)
+	}
+	if restores == 0 {
+		t.Fatalf("勾选恢复组应产生 Restore 标记的 create 项")
+	}
+	for _, k := range []hub.EntityKind{hub.KindCollection, hub.KindBeatmapSet, hub.KindSkin, hub.KindScore} {
+		if !kindsActed[k] {
+			t.Fatalf("计划动作面应覆盖 %s: %v", k, kindsActed)
+		}
 	}
 	got, err := b.Compare.CurrentPlan()
 	if err != nil || got.TargetFork != "delta" {
