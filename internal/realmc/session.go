@@ -19,6 +19,10 @@ type ClassInfo struct {
 	Name       string
 	PrimaryKey string
 	Key        uint32 // realm_class_key_t，供后续按 key 访问
+	// Flags 含 RLM_CLASS_EMBEDDED（=1）等（realm.h:305-310）；
+	// NumComputedProperties 是 backlink 类计算属性数（不占持久列）。
+	Flags                 int32
+	NumComputedProperties uint64
 }
 
 // PropertyInfo 是 realm_property_info_t 的 Go 投影。
@@ -29,15 +33,23 @@ type PropertyInfo struct {
 }
 
 // ClassDef / PropertyDef / Schema 是 realm_schema_new 的构造面（realm.h:1121）。
+// 字段足以表达 lazer 系 schema 的持久列集合：主键、可空、集合列（list）、
+// 对象链接目标与 embedded 类（backlink 计算属性不落库，构造 schema 可省略）。
 type PropertyDef struct {
 	Name         string
 	Type         PropType
 	IsPrimaryKey bool
+	IsNullable   bool
+	Collection   CollectionType // CollectionNone 单值；CollectionList 列表列
+	// LinkTarget 是 Type=PropTypeObject 时的目标 class 名（前向链接，如
+	// Beatmap→BeatmapSet，或指向 embedded 类如 Beatmap→BeatmapDifficulty）。
+	LinkTarget string
 }
 
 type ClassDef struct {
 	Name       string
 	PrimaryKey string // 主键属性名，空串表示无主键类
+	Embedded   bool   // RLM_CLASS_EMBEDDED：BeatmapDifficulty 等嵌入式类
 	Properties []PropertyDef
 }
 
@@ -122,6 +134,9 @@ func (l *Library) buildSchema(s *Schema) (unsafe.Pointer, error) {
 		}
 		classInfos[i].numProperties = uint64(len(c.Properties))
 		classInfos[i].flags = classFlagNormal
+		if c.Embedded {
+			classInfos[i].flags = classFlagEmbedded
+		}
 
 		props := make([]realmPropertyInfo, len(c.Properties))
 		for j, p := range c.Properties {
@@ -129,13 +144,32 @@ func (l *Library) buildSchema(s *Schema) (unsafe.Pointer, error) {
 			keep = append(keep, pnB)
 			props[j].name = unsafe.Pointer(unsafe.SliceData(pnB))
 			props[j].publicName = emptyPtr
-			props[j].linkTarget = emptyPtr
+			if p.LinkTarget != "" {
+				ltB := cBytes(p.LinkTarget)
+				keep = append(keep, ltB)
+				props[j].linkTarget = unsafe.Pointer(unsafe.SliceData(ltB))
+			} else {
+				props[j].linkTarget = emptyPtr
+			}
 			props[j].linkOriginPropName = emptyPtr
 			props[j].typ = uint32(p.Type)
-			props[j].collectionType = collectionNone
+			props[j].collectionType = uint32(p.Collection)
 			flags := int32(propFlagNormal)
 			if p.IsPrimaryKey {
-				flags |= propFlagPrimaryKey
+				// realm-core 落盘时主键列一律规范化为 PK|INDEXED（主键天然
+				// 索引）；构造期即带上，显式建库会话的结构快照才与落盘
+				// 重开后的快照零差异（DriftGuard / golden 比对保真）。
+				flags |= propFlagPrimaryKey | propFlagIndexed
+			}
+			if p.IsNullable {
+				flags |= propFlagNullable
+			}
+			// 实证约束（realm-core Schema::validate，errno=2016）：单值 object
+			// 列（embedded 或普通链接）一律必须 nullable——链接存储以 null
+			// 态表达「未挂接」，realm-dotnet 生成 schema 时同样自动标记。
+			// 对齐引擎硬约束，调用方无须逐一声明。
+			if p.Type == PropTypeObject && p.Collection == CollectionNone {
+				flags |= propFlagNullable
 			}
 			props[j].flags = flags
 		}
@@ -226,9 +260,11 @@ func (r *Realm) Classes() ([]ClassInfo, error) {
 			return nil, fmt.Errorf("realm_get_class(%d): %w", k, r.lib.lastError())
 		}
 		out = append(out, ClassInfo{
-			Name:       goString(ci.name),
-			PrimaryKey: goString(ci.primaryKey),
-			Key:        ci.key,
+			Name:                  goString(ci.name),
+			PrimaryKey:            goString(ci.primaryKey),
+			Key:                   ci.key,
+			Flags:                 ci.flags,
+			NumComputedProperties: ci.numComputedProperties,
 		})
 	}
 	return out, nil
@@ -247,8 +283,9 @@ func (r *Realm) FindClass(name string) (uint32, error) {
 	return ci.key, nil
 }
 
-// Properties 枚举某 class 的全部属性（realm.h:1281，两段式）。
-func (r *Realm) Properties(classKey uint32) ([]PropertyInfo, error) {
+// rawProperties 两段式取某 class 的原始 realm_property_info_t 数组
+// （realm.h:1281：先探测容量再填数）。Properties 与结构档案采集共用。
+func (r *Realm) rawProperties(classKey uint32) ([]realmPropertyInfo, error) {
 	var n uint64
 	if !r.lib.realmGetClassProperties(r.h, classKey, nil, 0, &n) {
 		return nil, fmt.Errorf("realm_get_class_properties(探测): %w", r.lib.lastError())
@@ -257,7 +294,16 @@ func (r *Realm) Properties(classKey uint32) ([]PropertyInfo, error) {
 	if !r.lib.realmGetClassProperties(r.h, classKey, &props[0], n, &n) {
 		return nil, fmt.Errorf("realm_get_class_properties: %w", r.lib.lastError())
 	}
-	out := make([]PropertyInfo, 0, n)
+	return props, nil
+}
+
+// Properties 枚举某 class 的全部持久属性（realm.h:1281，两段式）。
+func (r *Realm) Properties(classKey uint32) ([]PropertyInfo, error) {
+	props, err := r.rawProperties(classKey)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PropertyInfo, 0, len(props))
 	for _, p := range props {
 		out = append(out, PropertyInfo{Name: goString(p.name), Type: PropType(p.typ), Key: p.key})
 	}

@@ -64,6 +64,32 @@ type Library struct {
 	realmGetValue  func(unsafe.Pointer, int64, *realmValue) bool                // realm.h:1541
 	realmSetValue  func(unsafe.Pointer, int64, realmValue, bool) bool           // realm.h:1576，value 按值传（24B MEMORY 类）
 	realmSetValues func(unsafe.Pointer, uint64, *int64, *realmValue, bool) bool // realm.h:1639，指针变体（备用）
+
+	realmClearLastError func() bool // realm.h:448，链接类 NULL 返回前清线程错误以分辨「空链接 vs 异常」
+
+	realmObjectCreateWithPK      func(unsafe.Pointer, uint32, realmValue) unsafe.Pointer        // realm.h:1436
+	realmObjectGetOrCreateWithPK func(unsafe.Pointer, uint32, realmValue, *bool) unsafe.Pointer // realm.h:1444
+	realmObjectDelete            func(unsafe.Pointer) bool                                      // realm.h:1454
+	realmObjectGetKey            func(unsafe.Pointer) int64                                     // realm.h:1494
+	realmObjectGetTable          func(unsafe.Pointer) uint32                                    // realm.h:1501
+	realmGetLinkedObject         func(unsafe.Pointer, int64) unsafe.Pointer                     // realm.h:1604
+	realmSetEmbedded             func(unsafe.Pointer, int64) unsafe.Pointer                     // realm.h:1591
+	realmGetList                 func(unsafe.Pointer, int64) unsafe.Pointer                     // realm.h:1649
+
+	realmListSize            func(unsafe.Pointer, *uint64) bool             // realm.h:1698
+	realmListGet             func(unsafe.Pointer, uint64, *realmValue) bool // realm.h:1714
+	realmListSet             func(unsafe.Pointer, uint64, realmValue) bool  // realm.h:1731
+	realmListInsert          func(unsafe.Pointer, uint64, realmValue) bool  // realm.h:1739
+	realmListErase           func(unsafe.Pointer, uint64) bool              // realm.h:1816
+	realmListClear           func(unsafe.Pointer) bool                      // realm.h:1824
+	realmListGetLinkedObject func(unsafe.Pointer, uint64) unsafe.Pointer    // realm.h:1809
+	realmListInsertEmbedded  func(unsafe.Pointer, uint64) unsafe.Pointer    // realm.h:1795
+	realmListSetEmbedded     func(unsafe.Pointer, uint64) unsafe.Pointer    // realm.h:1802
+
+	realmGetProperty    func(unsafe.Pointer, uint32, int64, *realmPropertyInfo) bool                // realm.h:1321
+	realmGetObject      func(unsafe.Pointer, uint32, int64) unsafe.Pointer                          // realm.h:1394
+	realmQueryParse     func(unsafe.Pointer, uint32, string, uint64, *realmQueryArg) unsafe.Pointer // realm.h:2368
+	realmQueryFindFirst func(unsafe.Pointer, *realmValue, *bool) bool                               // realm.h:2466
 }
 
 var (
@@ -154,6 +180,32 @@ func (l *Library) bind() {
 	r(&l.realmGetValue, l.handle, "realm_get_value")
 	r(&l.realmSetValue, l.handle, "realm_set_value")
 	r(&l.realmSetValues, l.handle, "realm_set_values")
+
+	r(&l.realmClearLastError, l.handle, "realm_clear_last_error")
+
+	r(&l.realmObjectCreateWithPK, l.handle, "realm_object_create_with_primary_key")
+	r(&l.realmObjectGetOrCreateWithPK, l.handle, "realm_object_get_or_create_with_primary_key")
+	r(&l.realmObjectDelete, l.handle, "realm_object_delete")
+	r(&l.realmObjectGetKey, l.handle, "realm_object_get_key")
+	r(&l.realmObjectGetTable, l.handle, "realm_object_get_table")
+	r(&l.realmGetLinkedObject, l.handle, "realm_get_linked_object")
+	r(&l.realmSetEmbedded, l.handle, "realm_set_embedded")
+	r(&l.realmGetList, l.handle, "realm_get_list")
+
+	r(&l.realmListSize, l.handle, "realm_list_size")
+	r(&l.realmListGet, l.handle, "realm_list_get")
+	r(&l.realmListSet, l.handle, "realm_list_set")
+	r(&l.realmListInsert, l.handle, "realm_list_insert")
+	r(&l.realmListErase, l.handle, "realm_list_erase")
+	r(&l.realmListClear, l.handle, "realm_list_clear")
+	r(&l.realmListGetLinkedObject, l.handle, "realm_list_get_linked_object")
+	r(&l.realmListInsertEmbedded, l.handle, "realm_list_insert_embedded")
+	r(&l.realmListSetEmbedded, l.handle, "realm_list_set_embedded")
+
+	r(&l.realmGetProperty, l.handle, "realm_get_property")
+	r(&l.realmGetObject, l.handle, "realm_get_object")
+	r(&l.realmQueryParse, l.handle, "realm_query_parse")
+	r(&l.realmQueryFindFirst, l.handle, "realm_query_find_first")
 }
 
 // Version 返回 realm-core 库版本串（realm.h:366）。
@@ -202,4 +254,11 @@ func goString(p unsafe.Pointer) string {
 		n++
 	}
 	return string((*(*[1 << 20]byte)(p))[:n:n])
+}
+
+// clearLastError 清线程局部错误（realm.h:448）。指针返回 NULL 有「空链接」
+// 与「异常」双解的调用（realm_get_linked_object 等）须先清后查——last error
+// 不会被后续成功调用清除（realm.h:383-393），不清会把陈旧错误误报成新异常。
+func (l *Library) clearLastError() {
+	l.realmClearLastError()
 }

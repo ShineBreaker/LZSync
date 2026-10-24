@@ -25,9 +25,9 @@ type NamedFile struct {
 // Collection 收藏夹中立 DTO（M1 投放载体：无 files、无跨表关系、无 Guid
 // 依赖，§5.1）。内容键 = Name（§4.2 第一层）。
 type Collection struct {
-	ID               string    // 源 fork 侧 Guid（落库为 origin_guid，§4.4）
-	Name             string    // 内容键（用户心智名）
-	BeatmapMD5Hashes []string  // 排序指纹作冲突判据
+	ID               string   // 源 fork 侧 Guid（落库为 origin_guid，§4.4）
+	Name             string   // 内容键（用户心智名）
+	BeatmapMD5Hashes []string // 排序指纹作冲突判据
 	LastModified     time.Time
 }
 

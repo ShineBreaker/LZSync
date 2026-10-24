@@ -7,7 +7,9 @@ package realmc
 
 import (
 	"encoding/binary"
+	"math"
 	"structs"
+	"time"
 	"unsafe"
 )
 
@@ -42,13 +44,17 @@ const (
 )
 
 // realm_class_flags_e（realm.h:305-310）
-const classFlagNormal = 0
+const (
+	classFlagNormal   = 0
+	classFlagEmbedded = 1 // RLM_CLASS_EMBEDDED：BeatmapDifficulty 等嵌入式类
+)
 
 // realm_property_flags_e（realm.h:312-318）
 const (
 	propFlagNormal     = 0
 	propFlagNullable   = 1
 	propFlagPrimaryKey = 2
+	propFlagIndexed    = 4
 )
 
 // realm_property_type_e（realm.h:260-275）
@@ -58,13 +64,26 @@ const (
 	PropTypeInt           PropType = 0
 	PropTypeBool          PropType = 1
 	PropTypeString        PropType = 2
+	PropTypeBinary        PropType = 4
+	PropTypeMixed         PropType = 6
 	PropTypeTimestamp     PropType = 8
+	PropTypeFloat         PropType = 9
+	PropTypeDouble        PropType = 10
+	PropTypeDecimal128    PropType = 11
 	PropTypeObject        PropType = 12
 	PropTypeLinkingObject PropType = 14
+	PropTypeObjectID      PropType = 15
+	PropTypeUUID          PropType = 17
 )
 
-// realm_collection_type_e（realm.h:277-282）
-const collectionNone = 0
+// CollectionType 镜像 realm_collection_type_e（realm.h:277-282）。
+// schema 构造面（PropertyDef.Collection）与结构档案（PropertySnapshot.Collection）共用。
+type CollectionType uint32
+
+const (
+	CollectionNone CollectionType = 0
+	CollectionList CollectionType = 1
+)
 
 // realmValue 镜像 realm_value_t（realm.h:201-218）：
 //
@@ -116,6 +135,134 @@ func (v realmValue) asString() (unsafe.Pointer, uint64) {
 	}
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(&view)), 16), v.u[:])
 	return view.data, view.size
+}
+
+// bufValue 构造 {指针,长度} 型 union 槽位（string 与 binary 同布局）。
+func bufValue(data unsafe.Pointer, size uint64, typ uint32) realmValue {
+	view := struct {
+		data unsafe.Pointer
+		size uint64
+	}{data: data, size: size}
+	var v realmValue
+	copy(v.u[:], unsafe.Slice((*byte)(unsafe.Pointer(&view)), 16))
+	v.typ = typ
+	return v
+}
+
+// binaryValue 构造 RLM_TYPE_BINARY。data 指向的字节必须在 C 调用返回前保持存活。
+func binaryValue(data unsafe.Pointer, size uint64) realmValue {
+	return bufValue(data, size, rlmTypeBinary)
+}
+
+// asBinary 取 RLM_TYPE_BINARY 的 (data 指针, 长度)，须立即拷贝。
+func (v realmValue) asBinary() (unsafe.Pointer, uint64) {
+	return v.asString() // string 与 binary 的 union 槽位同构
+}
+
+// boolValue / asBool：C bool 占 union 首字节（realm.h:204 boolean）。
+func boolValue(b bool) realmValue {
+	var v realmValue
+	if b {
+		v.u[0] = 1
+	}
+	v.typ = rlmTypeBool
+	return v
+}
+
+func (v realmValue) asBool() bool { return v.u[0] != 0 }
+
+// float32Value / float64Value：float 与 double 分别落 RLM_TYPE_FLOAT / RLM_TYPE_DOUBLE，
+// 二者互不兼容（列类型错配 realm_set_value 会抛类型不匹配）。
+func float32Value(f float32) realmValue {
+	var v realmValue
+	binary.LittleEndian.PutUint32(v.u[:4], math.Float32bits(f))
+	v.typ = rlmTypeFloat
+	return v
+}
+
+func (v realmValue) asFloat32() float32 {
+	return math.Float32frombits(binary.LittleEndian.Uint32(v.u[:4]))
+}
+
+func float64Value(f float64) realmValue {
+	var v realmValue
+	binary.LittleEndian.PutUint64(v.u[:8], math.Float64bits(f))
+	v.typ = rlmTypeDouble
+	return v
+}
+
+func (v realmValue) asFloat64() float64 {
+	return math.Float64frombits(binary.LittleEndian.Uint64(v.u[:8]))
+}
+
+// timestampValue / asTimestamp：realm_timestamp_t{int64 seconds @0; int32 nanoseconds @8}
+// （realm.h:179-182），Unix 纪元。
+func timestampValue(t time.Time) realmValue {
+	var v realmValue
+	binary.LittleEndian.PutUint64(v.u[:8], uint64(t.Unix()))
+	binary.LittleEndian.PutUint32(v.u[8:12], uint32(t.Nanosecond()))
+	v.typ = rlmTypeTimestamp
+	return v
+}
+
+func (v realmValue) asTimestamp() (seconds int64, nanoseconds int32) {
+	return int64(binary.LittleEndian.Uint64(v.u[:8])),
+		int32(binary.LittleEndian.Uint32(v.u[8:12]))
+}
+
+// uuidValue / asUUID：realm_uuid_t 16 字节平铺 union 首槽（realm.h:197-199）。
+// [16]byte 即 lazer 的 Guid 原始字节。
+func uuidValue(id [16]byte) realmValue {
+	var v realmValue
+	copy(v.u[:], id[:])
+	v.typ = rlmTypeUUID
+	return v
+}
+
+func (v realmValue) asUUID() [16]byte {
+	var b [16]byte
+	copy(b[:], v.u[:16])
+	return b
+}
+
+// linkValue / asLink：realm_link_t{uint32 target_table @0; int64 target @8}
+// （realm.h:188-191）。写入对象链接（realm_set_value / realm_list_insert）与
+// 查询结果回取（realm_query_find_first）共用此编码；字节布局与
+// realm_object_as_link 的返回值一致（经 realm_object_get_table/get_key 标量
+// 返回组出，规避 purego 的 C 结构体按值返回）。
+func linkValue(targetTable uint32, targetKey int64) realmValue {
+	var v realmValue
+	binary.LittleEndian.PutUint32(v.u[:4], targetTable)
+	binary.LittleEndian.PutUint64(v.u[8:], uint64(targetKey))
+	v.typ = rlmTypeLink
+	return v
+}
+
+func (v realmValue) asLink() (targetTable uint32, targetKey int64) {
+	return binary.LittleEndian.Uint32(v.u[:4]),
+		int64(binary.LittleEndian.Uint64(v.u[8:]))
+}
+
+// nullValue 构造 RLM_TYPE_NULL（清空可空列）。
+func nullValue() realmValue {
+	var v realmValue // type=0 即 RLM_TYPE_NULL；显式函数只为意图可读
+	v.typ = rlmTypeNull
+	return v
+}
+
+// realmQueryArg 镜像 realm_query_arg_t（realm.h:219-223）：
+//
+//	size_t nb_args;          0..8
+//	bool is_list;            8..9（pad 9..16）
+//	realm_value_t* arg;      16..24
+//
+// sizeof=24。RQL 占位符 $0/$1/... 与 args 数组逐位对应（realm.h:2368）。
+type realmQueryArg struct {
+	_      structs.HostLayout
+	nbArgs uint64
+	isList bool
+	_      [7]byte // bool 后补齐 → arg 落在偏移 16
+	arg    *realmValue
 }
 
 // realmClassInfo 镜像 realm_class_info_t（realm.h:296-303）：
