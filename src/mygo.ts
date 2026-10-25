@@ -22,6 +22,7 @@ export interface DeployReport {
   NotRun: PlanItem[];
   Repointed: RepointedItem[];
   GimmickWarnings: PlanItem[];
+  GameIni: GameIniResult | null;
   BackupPath: string;
 }
 
@@ -69,6 +70,17 @@ export interface FieldDiff {
   Field: string;
   HubValue: string;
   ForkValue: string;
+}
+
+export interface GameIniResult {
+  Applied: Record<string, string>;
+  Skipped: InisettingsSkipStat[];
+  BackupPath: string;
+}
+
+export interface InisettingsSkipStat {
+  Reason: string;
+  Count: number;
 }
 
 export interface ItemResult {
@@ -244,9 +256,11 @@ export const LibraryService = {
 export const CompareService = {
   /**
    * BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。
-   * M2 动作面 = 收藏夹 + 谱面集（create/update/version-replace）+ 皮肤 +
-   * 成绩（create/update）——与 deploy 执行面（writer_set/writer_skin/
-   * writer_score）对齐；键位/规则集设置/ModPreset 属 M3 写路径（§5.1）。
+   * 动作面 = 收藏夹 + 谱面集（create/update/version-replace）+ 皮肤 + 成绩
+   * （create/update）+ M3 设置类三类（键位/规则集设置/ModPreset，
+   * create/update）——与 deploy 执行面（writer_set/writer_skin/writer_score/
+   * writer_setting）对齐（§5.1；预演面同源，三类经 allReconcileItems 可见
+   * 即可勾选投放）。
    */
   buildPlan(target: string, sel: Selection[]): Promise<Plan> {
     return call("CompareService.BuildPlan", target, sel);

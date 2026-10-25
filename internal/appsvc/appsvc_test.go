@@ -127,9 +127,11 @@ func TestMockCompareCategoriesAndDefaults(t *testing.T) {
 	if weak != 0 {
 		t.Fatalf("弱键「疑似」默认不应勾选（§5.4）")
 	}
-	// 五类 kind 数据面：谱面集/收藏/皮肤/成绩各有行；难度不产独立对账行
-	//（生命周期挂集整集管理，§4.2），Mock 不伪造该数据面。
-	for _, k := range []hub.EntityKind{hub.KindBeatmapSet, hub.KindCollection, hub.KindSkin, hub.KindScore} {
+	// 八类 kind 数据面：谱面集/收藏/皮肤/成绩 + M3 设置类三类各有行；
+	// 难度不产独立对账行（生命周期挂集整集管理，§4.2），Mock 不伪造
+	// 该数据面。
+	for _, k := range []hub.EntityKind{hub.KindBeatmapSet, hub.KindCollection, hub.KindSkin, hub.KindScore,
+		hub.KindKeyBinding, hub.KindRulesetSetting, hub.KindModPreset} {
 		if kinds[k] == 0 {
 			t.Fatalf("预演缺少 %s 类型行: %v", k, kinds)
 		}
@@ -749,5 +751,125 @@ func TestPlanItemFromVersionUpdate(t *testing.T) {
 	}
 	if weak.Summary != "Artist - Title（Author）" {
 		t.Fatalf("版本替换摘要应取链尾曲名: %q", weak.Summary)
+	}
+}
+
+
+// TestRealComparePreviewSettingsKinds M3 设置类三类的预演面（「不可见即
+// 不可勾选投放」的缺口闭合验收，§6.2 八类 Tab）：三类各一形态——键位
+// 新增（create 默认勾选）、规则集设置冲突（conflict 默认勾选 hub 覆盖）、
+// ModPreset 恢复组（restore 默认不勾，HB2）；BuildPlan 三类勾选产生实际
+// 动作（M3 写路径接通）。
+func TestRealComparePreviewSettingsKinds(t *testing.T) {
+	b, h, _ := newRealForTest(t, t.TempDir())
+	ctx := context.Background()
+	t0 := time.UnixMilli(1770000000000)
+	// delta（源）：键位 KB1、规则集设置 RS1（冲突源值）、ModPreset MP1。
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "delta", CollectedAt: t0,
+		KeyBindings: []hub.KeyBinding{
+			{ID: "gkb1", ActionInt: 7, KeyCombination: "Z"},
+		},
+		RulesetSettings: []hub.RulesetSetting{
+			{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
+		},
+		ModPresets: []hub.ModPreset{
+			{ID: "gmp1", RulesetShortName: "osu", Name: "Score Preset",
+				ModsJson: `[{"acronym":"HD","settings":{}}]`},
+		},
+	}); err != nil {
+		t.Fatalf("收集 delta: %v", err)
+	}
+	// lazer：RS1 不同值（冲突面）；MP1 先持有、随后删除 → tombstone（恢复组）。
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "lazer", CollectedAt: t0.Add(time.Hour),
+		RulesetSettings: []hub.RulesetSetting{
+			{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"topright"`},
+		},
+		ModPresets: []hub.ModPreset{
+			{ID: "gmp1", RulesetShortName: "osu", Name: "Score Preset",
+				ModsJson: `[{"acronym":"HD","settings":{}}]`},
+		},
+	}); err != nil {
+		t.Fatalf("收集 lazer: %v", err)
+	}
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "lazer", CollectedAt: t0.Add(2 * time.Hour),
+		RulesetSettings: []hub.RulesetSetting{
+			{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"topright"`},
+		},
+	}); err != nil {
+		t.Fatalf("再收集 lazer（删除 MP1）: %v", err)
+	}
+	// delta 再收集恢复 canonical（HB3）。
+	if _, err := h.ApplySnapshot(ctx, hub.Snapshot{
+		ForkID: "delta", CollectedAt: t0.Add(3 * time.Hour),
+		KeyBindings: []hub.KeyBinding{
+			{ID: "gkb1", ActionInt: 7, KeyCombination: "Z"},
+		},
+		RulesetSettings: []hub.RulesetSetting{
+			{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
+		},
+		ModPresets: []hub.ModPreset{
+			{ID: "gmp1", RulesetShortName: "osu", Name: "Score Preset",
+				ModsJson: `[{"acronym":"HD","settings":{}}]`},
+		},
+	}); err != nil {
+		t.Fatalf("再收集 delta: %v", err)
+	}
+
+	rows, err := b.Compare.PreviewDeploy("lazer")
+	if err != nil {
+		t.Fatalf("PreviewDeploy: %v", err)
+	}
+	got := map[hub.EntityKind]DiffRow{}
+	for _, r := range rows {
+		switch r.Kind {
+		case hub.KindKeyBinding, hub.KindRulesetSetting, hub.KindModPreset:
+			got[r.Kind] = r
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("设置类预演行 = %d 类（%+v），期望三类各一行", len(got), got)
+	}
+	if r := got[hub.KindKeyBinding]; r.Category != CategoryCreate || !r.DefaultChecked {
+		t.Errorf("键位行 = %s/%v，期望 create 默认勾选", r.Category, r.DefaultChecked)
+	}
+	if r := got[hub.KindRulesetSetting]; r.Category != CategoryConflict || !r.DefaultChecked {
+		t.Errorf("规则集设置行 = %s/%v，期望 conflict 默认勾选（hub 覆盖）", r.Category, r.DefaultChecked)
+	}
+	if r := got[hub.KindModPreset]; r.Category != CategoryRestore || r.DefaultChecked || r.DeletedAt == 0 {
+		t.Errorf("ModPreset 行 = %s/%v/%d，期望 restore 默认不勾且带删除时间（HB2）", r.Category, r.DefaultChecked, r.DeletedAt)
+	}
+	// 键位行摘要来自 deploy 键级摘要（reconcileToRow 的 it.Summary 优先面）。
+	if r := got[hub.KindKeyBinding]; r.Summary == "" {
+		t.Error("键位行摘要为空（deploy.ReconcileSettings 自带键级摘要）")
+	}
+
+	// BuildPlan：三类勾选 → create/update/restore 实际动作（M3 写路径接通）。
+	if _, err := b.Library.AssignFork("/tmp/lzsync-test-target/client.realm", "lazer"); err != nil {
+		t.Fatalf("AssignFork: %v", err)
+	}
+	sel := []Selection{
+		{Kind: hub.KindKeyBinding, ContentKey: got[hub.KindKeyBinding].ContentKey},
+		{Kind: hub.KindRulesetSetting, ContentKey: got[hub.KindRulesetSetting].ContentKey},
+		{Kind: hub.KindModPreset, ContentKey: got[hub.KindModPreset].ContentKey},
+	}
+	plan, err := b.Compare.BuildPlan("lazer", sel)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	actions := map[hub.EntityKind]deploy.Action{}
+	for _, it := range plan.Items {
+		actions[it.Kind] = it.Action
+	}
+	if actions[hub.KindKeyBinding] != deploy.ActionCreate {
+		t.Errorf("键位计划动作 = %s，期望 create", actions[hub.KindKeyBinding])
+	}
+	if actions[hub.KindRulesetSetting] != deploy.ActionUpdate {
+		t.Errorf("规则集设置计划动作 = %s，期望 update（冲突 hub 覆盖）", actions[hub.KindRulesetSetting])
+	}
+	if actions[hub.KindModPreset] != deploy.ActionCreate {
+		t.Errorf("ModPreset 计划动作 = %s，期望 create（恢复项勾选拍板）", actions[hub.KindModPreset])
 	}
 }

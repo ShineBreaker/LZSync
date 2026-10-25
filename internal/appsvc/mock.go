@@ -208,8 +208,9 @@ type mockCompare struct {
 }
 
 // mockPreviewRows hub → fork 投放预演样本（对 target=delta）：覆盖五类
-// 徽标、五类 kind（谱面集/难度不产独立对账行——难度生命周期挂集整集
-// 管理，§4.2，Mock 不伪造该数据面）与默认勾选规则。
+// 徽标、八类 kind（谱面集/难度/收藏/皮肤/成绩 + M3 设置类三类；难度不产
+// 独立对账行——难度生命周期挂集整集管理，§4.2，Mock 不伪造该数据面）
+// 与默认勾选规则。
 func mockPreviewRows() []DiffRow {
 	return []DiffRow{
 		{Kind: hub.KindCollection, ContentKey: "新谱面收藏", Category: CategoryCreate,
@@ -252,6 +253,14 @@ func mockPreviewRows() []DiffRow {
 		{Kind: hub.KindScore, ContentKey: "bh-gone|sc-0010", Category: CategoryRestore,
 			Summary: "成绩 fruits · 4242 分 · 2025-12-30", DefaultChecked: false,
 			DeletedAt: time.Now().Add(-24 * time.Hour).UnixMilli()},
+		// M3 设置类三类（§6.2 八类 Tab 数据面；摘要形态对齐 deploy 键级摘要）。
+		{Kind: hub.KindKeyBinding, ContentKey: "kb-global-editor-grid", Category: CategoryCreate,
+			Summary: "键位 全局 · EditorToggleGridSpace = Ctrl+G", DefaultChecked: true},
+		{Kind: hub.KindRulesetSetting, ContentKey: "rs-osu-hud", Category: CategoryConflict,
+			Summary: "规则集设置 osu · hud_position", DefaultChecked: true,
+			ConflictFields: []FieldDiff{{Field: "Value", HubValue: `"bottomleft"`, ForkValue: `"topright"`}}},
+		{Kind: hub.KindModPreset, ContentKey: "mp-osu-score", Category: CategoryCreate,
+			Summary: "模组预设 osu · Score Preset", DefaultChecked: true},
 	}
 }
 
@@ -365,7 +374,8 @@ func (m *mockCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, er
 			}
 		} else {
 			switch row.Kind {
-			case hub.KindCollection, hub.KindSkin, hub.KindScore, hub.KindBeatmapSet:
+			case hub.KindCollection, hub.KindSkin, hub.KindScore, hub.KindBeatmapSet,
+				hub.KindKeyBinding, hub.KindRulesetSetting, hub.KindModPreset:
 				switch row.Category {
 				case CategoryCreate, CategoryRestore: // 勾选恢复组 = 用户显式拍板投放并清 tombstone（§5.4）
 					item.Action = deploy.ActionCreate
@@ -378,7 +388,7 @@ func (m *mockCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, er
 				}
 			default:
 				item.Action, item.SkipReason = deploy.ActionSkip,
-					string(row.Kind)+" 投放属 M3 写路径（§5.1 分阶段启用）"
+					string(row.Kind)+" 投放属未开放写路径"
 			}
 		}
 		raw = append(raw, item)
@@ -520,7 +530,10 @@ func (m *mockSync) DeployCurrentPlan() (deploy.Report, error) {
 		return deploy.Report{Applied: applied, Skipped: mockSkipStats(plan), NotRun: notRun, BackupPath: backup}, context.Canceled
 	}
 	// 演示一次执行期改判（§3.3：现场复核与计划不符）。
-	report := deploy.Report{Applied: applied, Skipped: mockSkipStats(plan), BackupPath: backup}
+	// game.ini 白名单键同步的组合面演示（真实面经 deploy.SyncGameIni，
+	// appsvc realSync.DeployCurrentPlan 组合）。
+	report := deploy.Report{Applied: applied, Skipped: mockSkipStats(plan), BackupPath: backup,
+		GameIni: &deploy.GameIniResult{Applied: map[string]string{"ShowFpsDisplay": "true"}}}
 	if len(applied) > 0 {
 		first := applied[0]
 		report.Repointed = []deploy.RepointedItem{{

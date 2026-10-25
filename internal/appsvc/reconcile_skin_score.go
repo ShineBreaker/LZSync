@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"lzsync/internal/deploy"
 	"lzsync/internal/hub"
 )
 
@@ -184,4 +185,26 @@ func decodeReconcilePayloads(canonJSON, localJSON string, canon, fork any) error
 		return fmt.Errorf("解码 presence: %w", err)
 	}
 	return nil
+}
+
+// reconcileSettings M3 设置类三类对账（key_binding/ruleset_setting/
+// mod_preset，§5.1）：deploy.ReconcileSettings 的 appsvc 接线（预演面与
+// deploy 全量 BuildPlan 共源；Summary 自带键级摘要）。
+func (s *realCompare) reconcileSettings(ctx context.Context, forkID string) ([]hub.ReconcileItem, error) {
+	recs, err := deploy.ReconcileSettings(ctx, s.deps.Hub, forkID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]hub.ReconcileItem, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, hub.ReconcileItem{
+			Kind:       r.Kind,
+			ContentKey: r.ContentKey,
+			Summary:    r.Summary,
+			Category:   r.Category,
+			Restorable: r.Restorable,
+			DeletedAt:  r.DeletedAt,
+		})
+	}
+	return out, nil
 }

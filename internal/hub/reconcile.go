@@ -32,6 +32,7 @@ type ConflictField struct {
 type ReconcileItem struct {
 	Kind           EntityKind
 	ContentKey     string // 目标侧键（VersionUpdate 时 = 目标 presence 中的旧版本键）
+	Summary        string // 行摘要：hub 公共对账面不填（appsvc summarizer 生成），设置类过渡直查面自带键级摘要时填
 	Category       ReconcileCategory
 	ConflictFields []ConflictField // Conflict 时填充
 	IdentityKey    string          // VersionUpdate 时填充（online:/meta: 前缀）

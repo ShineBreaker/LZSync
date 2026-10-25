@@ -67,6 +67,7 @@ type Report struct {
 	NotRun          []PlanItem      // 未执行批清单（「从失败处重续」入口的输入）
 	Repointed       []RepointedItem // 执行期改判
 	GimmickWarnings []PlanItem      // 已提交的告警项（R6：delta gimmick 谱面流出告警，与预演一致呈现）
+	GameIni         *GameIniResult  // 组合投放的 game.ini 白名单键结果（appsvc DeployCurrentPlan 组合 SyncGameIni；nil = 本次未含 ini 段）
 	BackupPath      string          // 本次共用的写前备份路径
 }
 

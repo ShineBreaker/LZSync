@@ -142,7 +142,7 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	}
 	// M3 设置类三类对账（同上过渡承载）：key_binding / ruleset_setting /
 	// mod_preset 全部行 vs 目标 presence。
-	settings, err := reconcileSettings(ctx, h, target.ForkID)
+	settings, err := ReconcileSettings(ctx, h, target.ForkID)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -288,27 +288,27 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	// 语义与皮肤一致）。D20/D7/规则集可解析性不预演——执行期现场复核是
 	// 唯一防线（域数据待激活态 + 目标库现场才可判定的规则集行）。
 	for _, sr := range settings {
-		switch sr.category {
+		switch sr.Category {
 		case hub.ReconcileCreate:
-			if sr.restorable && !restore[sr.contentKey] {
+			if sr.Restorable && !restore[sr.ContentKey] {
 				continue // 恢复组默认排除（HB2：需用户显式勾选）
 			}
 			planItems = append(planItems, PlanItem{
-				Kind:       sr.kind,
-				ContentKey: sr.contentKey,
+				Kind:       sr.Kind,
+				ContentKey: sr.ContentKey,
 				Action:     ActionCreate,
-				Summary:    sr.summary,
-				Restore:    sr.restorable,
+				Summary:    sr.Summary,
+				Restore:    sr.Restorable,
 			})
 		case hub.ReconcileConflict:
 			planItems = append(planItems, PlanItem{
-				Kind:       sr.kind,
-				ContentKey: sr.contentKey,
+				Kind:       sr.Kind,
+				ContentKey: sr.ContentKey,
 				Action:     ActionUpdate,
-				Summary:    sr.summary,
+				Summary:    sr.Summary,
 			})
 		default:
-			return Plan{}, fmt.Errorf("deploy: %s 对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.kind, sr.category, sr.contentKey)
+			return Plan{}, fmt.Errorf("deploy: %s 对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.Kind, sr.Category, sr.ContentKey)
 		}
 	}
 	// §5.4 R6 预演：delta gimmick 谱面流出告警——计划含谱面集动作项时
@@ -465,14 +465,16 @@ func skinSummary(name string) string {
 	return "皮肤 " + strconv.Quote(name)
 }
 
-// settingsReconcile M3 设置类对账行（deploy 内过渡承载：与 skinReconcile
-// 同构；三类共用的形态）。
-type settingsReconcile struct {
-	kind       hub.EntityKind
-	contentKey string
-	summary    string
-	category   hub.ReconcileCategory
-	restorable bool
+// SettingsReconcile M3 设置类对账行（deploy 内过渡承载：与 skinReconcile
+// 同构；三类共用的形态）。appsvc 预演/计划面经 ReconcileSettings 消费——
+// 预览页三类行与全量 BuildPlan 共源（§6.2）。 
+type SettingsReconcile struct {
+	Kind       hub.EntityKind
+	ContentKey string
+	Summary    string
+	Category   hub.ReconcileCategory
+	Restorable bool
+	DeletedAt  int64 // Restorable 时的删除时间（Unix 毫秒）
 }
 
 // reconcileSettings M3 设置类三类对账（hub 真相 → 目标 fork，纯 SQL 只读，
@@ -480,7 +482,8 @@ type settingsReconcile struct {
 // 差集 → create（命中 tombstone 归恢复组）；presence 有键则比冲突字段
 // （§4.2：键位比 KeyCombination、设置比 Value、预设比 Description/ModsJson
 // ——内容键段本身不比），有差异 → conflict。
-func reconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]settingsReconcile, error) {
+// 导出供 appsvc 预演/计划面消费（deploy 全量 BuildPlan 同源）。
+func ReconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]SettingsReconcile, error) {
 	presOf := func(kind hub.EntityKind) (map[string]string, error) {
 		rows, err := h.DB().QueryContext(ctx,
 			`SELECT content_key, local_values FROM presence WHERE fork_id=? AND kind=?`, forkID, kind)
@@ -506,7 +509,7 @@ func reconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]sett
 		return nil, err
 	}
 
-	var out []settingsReconcile
+	var out []SettingsReconcile
 	// 每类：键提取（canonical 行 → 编码内容键 + 摘要）+ 冲突判据。
 	type spec struct {
 		kind     hub.EntityKind
@@ -603,9 +606,10 @@ func reconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]sett
 		for _, c := range canonRows {
 			local, inPres := pres[c.key]
 			if !inPres {
-				it := settingsReconcile{kind: sp.kind, contentKey: c.key, summary: c.summary, category: hub.ReconcileCreate}
-				if _, dead := tombKeys[c.key]; dead {
-					it.restorable = true
+				it := SettingsReconcile{Kind: sp.kind, ContentKey: c.key, Summary: c.summary, Category: hub.ReconcileCreate}
+				if deadAt, dead := tombKeys[c.key]; dead {
+					it.Restorable = true
+					it.DeletedAt = deadAt
 				}
 				out = append(out, it)
 				continue
@@ -615,7 +619,7 @@ func reconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]sett
 				return nil, err
 			}
 			if conflict {
-				out = append(out, settingsReconcile{kind: sp.kind, contentKey: c.key, summary: c.summary, category: hub.ReconcileConflict})
+				out = append(out, SettingsReconcile{Kind: sp.kind, ContentKey: c.key, Summary: c.summary, Category: hub.ReconcileConflict})
 			}
 		}
 	}

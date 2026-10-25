@@ -30,14 +30,18 @@ import (
 
 // reconcileKinds hub.ReconcileAgainst 已放开的对账类型（collection/
 // beatmap_set）；skin/score 的对账查询面尚未在 hub/diff 放开，由本层
-// reconcileSkins/reconcileScores 直查过渡承载（见 reconcile_skin_score.go）。
+// reconcileSkins/reconcileScores 直查过渡承载（见 reconcile_skin_score.go），
+// M3 设置类三类由 deploy.ReconcileSettings 过渡承载（同一文件）。
 var reconcileKinds = []hub.EntityKind{hub.KindCollection, hub.KindBeatmapSet}
 
 // uiKinds 预演/恢复组数据面覆盖的全部实体类型（§6.2 类型 Tab 的数据面：
-// 谱面集/难度/收藏/皮肤/成绩）。难度不产独立对账行——难度生命周期挂在
-// 可软删的父集上整集管理（§4.2），仅占 Tab 位与 tombstone 遍历。
+// 谱面集/难度/收藏/皮肤/成绩/键位/规则集设置/ModPreset 八类）。难度不产
+// 独立对账行——难度生命周期挂在可软删的父集上整集管理（§4.2），仅占
+// Tab 位与 tombstone 遍历；M3 设置类三类经 deploy.ReconcileSettings
+// 进预演面（不可见即不可勾选投放的缺口由此闭合）。
 var uiKinds = []hub.EntityKind{
 	hub.KindBeatmapSet, hub.KindBeatmap, hub.KindCollection, hub.KindSkin, hub.KindScore,
+	hub.KindKeyBinding, hub.KindRulesetSetting, hub.KindModPreset,
 }
 
 // allReconcileItems 组装 hub→fork 的全量对账结果：hub 公共对账面（两类）
@@ -57,6 +61,11 @@ func (s *realCompare) allReconcileItems(ctx context.Context, target string) ([]h
 		return nil, err
 	}
 	items = append(items, scores...)
+	settings, err := s.reconcileSettings(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	items = append(items, settings...)
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Kind != items[j].Kind {
 			return items[i].Kind < items[j].Kind
@@ -395,9 +404,11 @@ func (s *realCompare) DeletedEntries(target string) ([]DiffRow, error) {
 }
 
 // BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。
-// M2 动作面 = 收藏夹 + 谱面集（create/update/version-replace）+ 皮肤 +
-// 成绩（create/update）——与 deploy 执行面（writer_set/writer_skin/
-// writer_score）对齐；键位/规则集设置/ModPreset 属 M3 写路径（§5.1）。
+// 动作面 = 收藏夹 + 谱面集（create/update/version-replace）+ 皮肤 + 成绩
+//（create/update）+ M3 设置类三类（键位/规则集设置/ModPreset，
+// create/update）——与 deploy 执行面（writer_set/writer_skin/writer_score/
+// writer_setting）对齐（§5.1；预演面同源，三类经 allReconcileItems 可见
+// 即可勾选投放）。
 func (s *realCompare) BuildPlan(target string, sel []Selection) (deploy.Plan, error) {
 	if target == "" {
 		return deploy.Plan{}, errors.New("appsvc: 生成计划缺少目标 fork")
@@ -460,8 +471,11 @@ func planItemFrom(it hub.ReconcileItem, sum *summarizer) deploy.PlanItem {
 	item := deploy.PlanItem{
 		Kind:       it.Kind,
 		ContentKey: it.ContentKey,
-		Summary:    sum.summary(it.Kind, it.ContentKey),
+		Summary:    it.Summary, // 过渡直查面（设置类）自带键级摘要；公共面为空回落 summarizer
 		Restore:    it.Restorable,
+	}
+	if item.Summary == "" {
+		item.Summary = sum.summary(it.Kind, it.ContentKey)
 	}
 	// 版本更新（谱面集专属语义，§4.4）：强键默认执行；弱键勾选即拍板。
 	if it.Category == hub.ReconcileVersionUpdate {
@@ -474,7 +488,8 @@ func planItemFrom(it hub.ReconcileItem, sum *summarizer) deploy.PlanItem {
 		return item
 	}
 	switch it.Kind {
-	case hub.KindCollection, hub.KindSkin, hub.KindScore:
+	case hub.KindCollection, hub.KindSkin, hub.KindScore,
+		hub.KindKeyBinding, hub.KindRulesetSetting, hub.KindModPreset:
 		// 无版本链实体：create（恢复组勾选即拍板）/conflict（默认 hub 覆盖，
 		// 就地更新白名单列，§5.4）；无版本更新语义。
 		switch it.Category {
@@ -579,7 +594,10 @@ func reconcileToRow(it hub.ReconcileItem, sum *summarizer) DiffRow {
 		}
 	}
 	row.DefaultChecked = checked
-	row.Summary = sum.summary(it.Kind, it.ContentKey)
+	row.Summary = it.Summary
+	if row.Summary == "" {
+		row.Summary = sum.summary(it.Kind, it.ContentKey)
+	}
 	return row
 }
 
@@ -744,6 +762,20 @@ func (s *realSync) DeployCurrentPlan() (deploy.Report, error) {
 		s.prog(ProgressEvent{Service: "deploy", Stage: string(stage), Current: current, Total: total,
 			At: time.Now(), Message: fmt.Sprintf("批 %d/%d · %s：%d/%d", batchIndex, batchTotal, stageLabel(stage), current, total)})
 	})
+	if err == nil {
+		// game.ini 白名单键同步（§5.1-M3/S12，deploy/gameini.go 的设计
+		// 意图：与 Deploy 组合完成一次投放）。源 = 快照最新的非目标 fork；
+		// 未配置 ini 面或无源快照时不做 ini 段（如实无键可投）。
+		if s.deps.GameIni != nil {
+			if src := s.gameIniSourceFork(plan.TargetFork); src != "" {
+				gi, giErr := deploy.SyncGameIni(plan.Target, src, s.deps.GameIni, s.deps.Backups, s.deps.Guard)
+				if giErr != nil {
+					return report, giErr
+				}
+				report.GameIni = &gi
+			}
+		}
+	}
 	if report.Skipped == nil {
 		report.Skipped = []hub.SkipStat{}
 	}
@@ -809,6 +841,26 @@ func (s *realSync) dRunner() *deploy.Runner {
 		})
 	}
 	return s.dRun
+}
+
+// gameIniSourceFork 选 game.ini 快照源（deploy/gameini.go 的 source fork
+// 决策）：注册表内非目标 fork 中快照最新者——ini 键无版本链，LastWrite-
+// wins 的保守近似。无任何源快照返回空（跳过 ini 段）。
+func (s *realSync) gameIniSourceFork(target string) string {
+	best, bestAt := "", time.Time{}
+	for _, ref := range s.reg.all() {
+		if ref.ForkID == target {
+			continue
+		}
+		_, at, ok, err := s.deps.GameIni.Load(ref.ForkID)
+		if err != nil || !ok {
+			continue
+		}
+		if best == "" || at.After(bestAt) {
+			best, bestAt = ref.ForkID, at
+		}
+	}
+	return best
 }
 
 // guardClear 守卫预检：名单内进程在运行即拒绝（S5 友好提示先行）。

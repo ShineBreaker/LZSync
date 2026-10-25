@@ -1,5 +1,6 @@
 // 对比预览页（§6.2）：模式选择（hub→fork 投放预演 / fork↔fork 快照对比）、
-// 类型 Tab（谱面集/难度/收藏/皮肤/成绩）与分类筛选、「需用户确认」分组
+// 类型 Tab（谱面集/难度/收藏/皮肤/成绩/键位/规则集设置/ModPreset）与
+// 分类筛选、「需用户确认」分组
 //（元数据弱键，默认不勾选）、差异列表（分类徽标含「恢复（已删除）」与
 // 强/弱键标注、行级勾选、冲突字段展开）、底部统计条（N 条同步 / M 条
 // 跳过·k 类原因）、生成投放计划。
@@ -13,8 +14,9 @@ interface RowState {
   checked: boolean;
 }
 
-/** 类型 Tab（§6.2 数据面五类 + 全部；「全部」默认不含成绩——成绩量大且
- * 常需单独审视，对齐 EZRealmSync 的 EntityKindFilter.All 语义）。 */
+/** 类型 Tab（§6.2 数据面八类 + 全部；「全部」默认不含成绩——成绩量大且
+ * 常需单独审视，对齐 EZRealmSync 的 EntityKindFilter.All 语义；M3 设置类
+ * 三类经 appsvc 预演面可见即可勾选投放）。 */
 const KIND_TABS = [
   { id: "all", label: "全部" },
   { id: "beatmap_set", label: "谱面集" },
@@ -22,6 +24,9 @@ const KIND_TABS = [
   { id: "collection", label: "收藏夹" },
   { id: "skin", label: "皮肤" },
   { id: "score", label: "成绩" },
+  { id: "key_binding", label: "键位" },
+  { id: "ruleset_setting", label: "规则集设置" },
+  { id: "mod_preset", label: "ModPreset" },
 ] as const;
 
 /** 分类筛选（纯结果筛选，§6.2）。 */

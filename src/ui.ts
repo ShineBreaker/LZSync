@@ -79,6 +79,12 @@ export function kindLabel(kind: string): string {
       return "皮肤";
     case "score":
       return "成绩";
+    case "key_binding":
+      return "键位";
+    case "ruleset_setting":
+      return "规则集设置";
+    case "mod_preset":
+      return "ModPreset";
     default:
       return kind;
   }
