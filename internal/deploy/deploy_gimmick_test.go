@@ -223,3 +223,34 @@ func TestOsuGimmickSectionScan(t *testing.T) {
 		t.Error("空路径（非规范哈希）应报错")
 	}
 }
+
+
+// TestGimmickSectionHeadersFromProfiles R6 名单数据化验收：专有 section
+// 头来自 ForkProfile 数据面（delta 的两个头在列），内核不再硬编码 fork
+// 知识（§4.3：新增第五 fork = 只落 Profile 数据，内核零改动）。
+func TestGimmickSectionHeadersFromProfiles(t *testing.T) {
+	dp, ok := forks.Profile("delta")
+	if !ok {
+		t.Fatal("forks.Profile(delta) 未注册")
+	}
+	want := []string{"[BeatmapSectionGimmicks]", "[BeatmapHitObjectGimmicks]"}
+	if len(dp.GimmickSectionHeaders) != len(want) || dp.GimmickSectionHeaders[0] != want[0] || dp.GimmickSectionHeaders[1] != want[1] {
+		t.Errorf("delta Profile GimmickSectionHeaders = %v（期望 fork-delta §5.1 的 %v）", dp.GimmickSectionHeaders, want)
+	}
+	got := gimmickSectionHeaders()
+	if len(got) == 0 {
+		t.Fatalf("专有 section 头聚合名单为空（期望含 delta 的 %v）", want)
+	}
+	for _, w := range want {
+		found := false
+		for _, h := range got {
+			if h == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("聚合名单 %v 缺 %s（数据链路：Profile → forks.All() → 聚合）", got, w)
+		}
+	}
+}

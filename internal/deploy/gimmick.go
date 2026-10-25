@@ -23,16 +23,21 @@ import (
 	"strings"
 
 	"lzsync/internal/filestore"
+	"lzsync/internal/forks"
 	"lzsync/internal/hub"
 )
 
-// gimmickSectionHeaders delta 端编辑保存产生的两个 .osu section 头
-// （fork-delta §5.1）。adapter 规则数据（§3 adapter 模块在本包的过渡
-// 承载位，externalSetHash 的同构）；forks 增补 ForkProfile 数据面后
-// 应切换。
-var gimmickSectionHeaders = []string{
-	"[BeatmapSectionGimmicks]",
-	"[BeatmapHitObjectGimmicks]",
+// gimmickSectionHeaders fork 专有 .osu section 头名单（ForkProfile 数据
+// 面，externalSetHash 的同构数据化）：任一 Profile 声明的并集——扫描
+// 是内容事实判定（任何来源的集含专有 section 头都应告警），不按
+// origin_fork 取。新增第五 fork 带同类专有 section = 只落 Profile 数据，
+// 内核零改动。
+func gimmickSectionHeaders() []string {
+	var out []string
+	for _, p := range forks.All() {
+		out = append(out, p.GimmickSectionHeaders...)
+	}
+	return out
 }
 
 // gimmickWarningText 命中谱面集的告警文案（预演、执行报告与 UI 一致
@@ -124,7 +129,7 @@ func osuHasGimmickSection(path string) (bool, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		for _, header := range gimmickSectionHeaders {
+		for _, header := range gimmickSectionHeaders() {
 			if line == header {
 				return true, nil
 			}

@@ -52,6 +52,11 @@ type ForkProfile struct {
 	// §5.1；收集侧跳过 + 投放侧对 hub 已收行的防线判定，D5）。空 = 无
 	// 此机制。
 	ExtSetHashPrefix string
+	// GimmickSectionHeaders 本 fork 编辑保存写入的 .osu 专有 section 头
+	//（delta 的 [BeatmapSectionGimmicks]/[BeatmapHitObjectGimmicks]，
+	// fork-delta §5.1）。非空 = 含该头的谱面集流出本端生态时逐集告警
+	//（R6：官方编辑器重新保存会静默丢弃该节）。空 = 无此机制。
+	GimmickSectionHeaders []string
 	// MarketRulesetMinOnlineID 规则集市场的 OnlineID 下界（g0v0：服务端
 	// 市场第三方规则集 OnlineID >= 10 落库，fork-g0v0 §2.1）。> 0 时指向
 	// 该域规则集的成绩在收集侧跳过（D8）。0 = 无市场机制。
@@ -154,6 +159,8 @@ var profiles = []ForkProfile{
 		// Realm 与官方同构（fork-delta §2）：mod/HitResult 名录随官方基线。
 		ModAcronyms:    officialModAcronyms,
 		StatisticsKeys: officialStatisticsKeys,
+		// 专有 .osu section 头（fork-delta §5.1）：R6 告警的数据锚。
+		GimmickSectionHeaders: []string{"[BeatmapSectionGimmicks]", "[BeatmapHitObjectGimmicks]"},
 		IniKeys: IniKeyPolicy{
 			Own: []string{ // fork 新增 6 键（fork-delta §3.1，官方不识别）
 				"MenuCursorFromSkin", "MenuCursorFromSkinConfirmed", "MenuCursorFromSkinSize",
