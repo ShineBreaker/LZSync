@@ -71,8 +71,9 @@ func TestSyncableKeysExcludesTargetOwn(t *testing.T) {
 }
 
 func TestSyncableKeysUnknownForkDegrades(t *testing.T) {
-	// 未注册 fork 的零值 Profile：排除自然为空，共有集照常（投放侧
-	// SyncFile 的执行期复核仍是防线）。
+	// 未注册 fork 的零值 Profile：排除自然为空，共有集照常（引擎不
+	// 内置名单，函数保留纯函数语义；调用侧〔collect/deploy〕以 Profile
+	// 命中为前提，未注册即拒绝）。
 	unknown := forks.ForkProfile{ID: "custom"}
 	got := CollectableKeys(unknown)
 	if len(got) != len(SharedKeys()) {

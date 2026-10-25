@@ -153,3 +153,19 @@ func TestSyncGameIniAppliesWhitelist(t *testing.T) {
 		t.Errorf("lazer 目标的 delta Own 键行应原样，got %q", v)
 	}
 }
+
+
+func TestSyncGameIniUnknownForkRejected(t *testing.T) {
+	store := mustStore(t)
+	// 目标端未注册：零值 Profile 会使 SyncFile 复核排除面全空（红灯键
+	// 可写入，S10 违反）——以 Profile 命中为前提，拒绝。
+	if _, err := SyncGameIni(forks.LibraryRef{ForkID: "ghost", DataDir: t.TempDir()},
+		"delta", store, nil, nil); err == nil {
+		t.Fatal("目标端未注册 fork 应拒绝")
+	}
+	// 源端未注册：同步策略（源端 Own/红灯面）无从取数，同样拒绝。
+	if _, err := SyncGameIni(forks.LibraryRef{ForkID: "lazer", DataDir: t.TempDir()},
+		"ghost", store, nil, nil); err == nil {
+		t.Fatal("源端未注册 fork 应拒绝")
+	}
+}

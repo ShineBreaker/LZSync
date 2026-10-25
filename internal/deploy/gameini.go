@@ -42,6 +42,18 @@ func SyncGameIni(target forks.LibraryRef, sourceFork string,
 		skip("game.ini 快照仓未配置（本次不含 ini 面）")
 		return res, nil
 	}
+	// 未注册 fork 拒绝（收/写两侧都以 Profile 命中为前提，先于快照
+	// 读取的参数级校验）：零值 Profile 使 SyncFile 复核的排除面全空
+	//（红灯/专有键可写入，S10 违反）——源端策略（Own/红灯面）同样
+	// 是 SyncableKeys 的输入。
+	srcProf, srcOK := forks.Profile(sourceFork)
+	if !srcOK {
+		return res, fmt.Errorf("deploy: 源端 fork %q 未注册（game.ini 同步策略无从取数，拒绝）", sourceFork)
+	}
+	tgtProf, tgtOK := forks.Profile(target.ForkID)
+	if !tgtOK {
+		return res, fmt.Errorf("deploy: 目标 fork %q 未注册（game.ini 同步策略无从取数，拒绝）", target.ForkID)
+	}
 	if g != nil {
 		if err := g.EnsureClear(); err != nil {
 			return res, err
@@ -55,8 +67,7 @@ func SyncGameIni(target forks.LibraryRef, sourceFork string,
 		skip("源端 " + sourceFork + " 无 game.ini 快照（未收集或源端从未启动过客户端）")
 		return res, nil
 	}
-	prof, _ := forks.Profile(target.ForkID) // 未注册 fork 的零值策略由 SyncFile 复核兜底
-	sync, err := inisettings.SyncFile(prof,
+	sync, err := inisettings.SyncFile(srcProf, tgtProf,
 		filepath.Join(target.DataDir, inisettings.GameIniName), values, backups)
 	if err != nil {
 		return res, fmt.Errorf("deploy: 写 %s 端 game.ini: %w", target.ForkID, err)

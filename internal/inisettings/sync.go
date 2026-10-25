@@ -63,14 +63,16 @@ func CollectFile(path string, source forks.ForkProfile) (map[string]string, bool
 // SyncFile 把 canonical 键值写入目标端 game.ini（S12）：
 //  1. 目标文件不存在 → 跳过计数（目标端从未启动过客户端，无 ini 可写，
 //     绝不凭空创建）；
-//  2. 执行期复核（§3.3 纪律）：canonical 中白名单外/红灯/目标端专有键
-//     一律拒写并计数（正常计划已在收集面滤除，此处是防线）；
+//  2. 执行期复核（§3.3 纪律，SyncableKeys 语义）：canonical 中白名单
+//     外/任一端红灯/任一端专有键一律拒写并计数（正常计划已在收集面
+//     滤除，此处是防线——源端面亦在此复核：前置滤除依赖收集时的
+//     Profile 数据，某端 Own/红灯名单扩充后旧快照仍可漏出）；
 //  3. 值一致 → 幂等跳过；值变化 → 就地替换值区间（其余字节不变）；
 //     目标缺键 → 文件末尾追加；
 //  4. 无落地键 → no-op（不写不备份）；有落地 → 写前备份原件（guard
 //     时间戳备份复用；未配置备份目录退化为同目录时间戳副本，S2 语义）
 //     → 临时文件 → rename 原子替换。
-func SyncFile(target forks.ForkProfile, path string, values map[string]string, backups *guard.Backups) (SyncResult, error) {
+func SyncFile(source, target forks.ForkProfile, path string, values map[string]string, backups *guard.Backups) (SyncResult, error) {
 	res := SyncResult{Applied: map[string]string{}}
 	skips := map[string]int{}
 	skip := func(reason string) { skips[reason]++ }
@@ -84,8 +86,9 @@ func SyncFile(target forks.ForkProfile, path string, values map[string]string, b
 		return res, fmt.Errorf("inisettings: 读 %s: %w", path, err)
 	}
 
-	// 执行期复核：同步面 = 共有 − 红灯 − 目标专有。红灯优先归类（S10
-	// 的一等人话原因），其余按白名单外计数。
+	// 执行期复核：同步面 = 共有 − 两端红灯 − 两端专有（SyncableKeys
+	// 的语义，保留人话原因分类）。红灯优先归类（S10 的一等人话原因），
+	// 其余按白名单外计数。
 	names := make([]string, 0, len(values))
 	for k := range values {
 		names = append(names, k)
@@ -97,8 +100,10 @@ func SyncFile(target forks.ForkProfile, path string, values map[string]string, b
 		switch {
 		case !IsShared(k):
 			skip("白名单外键 " + k + "（不同步）")
-		case IsRedLight(target, k):
+		case IsRedLight(source, k) || IsRedLight(target, k):
 			skip("红灯键 " + k + "（S10 硬锁，绝不同步）")
+		case isOwn(source, k):
+			skip("源端专有键 " + k + "（Own，不同步）")
 		case isOwn(target, k):
 			skip("目标端专有键 " + k + "（Own，不同步）")
 		default:

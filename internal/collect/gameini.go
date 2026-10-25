@@ -7,6 +7,7 @@ package collect
 //（投影失败时 ini 快照同样不落）。
 
 import (
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -17,7 +18,13 @@ import (
 // collectGameIni 读源端 game.ini 白名单键入快照仓。返回收集键数；
 // 源端无 game.ini（从未启动过客户端）返回 -1（调用方按正常态计数）。
 func collectGameIni(ref forks.LibraryRef, store *inisettings.Store) (int, error) {
-	prof, _ := forks.Profile(ref.ForkID) // 未注册 fork 的零值策略自然放行
+	// 未注册 fork 拒绝（收/写两侧都以 Profile 命中为前提）：零值
+	// Profile 使 CollectableKeys 排除面全空——Token/Username/
+	// ReleaseStream 红灯键会原样入快照（S10 违反）。
+	prof, ok := forks.Profile(ref.ForkID)
+	if !ok {
+		return 0, fmt.Errorf("collect: fork %q 未注册（game.ini 白名单策略无从取数，拒绝收集）", ref.ForkID)
+	}
 	values, found, err := inisettings.CollectFile(gameIniPath(ref), prof)
 	if err != nil {
 		return 0, err

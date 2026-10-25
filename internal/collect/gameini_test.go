@@ -84,3 +84,20 @@ func TestCollectGameIniDeltaOwnExcluded(t *testing.T) {
 		t.Error("delta Own 键不应被 delta 源收集")
 	}
 }
+
+
+func TestCollectGameIniUnknownForkRejected(t *testing.T) {
+	// 未注册 fork 的零值 Profile 使 CollectableKeys 排除面全空——红灯
+	// 键会原样入快照（S10 违反）；收集以 Profile 命中为前提，拒绝而非
+	// 降级放行。
+	store, err := inisettings.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectGameIni(forks.LibraryRef{ForkID: "ghost", DataDir: t.TempDir()}, store); err == nil {
+		t.Fatal("未注册 fork 应拒绝收集")
+	}
+	if _, _, ok, _ := store.Load("ghost"); ok {
+		t.Error("拒绝的收集不应落任何快照")
+	}
+}

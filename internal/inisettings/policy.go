@@ -110,7 +110,8 @@ func isOwn(p forks.ForkProfile, key string) bool {
 }
 
 // CollectableKeys 源端收集面：四端共有键 − 源端红灯键 − 源端专有键。
-// 未注册 fork 的零值 Profile 使排除自然为空（引擎不内置 fork 知识）。
+// 未注册 fork 的零值 Profile 使排除自然为空（引擎不内置 fork 知识；
+// 调用侧以 Profile 命中为前提——collect/deploy 未注册即拒绝）。
 func CollectableKeys(p forks.ForkProfile) map[string]bool {
 	out := make(map[string]bool, len(sharedKeys))
 	for k := range sharedKeys {

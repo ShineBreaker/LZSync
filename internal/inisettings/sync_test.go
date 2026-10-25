@@ -83,7 +83,7 @@ func TestSyncFileWhitelistOnly(t *testing.T) {
 	path, backups := setupSync(t)
 	before, _ := os.ReadFile(path)
 
-	res, err := SyncFile(lazerProfile(t), path, canonical, backups)
+	res, err := SyncFile(lazerProfile(t), lazerProfile(t), path, canonical, backups)
 	if err != nil {
 		t.Fatalf("SyncFile: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestSyncFileWhitelistOnly(t *testing.T) {
 func TestSyncFileTargetMissingSkips(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "game.ini")
-	res, err := SyncFile(lazerProfile(t), path, canonical, nil)
+	res, err := SyncFile(lazerProfile(t), lazerProfile(t), path, canonical, nil)
 	if err != nil {
 		t.Fatalf("SyncFile: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestSyncFileIdempotentNoop(t *testing.T) {
 	path, backups := setupSync(t)
 	// 全部值与目标一致 → no-op：不写、不备份。
 	same := map[string]string{"ShowStoryboard": "false", "MenuMusic": "true"}
-	res, err := SyncFile(lazerProfile(t), path, same, backups)
+	res, err := SyncFile(lazerProfile(t), lazerProfile(t), path, same, backups)
 	if err != nil {
 		t.Fatalf("SyncFile: %v", err)
 	}
@@ -193,14 +193,14 @@ func TestSyncFileIdempotentNoop(t *testing.T) {
 		t.Errorf("no-op 后备份目录应有 0 项，got %d", got)
 	}
 	// 二次同步（有变化的）后再跑一次同值 → 幂等。
-	res2, err := SyncFile(lazerProfile(t), path, map[string]string{"ShowStoryboard": "true"}, backups)
+	res2, err := SyncFile(lazerProfile(t), lazerProfile(t), path, map[string]string{"ShowStoryboard": "true"}, backups)
 	if err != nil {
 		t.Fatalf("首次写入: %v", err)
 	}
 	if res2.Applied["ShowStoryboard"] != "true" {
 		t.Fatalf("首次应落地，got %v", res2.Applied)
 	}
-	res3, err := SyncFile(lazerProfile(t), path, map[string]string{"ShowStoryboard": "true"}, backups)
+	res3, err := SyncFile(lazerProfile(t), lazerProfile(t), path, map[string]string{"ShowStoryboard": "true"}, backups)
 	if err != nil {
 		t.Fatalf("重跑: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestSyncFileCrashBeforeRename(t *testing.T) {
 	beforeRenameHook = func() error { return errors.New("注入：rename 前崩溃") }
 	defer func() { beforeRenameHook = nil }()
 
-	_, err := SyncFile(lazerProfile(t), path, map[string]string{"ShowStoryboard": "true"}, backups)
+	_, err := SyncFile(lazerProfile(t), lazerProfile(t), path, map[string]string{"ShowStoryboard": "true"}, backups)
 	if err == nil || !strings.Contains(err.Error(), "原文件未动") {
 		t.Fatalf("崩溃注入应返回错误，got %v", err)
 	}
@@ -323,4 +323,40 @@ func dirEntries(t *testing.T, dir string) []string {
 func backupDirEntries(t *testing.T, b *guard.Backups) []string {
 	t.Helper()
 	return dirEntries(t, b.Dir)
+}
+
+
+// TestSyncFileSourcePolicyRecheck 投放复核的源端面（SyncableKeys 语义）：
+// 收集侧前置滤除依赖收集时的 Profile 数据，未来某端 Own/红灯名单扩充后
+// 旧快照仍可漏出——SyncFile 必须独立复核源端 Own 与红灯。
+func TestSyncFileSourcePolicyRecheck(t *testing.T) {
+	path, backups := setupSync(t)
+	// 构造 Profile 模拟「共有键被收编为源端 Own / 新增源端红灯」。
+	src := forks.ForkProfile{
+		ID: "test-src",
+		IniKeys: forks.IniKeyPolicy{
+			Own:    []string{"Ruleset"},        // 共有键 → 源端专有拒写
+			Locked: []string{"ShowStoryboard"}, // 共有键 → 源端红灯拒写
+		},
+	}
+	res, err := SyncFile(src, lazerProfile(t), path, map[string]string{
+		"Ruleset":        "fruits",
+		"ShowStoryboard": "true",
+	}, backups)
+	if err != nil {
+		t.Fatalf("SyncFile: %v", err)
+	}
+	if len(res.Applied) != 0 {
+		t.Errorf("Applied = %v（期望空——源端 Own/红灯键全部拒写）", res.Applied)
+	}
+	if len(res.Skipped) != 2 {
+		t.Fatalf("Skipped = %+v（期望源端专有+源端红灯各 1 条）", res.Skipped)
+	}
+	// sortedSkips 按字符串序：「源端专有键 …」<「红灯键 …」。
+	if !strings.Contains(res.Skipped[0].Reason, "源端专有键 Ruleset") {
+		t.Errorf("Skipped[0] = %q（期望源端专有键 Ruleset）", res.Skipped[0].Reason)
+	}
+	if !strings.Contains(res.Skipped[1].Reason, "红灯键 ShowStoryboard") {
+		t.Errorf("Skipped[1] = %q（期望红灯键 ShowStoryboard）", res.Skipped[1].Reason)
+	}
 }
