@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" font-family="system-ui,-apple-system,'Segoe UI',sans-serif">
+  <rect width="1200" height="480" fill="#0e1116"/>
+
+  <text x="48" y="52" font-size="28" font-weight="700" fill="#e9edf3">LZSync 图标</text>
+  <text x="48" y="78" font-size="14" fill="#8b93a1">选定方向 C：三段圆弧箭头循环（同步语义）· 四色节点去掉，箭头即端点</text>
+
+  <!-- 主图标 220px -->
+  <g transform="translate(48,110)">
+    <rect width="220" height="220" rx="52" fill="#1d232c"/>
+    <!-- 三段箭头循环：青→紫→粉 顺时针 -->
+    <!-- 段1 顶部 青（0°→120°） -->
+    <path d="M110 54 a56 56 0 0 1 48.5 84" fill="none" stroke="#57c8e8" stroke-width="16" stroke-linecap="round"/>
+    <path d="M158 138 l-16 4 8 16 z" fill="#57c8e8"/>
+    <!-- 段2 右下 紫（120°→240°） -->
+    <path d="M158.5 138 a56 56 0 0 1 -97 0" fill="none" stroke="#7c6cf0" stroke-width="16" stroke-linecap="round"/>
+    <path d="M62 138 l16 4 -8 16 z" fill="#7c6cf0"/>
+    <!-- 段3 左回顶 粉（240°→360°） -->
+    <path d="M61.5 138 a56 56 0 0 1 48.5 -84" fill="none" stroke="#ff7eb6" stroke-width="16" stroke-linecap="round"/>
+    <path d="M110 54 l-14 10 18 8 z" fill="#ff7eb6"/>
+    <!-- 中心点（hub） -->
+    <circle cx="110" cy="116" r="10" fill="#e9edf3"/>
+    <text x="110" y="248" font-size="12" fill="#6b7280" text-anchor="middle">三段顺时针箭头 = 收集→投放→再收集</text>
+  </g>
+
+  <!-- 缩略预览 -->
+  <g transform="translate(340,110)">
+    <text x="0" y="-8" font-size="12" font-weight="600" fill="#aab2bf">实尺寸</text>
+    <!-- 128 -->
+    <rect y="10" width="128" height="128" rx="30" fill="#1d232c"/>
+    <g transform="translate(0,10) scale(0.582)">
+      <path d="M110 54 a56 56 0 0 1 48.5 84" fill="none" stroke="#57c8e8" stroke-width="16" stroke-linecap="round"/>
+      <path d="M158 138 l-16 4 8 16 z" fill="#57c8e8"/>
+      <path d="M158.5 138 a56 56 0 0 1 -97 0" fill="none" stroke="#7c6cf0" stroke-width="16" stroke-linecap="round"/>
+      <path d="M62 138 l16 4 -8 16 z" fill="#7c6cf0"/>
+      <path d="M61.5 138 a56 56 0 0 1 48.5 -84" fill="none" stroke="#ff7eb6" stroke-width="16" stroke-linecap="round"/>
+      <path d="M110 54 l-14 10 18 8 z" fill="#ff7eb6"/>
+      <circle cx="110" cy="116" r="10" fill="#e9edf3"/>
+    </g>
+    <!-- 64 -->
+    <rect x="152" y="10" width="64" height="64" rx="15" fill="#1d232c"/>
+    <g transform="translate(152,10) scale(0.291)">
+      <path d="M110 54 a56 56 0 0 1 48.5 84" fill="none" stroke="#57c8e8" stroke-width="16" stroke-linecap="round"/>
+      <path d="M158 138 l-16 4 8 16 z" fill="#57c8e8"/>
+      <path d="M158.5 138 a56 56 0 0 1 -97 0" fill="none" stroke="#7c6cf0" stroke-width="16" stroke-linecap="round"/>
+      <path d="M62 138 l16 4 -8 16 z" fill="#7c6cf0"/>
+      <path d="M61.5 138 a56 56 0 0 1 48.5 -84" fill="none" stroke="#ff7eb6" stroke-width="16" stroke-linecap="round"/>
+      <path d="M110 54 l-14 10 18 8 z" fill="#ff7eb6"/>
+      <circle cx="110" cy="116" r="10" fill="#e9edf3"/>
+    </g>
+    <!-- 32 -->
+    <rect x="230" y="10" width="32" height="32" rx="8" fill="#1d232c"/>
+    <g transform="translate(230,10) scale(0.145)">
+      <path d="M110 54 a56 56 0 0 1 48.5 84" fill="none" stroke="#57c8e8" stroke-width="16" stroke-linecap="round"/>
+      <path d="M158 138 l-16 4 8 16 z" fill="#57c8e8"/>
+      <path d="M158.5 138 a56 56 0 0 1 -97 0" fill="none" stroke="#7c6cf0" stroke-width="16" stroke-linecap="round"/>
+      <path d="M62 138 l16 4 -8 16 z" fill="#7c6cf0"/>
+      <path d="M61.5 138 a56 56 0 0 1 48.5 -84" fill="none" stroke="#ff7eb6" stroke-width="16" stroke-linecap="round"/>
+      <path d="M110 54 l-14 10 18 8 z" fill="#ff7eb6"/>
+      <circle cx="110" cy="116" r="10" fill="#e9edf3"/>
+    </g>
+    <!-- 16 -->
+    <rect x="278" y="10" width="16" height="16" rx="4" fill="#1d232c"/>
+    <g transform="translate(278,10) scale(0.073)">
+      <path d="M110 54 a56 56 0 0 1 48.5 84" fill="none" stroke="#57c8e8" stroke-width="16" stroke-linecap="round"/>
+      <path d="M158 138 l-16 4 8 16 z" fill="#57c8e8"/>
+      <path d="M158.5 138 a56 56 0 0 1 -97 0" fill="none" stroke="#7c6cf0" stroke-width="16" stroke-linecap="round"/>
+      <path d="M62 138 l16 4 -8 16 z" fill="#7c6cf0"/>
+      <path d="M61.5 138 a56 56 0 0 1 48.5 -84" fill="none" stroke="#ff7eb6" stroke-width="16" stroke-linecap="round"/>
+      <path d="M110 54 l-14 10 18 8 z" fill="#ff7eb6"/>
+      <circle cx="110" cy="116" r="10" fill="#e9edf3"/>
+    </g>
+    <text x="0" y="160" font-size="10" fill="#6b7280">16px 下三箭头仍可读</text>
+  </g>
+
+  <!-- 备选：实色底 -->
+  <g transform="translate(660,110)">
+    <text x="0" y="-8" font-size="12" font-weight="600" fill="#aab2bf">备选 · 浅底</text>
+    <rect y="10" width="220" height="220" rx="52" fill="#e9edf3"/>
+    <g transform="translate(0,10)">
+      <path d="M110 54 a56 56 0 0 1 48.5 84" fill="none" stroke="#2a9ab8" stroke-width="16" stroke-linecap="round"/>
+      <path d="M158 138 l-16 4 8 16 z" fill="#2a9ab8"/>
+      <path d="M158.5 138 a56 56 0 0 1 -97 0" fill="none" stroke="#5a4ad0" stroke-width="16" stroke-linecap="round"/>
+      <path d="M62 138 l16 4 -8 16 z" fill="#5a4ad0"/>
+      <path d="M61.5 138 a56 56 0 0 1 48.5 -84" fill="none" stroke="#d04a86" stroke-width="16" stroke-linecap="round"/>
+      <path d="M110 54 l-14 10 18 8 z" fill="#d04a86"/>
+      <circle cx="110" cy="116" r="10" fill="#161b22"/>
+    </g>
+    <text x="110" y="248" font-size="12" fill="#6b7280" text-anchor="middle">浅色任务栏 / 通知图标备用</text>
+  </g>
+
+  <text x="920" y="130" font-size="13" font-weight="600" fill="#aab2bf">语义映射</text>
+  <g transform="translate(920,148)" font-size="11" fill="#aab2bf">
+    <text y="0">三段箭头首尾相衔</text>
+    <text y="20" fill="#6b7280">↻ 数据在客户端间流转</text>
+    <text y="48">中心圆点</text>
+    <text y="68" fill="#6b7280">hub（SQLite 真相源）</text>
+    <text y="96">青/紫/粉</text>
+    <text y="116" fill="#6b7280">品牌三色</text>
+  </g>
+
+  <text x="48" y="440" font-size="12" fill="#6b7280">搬 Figma：箭头段在 SVG 里是 path+三角，直接拆图层改 stroke 或换色即可。</text>
+</svg>

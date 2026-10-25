@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" font-family="system-ui,-apple-system,'Segoe UI',sans-serif">
+  <rect width="1200" height="720" fill="#0e1116"/>
+
+  <text x="48" y="56" font-size="28" font-weight="700" fill="#e9edf3">LZSync Design Tokens</text>
+  <text x="48" y="82" font-size="14" fill="#8b93a1">搬进 Figma 后建议建成 Variables，命名沿用左侧标签 · v2：fork 色降为「指示点」而非主视觉</text>
+
+  <!-- ============ 品牌色 ============ -->
+  <text x="48" y="132" font-size="13" font-weight="600" fill="#aab2bf" letter-spacing="1.5">BRAND</text>
+  <g transform="translate(48,148)">
+    <rect width="180" height="72" rx="10" fill="#7c6cf0"/>
+    <text x="12" y="26" font-size="13" font-weight="600" fill="#fff">brand-500</text>
+    <text x="12" y="46" font-size="12" fill="#cfc5ff">#7C6CF0 主强调</text>
+    <text x="12" y="62" font-size="11" fill="#9d8ff5">按钮/激活态/选中行</text>
+  </g>
+  <g transform="translate(240,148)">
+    <rect width="180" height="72" rx="10" fill="#57c8e8"/>
+    <text x="12" y="26" font-size="13" font-weight="600" fill="#08222b">brand-400</text>
+    <text x="12" y="46" font-size="12" fill="#084652">#57C8E8 辅助强调</text>
+    <text x="12" y="62" font-size="11" fill="#0a5a6e">辅助强调</text>
+  </g>
+  <g transform="translate(432,148)">
+    <rect width="180" height="72" rx="10" fill="#7c6cf0"/>
+    <text x="12" y="26" font-size="13" font-weight="600" fill="#fff">brand-accent</text>
+    <text x="12" y="46" font-size="12" fill="#e6e0ff">主强调 #7C6CF0</text>
+    <text x="12" y="62" font-size="11" fill="#b7aae8">Logo/强调带</text>
+  </g>
+
+  <!-- ============ fork 身份色（仅指示点） ============ -->
+  <text x="48" y="252" font-size="13" font-weight="600" fill="#aab2bf" letter-spacing="1.5">FORK INDICATOR DOT（缩小为 8px 圆点使用）</text>
+  <g transform="translate(48,268)">
+    <circle cx="12" cy="12" r="8" fill="#66ccff"/>
+    <text x="28" y="16" font-size="12" fill="#e9edf3">lazer</text>
+    <text x="28" y="32" font-size="10" fill="#6b7280">#66CCFF</text>
+    <circle cx="112" cy="12" r="8" fill="#c88bf5"/>
+    <text x="128" y="16" font-size="12" fill="#e9edf3">delta</text>
+    <text x="128" y="32" font-size="10" fill="#6b7280">#C88BF5</text>
+    <circle cx="212" cy="12" r="8" fill="#ff7eb6"/>
+    <text x="228" y="16" font-size="12" fill="#e9edf3">ez2lazer</text>
+    <text x="228" y="32" font-size="10" fill="#6b7280">#FF7EB6</text>
+    <circle cx="312" cy="12" r="8" fill="#7ce8b8"/>
+    <text x="328" y="16" font-size="12" fill="#e9edf3">g0v0</text>
+    <text x="328" y="32" font-size="10" fill="#6b7280">#7CE8B8</text>
+    <circle cx="412" cy="12" r="8" fill="#3a4150" stroke="#4a5265"/>
+    <text x="428" y="16" font-size="12" fill="#aab2bf">未注册端</text>
+    <text x="428" y="32" font-size="10" fill="#6b7280">#3A4150</text>
+  </g>
+  <text x="540" y="288" font-size="11" fill="#6b7280">用法：行内只显示「x/y」聚合数；悬停浮层里用色点+名字逐端列出</text>
+
+  <!-- ============ 语义色 ============ -->
+  <text x="48" y="364" font-size="13" font-weight="600" fill="#aab2bf" letter-spacing="1.5">SEMANTIC</text>
+  <g transform="translate(48,380)">
+    <rect width="108" height="48" rx="8" fill="#3ddc97"/>
+    <text x="10" y="22" font-size="12" font-weight="600" fill="#082b1a">ok</text>
+    <text x="10" y="38" font-size="11" fill="#0a5a3a">#3DDC97</text>
+  </g>
+  <g transform="translate(168,380)">
+    <rect width="108" height="48" rx="8" fill="#f0b35c"/>
+    <text x="10" y="22" font-size="12" font-weight="600" fill="#3a2308">warn</text>
+    <text x="10" y="38" font-size="11" fill="#7a5520">#F0B35C</text>
+  </g>
+  <g transform="translate(288,380)">
+    <rect width="108" height="48" rx="8" fill="#f06c7a"/>
+    <text x="10" y="22" font-size="12" font-weight="600" fill="#3a0810">danger</text>
+    <text x="10" y="38" font-size="11" fill="#8a2535">#F06C7A</text>
+  </g>
+  <g transform="translate(408,380)">
+    <rect width="108" height="48" rx="8" fill="#57c8e8"/>
+    <text x="10" y="22" font-size="12" font-weight="600" fill="#08222b">info</text>
+    <text x="10" y="38" font-size="11" fill="#0a5a6e">#57C8E8</text>
+  </g>
+
+  <!-- ============ 同步状态徽标（数据行右上角） ============ -->
+  <text x="48" y="462" font-size="13" font-weight="600" fill="#aab2bf" letter-spacing="1.5">SYNC STATE BADGE</text>
+  <g transform="translate(48,478)" font-size="11" font-weight="500">
+    <rect width="86" height="28" rx="14" fill="#1e4d3a"/>
+    <text x="43" y="18" text-anchor="middle" fill="#7ce8b8">一致</text>
+    <rect x="98" width="86" height="28" rx="14" fill="#3a2a5a"/>
+    <text x="141" y="18" text-anchor="middle" fill="#c8b3f0">有更新</text>
+    <rect x="196" width="86" height="28" rx="14" fill="#4d2a3a"/>
+    <text x="239" y="18" text-anchor="middle" fill="#f09ab8">冲突</text>
+    <rect x="294" width="86" height="28" rx="14" fill="#4d3f20"/>
+    <text x="337" y="18" text-anchor="middle" fill="#f0d08a">疑似需确认</text>
+    <rect x="392" width="86" height="28" rx="14" fill="#2e3540"/>
+    <text x="435" y="18" text-anchor="middle" fill="#8b93a1">仅目标有</text>
+  </g>
+
+  <!-- ============ 数据行结构示意 ============ -->
+  <text x="48" y="544" font-size="13" font-weight="600" fill="#aab2bf" letter-spacing="1.5">数据行骨架（osu! 风格横条 + 同步块）</text>
+  <g transform="translate(48,560)">
+    <rect width="700" height="72" rx="10" fill="#1d232c" stroke="#2e3540"/>
+    <rect x="0" y="0" width="700" height="72" rx="10" fill="#3a3450" opacity="0.6"/>
+    <rect x="0" y="0" width="700" height="72" rx="10" fill="#0e1116" opacity="0.45"/>
+    <text x="20" y="28" font-size="16" font-weight="700" fill="#fff">曲名（大标题）</text>
+    <text x="20" y="48" font-size="12" fill="#d0d5dd">艺术家</text>
+    <rect x="20" y="54" width="46" height="16" rx="8" fill="#3ddc97"/>
+    <text x="43" y="66" font-size="10" fill="#082b1a" text-anchor="middle" font-weight="600">上架</text>
+    <circle cx="82" cy="62" r="4" fill="#fff"/><circle cx="92" cy="62" r="4" fill="#fff"/><circle cx="102" cy="62" r="4" fill="#4a5265"/>
+    <text x="120" y="66" font-size="10" fill="#aab2bf">v52011→v52031 · 12 难度</text>
+    <!-- 右侧同步块 -->
+    <g transform="translate(560,12)">
+      <rect width="120" height="48" rx="8" fill="#161b22" stroke="#3a2a5a" stroke-width="1.5"/>
+      <text x="14" y="20" font-size="11" fill="#c8b3f0" font-weight="600">3/4</text>
+      <text x="44" y="20" font-size="10" fill="#8b93a1"></text>
+      <text x="14" y="38" font-size="10" fill="#f0d08a">▸ 有更新</text>
+    </g>
+    <text x="560" y="72" font-size="9" fill="#6b7280" text-anchor="middle">hover 展开各端明细</text>
+  </g>
+
+  <!-- ============ 中性色阶 ============ -->
+  <text x="48" y="660" font-size="13" font-weight="600" fill="#aab2bf" letter-spacing="1.5">SURFACE / TEXT</text>
+  <g transform="translate(48,676)" font-size="11">
+    <rect width="80" height="40" rx="8" fill="#0e1116" stroke="#22272f"/>
+    <text x="8" y="18" fill="#e9edf3">bg-base</text><text x="8" y="33" fill="#6b7280">#0E1116</text>
+    <rect x="88" width="80" height="40" rx="8" fill="#161b22" stroke="#22272f"/>
+    <text x="96" y="18" fill="#e9edf3">bg-raise</text><text x="96" y="33" fill="#6b7280">#161B22</text>
+    <rect x="176" width="80" height="40" rx="8" fill="#1d232c" stroke="#22272f"/>
+    <text x="184" y="18" fill="#e9edf3">bg-card</text><text x="184" y="33" fill="#6b7280">#1D232C</text>
+    <rect x="264" width="80" height="40" rx="8" fill="#262d38" stroke="#22272f"/>
+    <text x="272" y="18" fill="#e9edf3">bg-hover</text><text x="272" y="33" fill="#6b7280">#262D38</text>
+    <rect x="352" width="80" height="40" rx="8" fill="#e9edf3"/>
+    <text x="360" y="18" fill="#0e1116" font-weight="600">text-hi</text><text x="360" y="33" fill="#4a5265">#E9EDF3</text>
+    <rect x="440" width="80" height="40" rx="8" fill="#aab2bf"/>
+    <text x="448" y="18" fill="#161b22" font-weight="600">text-mid</text><text x="448" y="33" fill="#4a5265">#AAB2BF</text>
+    <rect x="528" width="80" height="40" rx="8" fill="#6b7280"/>
+    <text x="536" y="18" fill="#e9edf3" font-weight="600">text-low</text><text x="536" y="33" fill="#161b22">#6B7280</text>
+    <rect x="616" width="80" height="40" rx="8" fill="none" stroke="#2e3540"/>
+    <text x="624" y="18" fill="#aab2bf">border</text><text x="624" y="33" fill="#6b7280">#2E3540</text>
+  </g>
+
+  
+</svg>
