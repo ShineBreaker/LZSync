@@ -2,21 +2,22 @@
 //（守卫/备份/计划摘要 + 显式确认）、批级进度（syncProgress 事件实时推送，
 // M-2）、结果报告（三段式口径）、从备份还原入口。
 
+import { t, trBackend } from "../i18n";
 import { CompareService, LibraryService, SyncService } from "../mygo";
 import type { ProgressEvent } from "../mygo";
 import { actionLabel, clear, el, errText, fmtBytes, kindLabel, message, text } from "../ui";
 
 export async function renderRun(root: HTMLElement): Promise<void> {
   clear(root);
-  root.append(el("h1", { class: "page-title" }, [text("同步执行")]));
+  root.append(el("h1", { class: "page-title" }, [text(t("nav.run"))]));
 
   const statusLine = el("div", { class: "status-line" });
 
   // ---- 收集阶段 ----
   const collectBox = el("section", { class: "section" }, [
-    el("h2", {}, [text("收集（fork → hub）")]),
+    el("h2", {}, [text(t("run.collectTitle"))]),
     el("p", { class: "muted" }, [
-      text("只读投影入 hub → 收仓+回链；幂等可重跑。游戏运行中的 fork 会被守卫拦截。"),
+      text(t("run.collectDesc")),
     ]),
   ]);
   const collectRows = el("div", { class: "collect-rows" });
@@ -24,7 +25,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
 
   // ---- 投放阶段 ----
   const deployBox = el("section", { class: "section" }, [
-    el("h2", {}, [text("投放（hub → fork）")]),
+    el("h2", {}, [text(t("run.deployTitle"))]),
   ]);
   const precheck = el("div", { class: "precheck card" });
   const progressBox = el("div", { class: "progress-box hidden" });
@@ -32,10 +33,10 @@ export async function renderRun(root: HTMLElement): Promise<void> {
   deployBox.append(precheck, progressBox, reportBox);
 
   // ---- 还原入口 ----
-  const restoreBox = el("section", { class: "section" }, [el("h2", {}, [text("从备份还原")])]);
-  const restoreInput = el("input", { class: "input", placeholder: "备份文件路径（见投放报告的备份路径）" });
+  const restoreBox = el("section", { class: "section" }, [el("h2", {}, [text(t("run.restoreTitle"))])]);
+  const restoreInput = el("input", { class: "input", placeholder: t("run.restorePlaceholder") });
   const restoreSel = el("select", { class: "input input-s" });
-  const restoreBtn = el("button", { class: "btn" }, [text("还原到该 fork")]);
+  const restoreBtn = el("button", { class: "btn" }, [text(t("run.restoreBtn"))]);
   restoreBox.append(el("div", { class: "toolbar" }, [restoreSel, restoreInput, restoreBtn]));
 
   root.append(collectBox, deployBox, restoreBox, statusLine);
@@ -55,11 +56,11 @@ export async function renderRun(root: HTMLElement): Promise<void> {
   async function renderCollectRows(): Promise<void> {
     clear(collectRows);
     for (const card of cards) {
-      const btn = el("button", { class: "btn" }, [text("收集")]);
+      const btn = el("button", { class: "btn" }, [text(t("run.collectBtn"))]);
       const row = el("div", { class: "collect-row" }, [
         el("span", { class: `fork-dot ${card.ProcessRunning ? "dot-running" : "dot-idle"}` }),
         el("span", { class: "fork-name" }, [text(card.ForkID)]),
-        el("span", { class: "muted" }, [text(`库 ${fmtBytes(card.RealmSize)} · files ${fmtBytes(card.FilesSize)}`)]),
+        el("span", { class: "muted" }, [text(t("run.cardStats", fmtBytes(card.RealmSize), fmtBytes(card.FilesSize)))]),
         el("span", { class: "spacer" }),
         btn,
       ]);
@@ -89,10 +90,10 @@ export async function renderRun(root: HTMLElement): Promise<void> {
       .map(([kind, n]) => `${kindLabel(kind)} ${n}`)
       .join(" · ");
     const skips = (report.Skips ?? [])
-      .map((s) => `${s.Reason}×${s.Count}`)
-      .join("；");
-    const adopt = `收仓 ${report.FilesAdopted} 文件（跳过 ${report.FilesSkipped}）`;
-    return `收集完成：${ents || "无实体"}；${adopt}${skips ? `；跳过：${skips}` : ""}`;
+      .map((s) => `${trBackend(s.Reason)} ×${s.Count}`)
+      .join(", ");
+    const skipStr = skips ? `${t("run.skippedPrefix")}${skips}` : "";
+    return t("run.collectDone", ents || t("run.noEntities"), report.FilesAdopted, report.FilesSkipped, skipStr);
   }
 
   /** 执行前检查面板 + 显式确认（不可误触，§6.3）。 */
@@ -103,7 +104,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
       plan = await CompareService.currentPlan();
     } catch {
       precheck.append(
-        el("p", { class: "muted" }, [text("尚无投放计划——先到「对比预览」页勾选并生成计划。")]),
+        el("p", { class: "muted" }, [text(t("run.noPlan"))]),
       );
       return;
     }
@@ -113,23 +114,22 @@ export async function renderRun(root: HTMLElement): Promise<void> {
     const guardOk = !(targetCard?.ProcessRunning ?? false);
 
     const items = [
-      check("守卫状态", guardOk ? "通过（目标 fork 进程未运行）" : `目标 fork 运行中（${targetCard?.RunningNames.join("、")}），请先关闭游戏`, guardOk),
-      check("备份目标", targetCard ? `${targetCard.RealmPath} 写前自动备份（S2）` : "目标库未注册，执行时将被拦截", true),
-      check("链接形态", "按 §5.3 自动分级：符号链接 → 硬链接（同卷）→ 复制（谱面集/皮肤/成绩的 files 阶段）", true),
-      check("计划摘要", `目标 ${plan.TargetFork} · 动作 ${actions.length} 项 · 计入跳过 ${skips.length} 项`, true),
+      check(t("run.checkGuard"), guardOk ? t("run.guardOk") : t("run.guardFail", targetCard?.RunningNames.join(", ") ?? ""), guardOk),
+      check(t("run.checkBackup"), targetCard ? t("run.backupOk", targetCard.RealmPath) : t("run.backupUnreg"), Boolean(targetCard)),
+      check(t("run.checkPlan"), t("run.planSummary", plan.TargetFork, actions.length, skips.length), true),
     ];
     for (const it of items) {
       precheck.append(it);
     }
 
-    const confirm = el("button", { class: "btn btn-danger" }, [text("确认执行投放")]);
-    const armed = el("span", { class: "muted hidden" }, [text("再次点击以确认（防误触）")]);
+    const confirm = el("button", { class: "btn btn-danger" }, [text(t("run.deployBtn"))]);
+    const armed = el("span", { class: "muted hidden" }, [text(t("run.deployArmedHint"))]);
     let armedOnce = false;
     confirm.addEventListener("click", async () => {
       if (!armedOnce) {
         armedOnce = true;
         armed.classList.remove("hidden");
-        confirm.textContent = "再次点击确认执行";
+        confirm.textContent = t("run.deployConfirmBtn");
         return;
       }
       confirm.disabled = true;
@@ -138,7 +138,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
       try {
         const report = await SyncService.deployCurrentPlan();
         renderReport(report);
-        statusLine.append(message("ok", "投放结束（见下方报告）"));
+        statusLine.append(message("ok", t("run.deployDone")));
       } catch (err) {
         renderReport(undefined, err);
         statusLine.append(message("error", errText(err)));
@@ -146,7 +146,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
         hideProgress();
         armedOnce = false;
         armed.classList.add("hidden");
-        confirm.textContent = "确认执行投放";
+        confirm.textContent = t("run.deployBtn");
         confirm.disabled = false;
         await renderPrecheck();
       }
@@ -169,11 +169,10 @@ export async function renderRun(root: HTMLElement): Promise<void> {
   ): void {
     clear(reportBox);
     if (!report) {
-      reportBox.append(message("error", `投放未完成：${errText(err)}`));
+      reportBox.append(message("error", t("run.deployFailed", errText(err))));
       return;
     }
-    const box = el("div", { class: "card report-card" }, [el("h3", {}, [text("投放报告")])]);
-    // applied 按类计数分组（§6.3：按类、按原因分组），组内按动作细分。
+    const box = el("div", { class: "card report-card" }, [el("h3", {}, [text(t("run.reportTitle"))])]);
     const appliedByKind = new Map<string, Map<string, number>>();
     for (const a of report.Applied ?? []) {
       const kind = kindLabel(String(a.Kind));
@@ -184,42 +183,40 @@ export async function renderRun(root: HTMLElement): Promise<void> {
     }
     const appliedParts = [...appliedByKind.entries()].map(([kind, byAct]) => {
       const acts = [...byAct.entries()].map(([act, n]) => `${act} ${n}`).join(" · ");
-      return `${kind}：${acts}`;
+      return `${kind}: ${acts}`;
     });
-    box.append(kvRow("已提交批 applied", appliedParts.length > 0 ? appliedParts.join("；") : "无"));
-    // R6：delta gimmick 谱面流出告警（§5.4）——显著呈现 + 计数 + 逐条明细
-    //（与对比预演的计划标记一致；已同步不阻断，风险在后续编辑保存）。
+    box.append(kvRow(t("run.reportApplied"), appliedParts.length > 0 ? appliedParts.join("; ") : t("run.reportNone")));
+
     const gimmick = report.GimmickWarnings ?? [];
     if (gimmick.length > 0) {
       box.append(
         message(
           "error",
-          `⚠ ${gimmick.length} 个谱面集含 delta gimmick section：经非 delta 端编辑保存会静默丢失 gimmick 数据（已照常同步——官方端只读不编辑则安全）`,
+          t("run.gimmickWarn", gimmick.length),
         ),
       );
       for (const w of gimmick) {
-        box.append(kvRow("告警项", `${kindLabel(String(w.Kind))} ${w.Summary}（${w.ContentKey}）`));
+        box.append(kvRow(t("run.gimmickItem"), `${kindLabel(String(w.Kind))} ${trBackend(w.Summary)} (${w.ContentKey})`));
       }
     }
-    // 跳过按原因分组计数（SkipCollector 口径，§3.3——不静默吞掉）。
     const skips = report.Skipped ?? [];
     if (skips.length > 0) {
-      box.append(kvRow("跳过（按原因）", skips.map((s) => `${s.Reason}×${s.Count}`).join(" · ")));
+      box.append(kvRow(t("run.reportSkipped"), skips.map((s) => `${trBackend(s.Reason)} ×${s.Count}`).join(" · ")));
     }
     const failed = report.FailedBatches ?? [];
     if (failed.length > 0) {
       for (const f of failed) {
-        box.append(kvRow(`失败批 #${f.BatchIndex}（整批回滚）`, f.Reason));
+        box.append(kvRow(t("run.reportFailedBatch", f.BatchIndex), trBackend(f.Reason)));
       }
     }
     if ((report.NotRun ?? []).length > 0) {
-      box.append(kvRow("未执行批清单", `${report.NotRun?.length ?? 0} 项（可从失败处重续）`));
+      box.append(kvRow(t("run.reportNotRun"), t("run.reportNotRunCount", report.NotRun?.length ?? 0)));
     }
     for (const p of report.Repointed ?? []) {
-      box.append(kvRow("执行期改判", `${kindLabel(String(p.Item.Kind))} ${p.Item.ContentKey}：${p.Reason}`));
+      box.append(kvRow(t("run.reportRepointed"), `${kindLabel(String(p.Item.Kind))} ${p.Item.ContentKey}: ${trBackend(p.Reason)}`));
     }
     if (report.BackupPath) {
-      box.append(kvRow("备份路径", report.BackupPath));
+      box.append(kvRow(t("run.reportBackup"), report.BackupPath));
       restoreInput.value = report.BackupPath;
     }
     reportBox.append(box);
@@ -238,10 +235,10 @@ export async function renderRun(root: HTMLElement): Promise<void> {
   const progressFill = el("div", { class: "progress-fill" });
   const progressLabel = el("div", { class: "progress-label muted" });
   progressBar.append(progressFill);
-  const cancelBtn = el("button", { class: "btn btn-danger" }, [text("取消")]);
+  const cancelBtn = el("button", { class: "btn btn-danger" }, [text(t("run.cancelBtn"))]);
   cancelBtn.addEventListener("click", () => {
     SyncService.cancel();
-    progressLabel.textContent = "已请求取消（批间生效，已提交批保留）……";
+    progressLabel.textContent = t("run.cancelling");
   });
   progressBox.append(progressBar, progressLabel, cancelBtn);
 
@@ -249,7 +246,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
     progressService = service;
     progressBox.classList.remove("hidden");
     progressFill.style.width = "0%";
-    progressLabel.textContent = service === "collect" ? "收集进行中……" : "投放进行中……";
+    progressLabel.textContent = service === "collect" ? t("run.collecting") : t("run.deploying");
   }
 
   function hideProgress(): void {
@@ -263,7 +260,7 @@ export async function renderRun(root: HTMLElement): Promise<void> {
     }
     const pct = total > 0 ? Math.round((current / total) * 100) : 0;
     progressFill.style.width = `${pct}%`;
-    progressLabel.textContent = msg || `${stage} ${current}/${total}`;
+    progressLabel.textContent = msg ? trBackend(msg) : `${stage} ${current}/${total}`;
   }
 
   // ---- 还原入口 ----
@@ -272,14 +269,14 @@ export async function renderRun(root: HTMLElement): Promise<void> {
     const backupPath = restoreInput.value.trim();
     if (!forkID || !backupPath) {
       clear(statusLine);
-      statusLine.append(message("info", "还原需要选择 fork 并输入备份路径"));
+      statusLine.append(message("info", t("run.restoreNeedInput")));
       return;
     }
     restoreBtn.disabled = true;
     clear(statusLine);
     try {
       await SyncService.restoreBackup(forkID, backupPath);
-      statusLine.append(message("ok", `已从 ${backupPath} 还原 ${forkID}（还原前已自动再备份）`));
+      statusLine.append(message("ok", t("run.restoreDone", backupPath, forkID)));
     } catch (err) {
       statusLine.append(message("error", errText(err)));
     } finally {

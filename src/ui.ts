@@ -1,5 +1,7 @@
 // UI 基础设施：DOM 构造助手与展示格式化（vanilla TS strict，M-3）。
 
+import { getLang, t, trBackend } from "./i18n";
+
 /** 类型安全的元素构造：el("div", { class: "card", text: "hi" }, [child…])。 */
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -45,60 +47,47 @@ export function fmtBytes(n: number): string {
 /** Unix 毫秒时间戳本地化显示。 */
 export function fmtMillis(ms: number): string {
   if (ms <= 0) return "—";
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString(getLang() === "en" ? "en-US" : "zh-CN");
 }
 
 /** 分类徽标文本（§6.2 差异分类徽标）。 */
 export function categoryLabel(cat: string): string {
   switch (cat) {
     case "create":
-      return "新增";
     case "target-only":
-      return "目标独有";
     case "conflict":
-      return "冲突";
     case "version-update":
-      return "版本更新";
     case "restore":
-      return "恢复（已删除）";
+      return t(`cat.${cat}`);
     default:
       return cat;
   }
 }
 
-/** 实体类型中文标注（§6.2 数据类型 Tab / 行键显示）。 */
+/** 实体类型显示名（§6.2 数据类型 Tab / 行键显示）。 */
 export function kindLabel(kind: string): string {
   switch (kind) {
     case "beatmap_set":
-      return "谱面集";
     case "beatmap":
-      return "难度";
     case "collection":
-      return "收藏夹";
     case "skin":
-      return "皮肤";
     case "score":
-      return "成绩";
     case "key_binding":
-      return "键位";
     case "ruleset_setting":
-      return "规则集设置";
     case "mod_preset":
-      return "ModPreset";
+      return t(`kind.${kind}`);
     default:
       return kind;
   }
 }
 
-/** 计划动作中文标注（§6.2 计划摘要 / §6.3 执行报告）。 */
+/** 计划动作显示名（§6.2 计划摘要 / §6.3 执行报告）。 */
 export function actionLabel(action: string): string {
   switch (action) {
     case "create":
-      return "新建";
     case "update":
-      return "就地更新";
     case "version-replace":
-      return "版本替换";
+      return t(`action.${action}`);
     default:
       return action;
   }
@@ -113,13 +102,10 @@ export function categoryClass(cat: string): string {
 export function versionSourceLabel(src: string): string {
   switch (src) {
     case "realm-open":
-      return "现场开库探测";
     case "filename":
-      return "文件名推断";
     case "snapshot-cache":
-      return "结构档案缓存";
     case "unknown-running":
-      return "未知（运行中）";
+      return t(`vsrc.${src}`);
     default:
       return src;
   }
@@ -135,9 +121,9 @@ export function message(kind: "error" | "ok" | "info", msg: unknown): HTMLElemen
 /** 错误对象 → 展示文本（mygo 以错误消息字符串拒绝 Promise）。 */
 export function errText(err: unknown): string {
   if (err instanceof Error) {
-    return err.message;
+    return trBackend(err.message);
   }
-  return String(err);
+  return trBackend(String(err));
 }
 
 /** 清空容器。 */

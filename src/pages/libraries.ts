@@ -1,6 +1,7 @@
 // 库管理页（§6.1）：自动发现扫描、fork 卡片（身份、版本来源标注、files
 // 体积、进程运行状态）、手动注册（识别失败要求指认）、移除（不碰磁盘）。
 
+import { t, trBackend } from "../i18n";
 import { LibraryService } from "../mygo";
 import { clear, el, errText, fmtBytes, message, text, versionSourceLabel } from "../ui";
 
@@ -15,15 +16,15 @@ interface PendingAssign {
 
 export async function renderLibraries(root: HTMLElement): Promise<void> {
   clear(root);
-  root.append(el("h1", { class: "page-title" }, [text("库管理")]));
+  root.append(el("h1", { class: "page-title" }, [text(t("nav.libraries"))]));
 
   // 工具行：扫描 + 手动注册。
-  const scanBtn = el("button", { class: "btn btn-primary" }, [text("扫描数据根")]);
+  const scanBtn = el("button", { class: "btn btn-primary" }, [text(t("lib.scan"))]);
   const pathInput = el("input", {
     class: "input",
-    placeholder: "自定义库文件路径（storage.ini 场景，指向 client.realm）",
+    placeholder: t("lib.pathPlaceholder"),
   });
-  const regBtn = el("button", { class: "btn" }, [text("注册")]);
+  const regBtn = el("button", { class: "btn" }, [text(t("lib.register"))]);
   const toolbar = el("div", { class: "toolbar" }, [pathInput, regBtn, scanBtn]);
   const statusLine = el("div", { class: "status-line" });
   root.append(toolbar, statusLine);
@@ -47,7 +48,7 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
     clear(cardsBox);
     if (cards.length === 0) {
       cardsBox.append(
-        el("p", { class: "muted" }, [text("尚未发现或注册任何 fork 库——点击「扫描数据根」或手动注册。")]),
+        el("p", { class: "muted" }, [text(t("lib.empty"))]),
       );
       return;
     }
@@ -58,15 +59,15 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
 
   function renderCard(card: Awaited<ReturnType<typeof LibraryService.list>>[number]): HTMLElement {
     const badges = [
-      el("span", { class: "badge badge-version" }, [text(`磁盘版本 ${card.VersionLabel}`)]),
+      el("span", { class: "badge badge-version" }, [text(t("lib.version", trBackend(card.VersionLabel)))]),
       el("span", { class: "badge badge-source" }, [text(versionSourceLabel(String(card.VersionSource)))]),
     ];
     if (card.ProcessRunning) {
-      badges.push(el("span", { class: "badge badge-running" }, [text(`运行中（${card.RunningNames.join("、")}）`)]));
+      badges.push(el("span", { class: "badge badge-running" }, [text(t("lib.running", card.RunningNames.join(", ")))]));
     } else {
-      badges.push(el("span", { class: "badge badge-idle" }, [text("未运行")]));
+      badges.push(el("span", { class: "badge badge-idle" }, [text(t("lib.idle"))]));
     }
-    const removeBtn = el("button", { class: "btn btn-danger" }, [text("解除管理")]);
+    const removeBtn = el("button", { class: "btn btn-danger" }, [text(t("lib.remove"))]);
     removeBtn.addEventListener("click", async () => {
       removeBtn.disabled = true;
       try {
@@ -87,15 +88,9 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
         removeBtn,
       ]),
       el("dl", { class: "kv" }, [
-        kv("数据目录", card.DataDir),
-        kv("库文件", `${card.RealmPath}（${fmtBytes(card.RealmSize)}）`),
-        kv("files/", `${card.FilesDir} · ${card.FilesCount} 项 · ${fmtBytes(card.FilesSize)}`),
-        kv(
-          "版本解码",
-          card.ForkRev > 0
-            ? `官方基线 ${card.UpstreamVersion} + fork 修订 ${card.ForkRev}`
-            : `官方基线 ${card.UpstreamVersion}`,
-        ),
+        kv(t("lib.dataDir"), card.DataDir),
+        kv(t("lib.realmFile"), `${card.RealmPath} (${fmtBytes(card.RealmSize)})`),
+        kv(t("lib.filesDir"), `${card.FilesDir} · ${t("lib.filesCount", card.FilesCount)} · ${fmtBytes(card.FilesSize)}`),
       ]),
     ]);
   }
@@ -112,8 +107,8 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
     clear(statusLine);
     try {
       const refs = await LibraryService.scan();
-      statusLine.append(message("ok", `扫描完成：发现 ${refs.length} 个 fork 库`));
       await refresh();
+      statusLine.append(message("ok", t("lib.scanDone", refs.length)));
     } catch (err) {
       statusLine.append(message("error", errText(err)));
     } finally {
@@ -125,7 +120,7 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
     const path = pathInput.value.trim();
     if (!path) {
       clear(statusLine);
-      statusLine.append(message("info", "请输入库文件路径"));
+      statusLine.append(message("info", t("lib.enterPath")));
       return;
     }
     regBtn.disabled = true;
@@ -138,8 +133,8 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
         renderAssign();
       } else {
         pending = null;
-        statusLine.append(message("ok", `已注册 ${ref.ForkID}（版本 ${ref.DiskVersion}）`));
         await refresh();
+        statusLine.append(message("ok", t("lib.registered", ref.ForkID, ref.DiskVersion)));
       }
     } catch (err) {
       statusLine.append(message("error", errText(err)));
@@ -157,7 +152,7 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
       const opt = el("option", { value: id }, [text(id)]);
       select.append(opt);
     }
-    const btn = el("button", { class: "btn btn-primary" }, [text("确认指认")]);
+    const btn = el("button", { class: "btn btn-primary" }, [text(t("lib.confirmAssign"))]);
     btn.addEventListener("click", async () => {
       if (!pending) return;
       btn.disabled = true;
@@ -165,9 +160,8 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
         const value = select.value;
         const ref = await LibraryService.assignFork(pending.path, value);
         pending = null;
-        clear(statusLine);
-        statusLine.append(message("ok", `已按指认注册 ${ref.ForkID}`));
         await refresh();
+        statusLine.append(message("ok", t("lib.assigned", ref.ForkID)));
       } catch (err) {
         clear(statusLine);
         statusLine.append(message("error", errText(err)));
@@ -176,7 +170,7 @@ export async function renderLibraries(root: HTMLElement): Promise<void> {
     });
     statusLine.append(
       el("div", { class: "assign-box" }, [
-        el("span", {}, [text(`无法识别该库（原始版本 ${pending.diskVersion || "未知"}）——请指认 fork：`)]),
+        el("span", {}, [text(t("lib.unidentified", pending.diskVersion || t("lib.unknownVer")))]),
         select,
         btn,
       ]),

@@ -1,60 +1,64 @@
-// 设置页（§6.4 M1 骨架，只读显示）：后端模式与 native 诊断、hub 数据目录、
-// 备份目录、守卫名单、链接策略探测。
+// 设置页（§6.4）：界面语言切换、后端与 Realm 引擎状态、存储目录、监控进程与链接支持。
 
+import { getLang, setLang, t, trBackend, type Lang } from "../i18n";
 import { SettingsService } from "../mygo";
 import { clear, el, errText, message, text } from "../ui";
 
 export async function renderSettings(root: HTMLElement): Promise<void> {
   clear(root);
-  root.append(el("h1", { class: "page-title" }, [text("设置")]));
+  root.append(el("h1", { class: "page-title" }, [text(t("nav.settings"))]));
 
   const statusLine = el("div", { class: "status-line" });
   root.append(statusLine);
+
+  const langSelect = el("select", { class: "input input-s" }, [
+    el("option", { value: "zh" }, [text("简体中文")]),
+    el("option", { value: "en" }, [text("English")]),
+  ]) as HTMLSelectElement;
+  langSelect.value = getLang();
+  langSelect.addEventListener("change", () => {
+    setLang(langSelect.value as Lang);
+  });
+  root.append(section(t("set.langSection"), [
+    row(t("set.langLabel"), "", langSelect),
+  ]));
 
   try {
     const info = await SettingsService.get();
     const modeBadge =
       info.Mode === "real"
-        ? el("span", { class: "badge badge-idle" }, [text("真实后端")])
-        : el("span", { class: "badge badge-running" }, [text(info.Mode === "mock" ? "Mock 后端（强制）" : "Mock 后端（降级）")]);
+        ? el("span", { class: "badge badge-idle" }, [text(t("set.modeReal"))])
+        : el("span", { class: "badge badge-running" }, [
+            text(info.Mode === "mock" ? t("set.modeMock") : t("set.modeFallback")),
+          ]);
 
-    root.append(section("后端", [
-      row("模式", "", modeBadge),
-      info.Reason ? row("说明", info.Reason) : null,
+    root.append(section(t("set.backendSection"), [
+      row(t("set.mode"), "", modeBadge),
+      info.Reason ? row(t("set.reason"), trBackend(info.Reason)) : null,
       row(
-        "native 库",
-        info.NativeLibOK ? "已加载（librealm 20.1.x 对齐）" : `不可用：${info.NativeLibErr}`,
+        t("set.nativeLib"),
+        info.NativeLibOK ? t("set.nativeOk") : t("set.nativeFail", trBackend(info.NativeLibErr)),
       ),
     ]));
 
-    root.append(section("hub 数据目录（§3.4）", [
-      row("数据目录", info.DataDir),
-      row("hub.db", info.HubDBPath),
-      row("备份目录", `${info.BackupsDir}（现有 ${info.BackupsCount} 份）`),
+    root.append(section(t("set.pathsSection"), [
+      row(t("set.dataDir"), info.DataDir),
+      row(t("set.hubDb"), info.HubDBPath),
+      row(t("set.backupsDir"), t("set.backupsCount", info.BackupsDir, info.BackupsCount)),
     ]));
 
     const guardList = el("ul", { class: "guard-list" });
     for (const name of info.GuardNames) {
       guardList.append(el("li", {}, [text(name)]));
     }
-    root.append(section("进程守卫名单（内置 + 用户扩展）", [
+    root.append(section(t("set.guardSection"), [
       guardList,
-      el("p", { class: "muted" }, [
-        text("注意：g0v0 的进程名带感叹号（g0v0!），匹配时不可去掉；delta 进程名待运行时枚举后由用户补充（T2）。备份不可禁用、最多改位置（S2）。"),
-      ]),
     ]));
 
-    root.append(section("链接策略（§5.3）", [
-      row("符号链接", info.LinkSymlink ? "可用（首选，跨卷）" : "不可用 → 降级硬链接"),
-      row("硬链接", info.LinkHardlink ? "可用（同卷）" : "不可用 → 降级复制"),
-      row("策略说明", info.LinkNote),
+    root.append(section(t("set.linkSection"), [
+      row(t("set.symlink"), info.LinkSymlink ? t("set.linkOk") : t("set.linkFail")),
+      row(t("set.hardlink"), info.LinkHardlink ? t("set.linkOk") : t("set.linkFail")),
     ]));
-
-    root.append(
-      el("p", { class: "muted" }, [
-        text("M1 设置骨架：以上为只读显示。备份保留策略、冲突方向、批大小高级项、仓迁移与 game.ini 白名单管理待 M2/M3 落地。"),
-      ]),
-    );
   } catch (err) {
     statusLine.append(message("error", errText(err)));
   }
