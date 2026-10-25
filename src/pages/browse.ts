@@ -189,8 +189,12 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
 
   function buildMeta(r: DiffRow): string {
     const parts: string[] = [];
-    if (r.Kind === "beatmap_set") {
-      parts.push(t("browse.hubVersion", r.IdentityKey ? r.IdentityKey.replace(/^(online|meta):/, "") : "—"));
+    // beatmap_set：meta 仅当有真实可读的 OnlineID（不是 -1 这种「无外部 ID」哨兵）
+    if (r.Kind === "beatmap_set" && r.IdentityKey) {
+      const idv = r.IdentityKey.replace(/^online:/, "");
+      if (r.IdentityKey.startsWith("online:") && idv !== "-1" && idv !== "0") {
+        parts.push(`#${idv}`);
+      }
     }
     if (r.SkipReason) {
       parts.push(trBackend(r.SkipReason));
@@ -199,23 +203,63 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
   }
 
   function rowHeight(r: RowView): string {
-    if (r.kind === "beatmap_set") return "data-row has-cover";
+    // has-cover 只在真的有封面 URL 时才加（异步赋值后补），初始一律无 has-cover
+    if (r.kind === "beatmap_set") return "data-row";
     return "data-row compact";
+  }
+
+  // 懒渲染：首屏只渲 PAGE_SIZE 行，滚动到底再追加。coverImage 只对
+  // 实际渲染出的行发 IPC，避免 3087 行 × IPC 打爆。
+  const PAGE_SIZE = 80;
+  let shown = 0;
+  let filteredCache: RowView[] = [];
+  let sentinel: HTMLElement | null = null;
+  const coverCache = new Map<string, Promise<string>>(); // contentKey → url promise
+
+  function getCover(key: string): Promise<string> {
+    if (!coverCache.has(key)) {
+      coverCache.set(key, CompareService.coverImage(key).catch(() => ""));
+    }
+    return coverCache.get(key)!;
   }
 
   function renderList(): void {
     clear(listBox);
+    shown = 0;
     if (rows.length === 0) {
       listBox.append(el("p", { class: "page-meta" }, [text(t("browse.empty"))]));
       return;
     }
-    let filtered = rows;
-    if (filter === "diff") filtered = rows.filter((r) => r.state !== "synced");
-    if (filter === "conflict") filtered = rows.filter((r) => r.state === "conflict");
-    if (filter === "needsConfirm") filtered = rows.filter((r) => r.state === "needsConfirm");
+    filteredCache = rows;
+    if (filter === "diff") filteredCache = rows.filter((r) => r.state !== "synced");
+    if (filter === "conflict") filteredCache = rows.filter((r) => r.state === "conflict");
+    if (filter === "needsConfirm") filteredCache = rows.filter((r) => r.state === "needsConfirm");
+    appendMore();
+  }
 
-    for (const r of filtered) {
+  function appendMore(): void {
+    if (sentinel) {
+      sentinel.remove();
+      sentinel = null;
+    }
+    const slice = filteredCache.slice(shown, shown + PAGE_SIZE);
+    for (const r of slice) {
       listBox.append(renderRow(r));
+    }
+    shown += slice.length;
+    if (shown < filteredCache.length) {
+      sentinel = el("div", { class: "page-meta", style: "padding:20px;text-align:center" }, [text(`… ${filteredCache.length - shown} …`)]);
+      listBox.append(sentinel);
+      // IntersectionObserver 哨兵
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            io.disconnect();
+            appendMore();
+          }
+        }
+      }, { rootMargin: "400px" });
+      io.observe(sentinel);
     }
   }
 
@@ -252,14 +296,14 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
       el("span", { class: "s" }, [text(syncStateLabel(r.state))]),
     );
 
-    // 封面（仅谱面集）：content_key → data URL，设置到行 background。
+    // 封面（仅谱面集）：data URL，设置到行 background。走缓存避免重复 IPC。
     if (r.kind === "beatmap_set") {
-      CompareService.coverImage(r.contentKey).then((url) => {
+      getCover(r.contentKey).then((url) => {
         if (url) {
           rowEl.style.backgroundImage = `url("${url}")`;
           rowEl.classList.add("has-cover");
         }
-      }).catch(() => {});
+      });
     }
 
     // 悬浮层：各端持有状态（presence 命中=该端持有；state=hub 视角的行态）
@@ -277,12 +321,18 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
 
     // 冲突行：可点击展开差异表
     if (r.conflictFields && r.conflictFields.length > 0) {
-      const detail = el("div", { class: "popover hidden" });
-      const table = el("table", {});
+      const detail = el("div", { class: "row-detail hidden" });
+      const table = el("table", { class: "row-detail-table" });
+      const head = el("tr", {}, [
+        el("th", {}, [text("")]),
+        el("th", {}, [text(t("browse.conflictHub"))]),
+        el("th", {}, [text(t("browse.conflictFork"))]),
+      ]);
+      table.append(head);
       for (const f of r.conflictFields) {
         table.append(
           el("tr", {}, [
-            el("td", {}, [text(f.Field)]),
+            el("td", { class: "k" }, [text(f.Field)]),
             el("td", {}, [text(f.HubValue)]),
             el("td", {}, [text(f.ForkValue)]),
           ]),

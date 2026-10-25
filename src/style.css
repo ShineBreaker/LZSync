@@ -280,7 +280,18 @@ html, body {
   border-radius: var(--r-sm);
   color: var(--text-hi);
   font-size: var(--fs-body);
+  -webkit-appearance: none;
+  appearance: none;
 }
+
+select.input {
+  /* 自绘下拉箭头（appearance:none 后系统默认消失） */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'%3E%3Cpath d='M0 0l4 6 4-6z' fill='%238B93A1'/%3E%3C/svg%3E");
+  background-position: right 10px center;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+select.input option { background: var(--bg-card); color: var(--text-hi); }
 
 .input::placeholder { color: var(--text-low); }
 .input:focus { outline: none; border-color: var(--brand); }
@@ -308,13 +319,40 @@ html, body {
   grid-template-columns: 24px 1fr 110px;
   align-items: center;
   gap: 12px;
-  height: 80px;
+  min-height: 80px;
   margin-bottom: 8px;
   padding: 0 14px;
   background: var(--bg-card);
   border: 1.5px solid var(--border);
   border-radius: var(--r-md);
   overflow: hidden;
+}
+
+/* 行内展开的冲突字段表（非 .popover——absolute 定位不适用） */
+.row-detail {
+  grid-column: 1 / -1;
+  padding: 8px 0 14px;
+  border-top: 1px solid var(--border);
+}
+.row-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-badge);
+}
+.row-detail-table th,
+.row-detail-table td {
+  text-align: left;
+  padding: 4px 8px;
+  color: var(--text-mid);
+}
+.row-detail-table th {
+  color: var(--text-low);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+.row-detail-table td.k {
+  color: var(--text-low);
+  width: 140px;
 }
 
 .data-row.has-cover {
@@ -457,6 +495,9 @@ html, body {
 .sync-block.st-neutral { border-color: var(--st-neutral-bg); }
 .sync-block.st-neutral .n { color: var(--st-neutral-text); }
 .sync-block.st-neutral .s { color: var(--st-neutral-text); }
+
+/* 通用显隐 */
+.hidden { display: none !important; }
 
 /* ---------- 悬浮层 ---------- */
 .popover {

@@ -114,6 +114,8 @@ const DICT = {
     "browse.beatmaps": "{0} 谱面",
     "browse.confirmTitle": "确认要替换目标端的旧版本吗？",
     "browse.conflictFields": "差异字段",
+    "browse.conflictHub": "中枢",
+    "browse.conflictFork": "目标端",
     "browse.showDiff": "查看差异",
 
     // ===== 同步页 =====
@@ -246,6 +248,8 @@ const DICT = {
     "browse.files": "{0} MiB",
     "browse.beatmaps": "{0} beatmaps",
     "browse.confirmTitle": "Replace older version on target?",
+    "browse.conflictHub": "Hub",
+    "browse.conflictFork": "Target",
     "browse.conflictFields": "Differences",
     "browse.showDiff": "Diff",
 
