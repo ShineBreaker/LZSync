@@ -38,6 +38,21 @@ func iniSkip(skips []inisettings.SkipStat, sub string) int {
 	return n
 }
 
+// iniValsFromStore 快照仓 → 逐键决定值（来源端 = srcFork）。全链测试的
+// 投放面输入——生产路径的逐键裁决在 appsvc 判定引擎（§0.3）。
+func iniValsFromStore(t *testing.T, store *inisettings.Store, srcFork string) map[string]deploy.IniValue {
+	t.Helper()
+	vals, _, ok, err := store.Load(srcFork)
+	if err != nil || !ok {
+		t.Fatalf("快照 Load(%s) = ok:%v err:%v", srcFork, ok, err)
+	}
+	out := map[string]deploy.IniValue{}
+	for k, v := range vals {
+		out[k] = deploy.IniValue{Value: v, SourceFork: srcFork}
+	}
+	return out
+}
+
 // buildIniLib 造库 + 数据目录 game.ini 夹具（overrides 透传夹具）。
 func buildIniLib(t *testing.T, forkID string, version uint64, overrides map[string]string) forks.LibraryRef {
 	t.Helper()
@@ -93,9 +108,10 @@ func TestGameIniFullChain(t *testing.T) {
 	// ② 投放：lazer canonical → delta 目标。
 	targetIniPath := filepath.Join(dst.DataDir, "game.ini")
 	beforeTarget, _ := os.ReadFile(targetIniPath)
-	res, err := deploy.SyncGameIni(dst, "lazer", nil, store, env.backups, guard.NewGuard(nil))
+	res, err := deploy.SyncGameIniValues(dst, iniValsFromStore(t, store, "lazer"),
+		nil, env.backups, guard.NewGuard(nil))
 	if err != nil {
-		t.Fatalf("SyncGameIni: %v", err)
+		t.Fatalf("SyncGameIniValues: %v", err)
 	}
 	if res.Applied["ShowFpsDisplay"] != "true" {
 		t.Fatalf("Applied = %v，期望含 ShowFpsDisplay=true", res.Applied)
@@ -149,9 +165,10 @@ func TestGameIniFullChain(t *testing.T) {
 	}
 
 	// ③ 幂等重跑：值已一致 → no-op（零落地零新备份）。
-	res2, err := deploy.SyncGameIni(dst, "lazer", nil, store, env.backups, guard.NewGuard(nil))
+	res2, err := deploy.SyncGameIniValues(dst, iniValsFromStore(t, store, "lazer"),
+		nil, env.backups, guard.NewGuard(nil))
 	if err != nil {
-		t.Fatalf("重跑 SyncGameIni: %v", err)
+		t.Fatalf("重跑 SyncGameIniValues: %v", err)
 	}
 	if len(res2.Applied) != 0 {
 		t.Errorf("重跑应幂等零落地，got %v", res2.Applied)
@@ -184,9 +201,10 @@ func TestGameIniTargetNeverLaunched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := deploy.SyncGameIni(ref, "lazer", nil, store, env.backups, guard.NewGuard(nil))
+	res, err := deploy.SyncGameIniValues(ref, iniValsFromStore(t, store, "lazer"),
+		nil, env.backups, guard.NewGuard(nil))
 	if err != nil {
-		t.Fatalf("SyncGameIni: %v", err)
+		t.Fatalf("SyncGameIniValues: %v", err)
 	}
 	if got := iniSkip(res.Skipped, "从未启动过客户端"); got != 1 {
 		t.Fatalf("目标缺失跳过计数 = %d，期望 1（Skipped=%+v）", got, res.Skipped)

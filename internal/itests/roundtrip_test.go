@@ -99,7 +99,8 @@ func TestCollectionFullChainRoundtrip(t *testing.T) {
 	// 集的同名异值收藏不改 canonical 且 BuildPlan 冲突默认不落地；update
 	// 覆盖路径由显式构造的动作项承载，「canonical 为新值」场景换第二个
 	// hub 重演）：收集目标库（presence 建立）→ g0v0 收集进 hub2 → 显式
-	// update 计划投放 → 目标 Guid 保持、成员/时间戳更新为 canonical。
+	// update 计划投放 → 目标 Guid/LastModified 保目标值、成员更新为
+	// canonical（§0-B7：LastModified 是端本地字段，就地更新不覆写）。
 	e.collectInto(dstRef)
 	fav1v2 := hub.Collection{
 		ID: "33333333-3333-3333-3333-333333333333", Name: "满配夹",
@@ -146,8 +147,9 @@ func TestCollectionFullChainRoundtrip(t *testing.T) {
 	if !equalUnordered(got2.BeatmapMD5Hashes, fav1v2.BeatmapMD5Hashes) {
 		t.Errorf("update 后 MD5 = %v，期望 %v", got2.BeatmapMD5Hashes, fav1v2.BeatmapMD5Hashes)
 	}
-	if !got2.LastModified.Equal(fav1v2.LastModified) {
-		t.Errorf("update 后 LastModified = %v，期望 %v", got2.LastModified, fav1v2.LastModified)
+	if !got2.LastModified.Equal(fav1.LastModified) {
+		t.Errorf("update 后 LastModified = %v，期望保目标原值 %v（§0-B7 端本地字段不写）",
+			got2.LastModified, fav1.LastModified)
 	}
 }
 

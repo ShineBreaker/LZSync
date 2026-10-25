@@ -155,7 +155,8 @@ func TestDeployFullFeaturedCollection(t *testing.T) {
 		t.Errorf("Deploy#3 applied = %+v", report3.Applied)
 	}
 
-	// 读回：成员更新为目标 canonical、Guid 保持首次落地的值、LM = 新值。
+	// 读回：成员更新为目标 canonical、Guid 保持首次落地的值、LM 保目标
+	// 原值（§0-B7/G10：LastModified 是端本地字段，就地更新不覆写）。
 	withReadOnly(t, lib, ref.RealmPath, func(r *realmc.Realm) {
 		got, ok := readCollection(t, r, "满配夹")
 		if !ok {
@@ -167,8 +168,8 @@ func TestDeployFullFeaturedCollection(t *testing.T) {
 		if !equalUnordered(got.BeatmapMD5Hashes, fav1v2.BeatmapMD5Hashes) {
 			t.Errorf("MD5 成员 = %v，期望 %v", got.BeatmapMD5Hashes, fav1v2.BeatmapMD5Hashes)
 		}
-		if !got.LastModified.Equal(t1) {
-			t.Errorf("LastModified = %v，期望 %v", got.LastModified, t1)
+		if !got.LastModified.Equal(fav1.LastModified) {
+			t.Errorf("LastModified = %v，期望保目标原值 %v（端本地字段不写）", got.LastModified, fav1.LastModified)
 		}
 	})
 }

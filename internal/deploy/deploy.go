@@ -327,16 +327,26 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 		}
 		switch item.Kind {
 		case hub.KindCollection:
-			c, origin, ok, err := r.deps.Hub.LoadCollection(ctx, item.ContentKey)
-			if err != nil {
-				return nil, nil, nil, err
+			var c hub.Collection
+			if item.PayloadJSON != "" {
+				// 三方判定决定值载荷（§0.3：逐成员合并后的目标端应有
+				// 成员集，与 canonical 首见成员集可能不同）。
+				if err := json.Unmarshal([]byte(item.PayloadJSON), &c); err != nil {
+					return nil, nil, nil, fmt.Errorf("批内项 %s: 决定值载荷解码: %w", item.ContentKey, err)
+				}
+			} else {
+				var ok bool
+				var err error
+				c, _, ok, err = r.deps.Hub.LoadCollection(ctx, item.ContentKey)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if !ok {
+					// hub 不删实体（§4.4）；缺行只可能是并发清除类操作，按跳过计。
+					skips["hub 实体表中无此收藏（计划与真相源不符，跳过）"]++
+					continue
+				}
 			}
-			if !ok {
-				// hub 不删实体（§4.4）；缺行只可能是并发清除类操作，按跳过计。
-				skips["hub 实体表中无此收藏（计划与真相源不符，跳过）"]++
-				continue
-			}
-			_ = origin // M1 收藏夹无 S8 OnlineID 面；skin/score 扩面时消费 origin.ServerRealm
 			ap, skip, rep, err := colW.exec(c, item.Action)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
@@ -417,7 +427,11 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此成绩（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), targetFork, peers, item.Action, item.Restore)
+			src := origin.Fork
+			if item.SourceFork != "" {
+				src = item.SourceFork // §0.3 决定值来源端优先于 canonical origin
+			}
+			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(src, targetFork), targetFork, peers, item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}
@@ -433,16 +447,47 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				repointed[i] = rep
 			}
 		case hub.KindKeyBinding:
-			// D20 枚举域交集需要源端身份：origin_fork 随 Load 返回。
-			kb, origin, ok, err := r.deps.Hub.LoadKeyBinding(ctx, item.ContentKey)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			if !ok {
-				skips["hub 实体表中无此键位（计划与真相源不符，跳过）"]++
+			if item.Action == ActionDelete {
+				// §0.3 集合判定移除决定组合集之外的行——按内容键定位删除。
+				ap, skip, rep, derr := kbW.execDelete(item.ContentKey)
+				if derr != nil {
+					return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, derr)
+				}
+				if skip.count > 0 {
+					skips[skip.reason] += skip.count
+				} else {
+					applied = append(applied, ItemResult{Kind: item.Kind, ContentKey: item.ContentKey, Action: ap.action})
+				}
+				if rep != "" {
+					repointed[i] = rep
+				}
 				continue
 			}
-			ap, skip, rep, err := kbW.exec(kb, origin.Fork, targetFork, peers, item.Action)
+			var kb hub.KeyBinding
+			srcFork := item.SourceFork
+			if item.PayloadJSON != "" {
+				// 三方判定决定值载荷（§0.3：裁决的组合行，Guid 已换新）。
+				if err := json.Unmarshal([]byte(item.PayloadJSON), &kb); err != nil {
+					return nil, nil, nil, fmt.Errorf("批内项 %s: 决定值载荷解码: %w", item.ContentKey, err)
+				}
+			} else {
+				// D20 枚举域交集需要源端身份：origin_fork 随 Load 返回。
+				var origin hub.Origin
+				var ok bool
+				var err error
+				kb, origin, ok, err = r.deps.Hub.LoadKeyBinding(ctx, item.ContentKey)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if !ok {
+					skips["hub 实体表中无此键位（计划与真相源不符，跳过）"]++
+					continue
+				}
+				if srcFork == "" {
+					srcFork = origin.Fork
+				}
+			}
+			ap, skip, rep, err := kbW.exec(kb, srcFork, targetFork, peers, item.Action)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}
@@ -458,13 +503,22 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				repointed[i] = rep
 			}
 		case hub.KindRulesetSetting:
-			rs, _, ok, err := r.deps.Hub.LoadRulesetSetting(ctx, item.ContentKey)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			if !ok {
-				skips["hub 实体表中无此规则集设置（计划与真相源不符，跳过）"]++
-				continue
+			var rs hub.RulesetSetting
+			if item.PayloadJSON != "" {
+				if err := json.Unmarshal([]byte(item.PayloadJSON), &rs); err != nil {
+					return nil, nil, nil, fmt.Errorf("批内项 %s: 决定值载荷解码: %w", item.ContentKey, err)
+				}
+			} else {
+				var ok bool
+				var err error
+				rs, _, ok, err = r.deps.Hub.LoadRulesetSetting(ctx, item.ContentKey)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if !ok {
+					skips["hub 实体表中无此规则集设置（计划与真相源不符，跳过）"]++
+					continue
+				}
 			}
 			ap, skip, rep, err := rsW.exec(rs, item.Action)
 			if err != nil {
@@ -482,13 +536,22 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				repointed[i] = rep
 			}
 		case hub.KindModPreset:
-			mp, _, ok, err := r.deps.Hub.LoadModPreset(ctx, item.ContentKey)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			if !ok {
-				skips["hub 实体表中无此模组预设（计划与真相源不符，跳过）"]++
-				continue
+			var mp hub.ModPreset
+			if item.PayloadJSON != "" {
+				if err := json.Unmarshal([]byte(item.PayloadJSON), &mp); err != nil {
+					return nil, nil, nil, fmt.Errorf("批内项 %s: 决定值载荷解码: %w", item.ContentKey, err)
+				}
+			} else {
+				var ok bool
+				var err error
+				mp, _, ok, err = r.deps.Hub.LoadModPreset(ctx, item.ContentKey)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if !ok {
+					skips["hub 实体表中无此模组预设（计划与真相源不符，跳过）"]++
+					continue
+				}
 			}
 			ap, skip, rep, err := mpW.exec(mp, targetFork, peers, item.Action, item.Restore)
 			if err != nil {
@@ -526,10 +589,10 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 	return applied, repointed, skips, nil
 }
 
-// loadBeatmapSet 按内容键读取谱面集 canonical 值及其来源声明（只认版本
-// 链尾——历史版本永不进入投放面，HB1）。hub 增补单键领域读方法
-// （LoadBeatmapSet）后应切换；此处以 DB() 直查承载（LoadCollection 的
-// 同构语义，只读面；写 tombstone 的既有先例见 clearRestoredTombstones）。
+// loadBeatmapSet 按内容键读取谱面集 canonical 值及其来源声明。链上任意
+// 版本都可被读取——§0.3 基线判定决定投放的版本不必是链尾（HB1 的「当前
+// 版本」仅约束收集侧建链，不约束投放面取哪个版本）。hub 增补单键领域
+// 读方法（LoadBeatmapSet）后应切换；此处以 DB() 直查承载。
 func (r *Runner) loadBeatmapSet(ctx context.Context, contentHash string) (hub.BeatmapSet, hub.Origin, bool, error) {
 	var (
 		payload    string
@@ -537,7 +600,7 @@ func (r *Runner) loadBeatmapSet(ctx context.Context, contentHash string) (hub.Be
 		originFork string
 	)
 	err := r.deps.Hub.DB().QueryRowContext(ctx,
-		`SELECT payload, origin_guid, origin_fork FROM beatmap_set WHERE content_hash=? AND superseded_by IS NULL`,
+		`SELECT payload, origin_guid, origin_fork FROM beatmap_set WHERE content_hash=?`,
 		contentHash).Scan(&payload, &originGUID, &originFork)
 	if errors.Is(err, sql.ErrNoRows) {
 		return hub.BeatmapSet{}, hub.Origin{}, false, nil
@@ -648,7 +711,7 @@ func planFileHashes(ctx context.Context, h *hub.Store, plan Plan) ([]string, err
 	for _, k := range setKeys {
 		var payload string
 		err := h.DB().QueryRowContext(ctx,
-			`SELECT payload FROM beatmap_set WHERE content_hash=? AND superseded_by IS NULL`, k).Scan(&payload)
+			`SELECT payload FROM beatmap_set WHERE content_hash=?`, k).Scan(&payload)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}

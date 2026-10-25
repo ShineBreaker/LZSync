@@ -26,6 +26,7 @@ const (
 	ActionCreate         Action = "create"          // 目标缺行 → 以 origin_guid 新建（§4.2）
 	ActionUpdate         Action = "update"          // 内容键命中 → 就地更新白名单列（保目标 Guid）
 	ActionVersionReplace Action = "version-replace" // 版本更新 → 整集原子替换三步（§5.4）
+	ActionDelete         Action = "delete"          // 按内容键定位并删行（键位集合判定的副键移除等，§0.3）
 	ActionSkip           Action = "skip"            // 跳过（必须携带原因）
 )
 
@@ -50,6 +51,13 @@ type PlanItem struct {
 	// Warning 非空 = 告警标记（动作照常执行，§5.4 R6：delta gimmick 谱面
 	// 流出告警）。预演、执行报告与 UI 一致呈现；默认动作不变。
 	Warning string
+	// PayloadJSON 非空 = 裁决层给定的变体载荷（投影 DTO JSON，§0.3 三
+	// 方判定决定值可以不是 canonical 首见值）：执行期以它替代 hub
+	// canonical 行。空 = 按 ContentKey 读 canonical（旧行为）。
+	PayloadJSON string
+	// SourceFork 非空 = 决定值的来源端（§0.3 胜者端）：执行期 S8/D20
+	// 等源端判定优先于 canonical origin_fork。空 = 用 origin_fork。
+	SourceFork string
 }
 
 // Plan 投放计划：预览页勾选结果的快照（计划项按内容键幂等，§3.3——重跑
@@ -102,6 +110,10 @@ func NewPlan(targetFork string, items []PlanItem) (Plan, error) {
 		}
 		if it.Action == ActionVersionReplace && (it.OldContentKey == "" || it.OldContentKey == it.ContentKey) {
 			return Plan{}, fmt.Errorf("deploy: version-replace 项 (%s, %s) 缺旧版本键或新旧键相同",
+				it.Kind, it.ContentKey)
+		}
+		if it.Action == ActionDelete && (it.OldContentKey != "" || it.Restore) {
+			return Plan{}, fmt.Errorf("deploy: delete 项 (%s, %s) 不得携带旧版本键/恢复标记",
 				it.Kind, it.ContentKey)
 		}
 	}

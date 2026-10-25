@@ -129,6 +129,46 @@ func (w *keyBindingWriter) exec(kb hub.KeyBinding, originFork, targetFork string
 	return applied{action: action}, skipStat{}, repoint, nil
 }
 
+// execDelete 按内容键删除目标端键位行（§0.3 集合判定：动作的决定组合
+// 集之外的多余行要移除——键位表无主键唯一约束，逐匹配行删直到无匹
+// 配）。targetKey 是四段内容键（计划项 ContentKey）。目标无该行 →
+// 幂等跳过（重续判定：已删除 → 跳过）。
+func (w *keyBindingWriter) execDelete(targetKey string) (applied, skipStat, string, error) {
+	if w.absent {
+		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
+	}
+	deleted := 0
+	// 同键可能多行（表无主键约束）：每轮删首条命中行直到无匹配。
+	for {
+		found := false
+		err := w.r.ForEach(w.class, func(obj realmObjectPtr) error {
+			key, kErr := w.rowContentKey(obj)
+			if kErr != nil {
+				return kErr
+			}
+			if key != targetKey {
+				return nil
+			}
+			found = true
+			if dErr := w.r.DeleteObject(obj); dErr != nil {
+				return dErr
+			}
+			deleted++
+			return errKeyBindingRowFound
+		})
+		if err != nil && !errors.Is(err, errKeyBindingRowFound) {
+			return applied{}, skipStat{}, "", fmt.Errorf("deploy: 现场删除键位 %s: %w", targetKey, err)
+		}
+		if !found {
+			break
+		}
+	}
+	if deleted == 0 {
+		return applied{}, skipStat{reason: "目标已无该键位行（重续判定：已删除 → 跳过）", count: 1}, "", nil
+	}
+	return applied{action: ActionDelete}, skipStat{}, "", nil
+}
+
 // rowContentKey 读现场行的内容键（可空键段 IsNull 判定 → 指针语义 → 编码；
 // 与投影端 projectKeyBinding 同一对偶形态；KeyCombination null 归一为 ""，
 // 与投影端 null → 零值一致）。

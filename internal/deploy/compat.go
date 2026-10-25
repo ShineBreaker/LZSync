@@ -241,3 +241,77 @@ func keyBindingActionAllowedIntersection(originFork, targetFork string, peers []
 	}
 	return true, ""
 }
+
+// ---- 裁决期交集预检（§0-B3/G7：appsvc 三方判定在计划装配前按单位过滤） ----
+//
+// 以下导出判定与执行期交集函数同构，但无「目标端自身」语境（判定层在
+// 单位级一次判全部 peers——任一 peer 拒绝即该单位不进任何端的计划，
+// 原因统一带 IntersectionRejectPrefix 以便计入 Pending.Unsupported）。
+
+// ScoreIntersectionReject 成绩对全部目标端的兼容性预检：逐 peer 跑
+// adaptScoreForTarget 的拒绝面（mod 名录外 / StatisticsJson 解析失败），
+// 首个拒绝返回带前缀原因；全过返回空串。
+func ScoreIntersectionReject(sc hub.Score, peers []string) string {
+	for _, f := range peers {
+		if _, _, r := adaptScoreForTarget(sc, f); r != "" {
+			return IntersectionRejectPrefix + f + " 不支持 — " + r
+		}
+	}
+	return ""
+}
+
+// ModPresetIntersectionReject 模组预设对全部目标端的兼容性预检
+// （adaptModPresetModsForTarget 的 peer 版）。
+func ModPresetIntersectionReject(mp hub.ModPreset, peers []string) string {
+	for _, f := range peers {
+		if r := adaptModPresetModsForTarget(mp, f); r != "" {
+			return IntersectionRejectPrefix + f + " 不支持 — " + r
+		}
+	}
+	return ""
+}
+
+// KeyBindingIntersectionReject 键位对全部目标端的枚举域预检（D20）：
+// originFork 是裁决决定值的来源端；ActionInt 为负恒拒（坏数据不加前缀）。
+func KeyBindingIntersectionReject(originFork string, peers []string, kb hub.KeyBinding) string {
+	if kb.ActionInt < 0 {
+		return fmt.Sprintf("键位 ActionInt=%d 为负（枚举值域非负，坏数据）", kb.ActionInt)
+	}
+	for _, f := range peers {
+		if ok, r := keyBindingActionAllowed(originFork, f, kb); !ok {
+			return IntersectionRejectPrefix + f + " 不支持 — " + r
+		}
+	}
+	return ""
+}
+
+// RulesetIntersectionReject 规则集名对全部目标端的可解析性预检（§0-B3
+// 全局交集在「规则集行」上的静态近似）：短名须在每端 official ∪
+// OwnRulesets 内，或该端有市场规则集面（MarketRulesetMinOnlineID>0，
+// 动态名录静态不可枚举——放行，真缺时执行期失败如实上报）；任一端
+// 不可解析 → 带前缀原因。
+func RulesetIntersectionReject(rulesetName string, peers []string) string {
+	if _, ok := officialRulesets[rulesetName]; ok {
+		return "" // 官方四集全部端可解析
+	}
+	for _, f := range peers {
+		p, ok := forks.Profile(f)
+		if !ok {
+			return IntersectionRejectPrefix + f + " 不支持 — 该 fork 未注册，规则集可解析性不可判定"
+		}
+		if p.MarketRulesetMinOnlineID > 0 {
+			continue // 市场规则集名录动态——静态放行，执行期兜底
+		}
+		own := false
+		for _, r := range p.OwnRulesets {
+			if r == rulesetName {
+				own = true
+				break
+			}
+		}
+		if !own {
+			return IntersectionRejectPrefix + f + " 不支持 — 规则集 " + rulesetName + " 在该端不可解析"
+		}
+	}
+	return ""
+}

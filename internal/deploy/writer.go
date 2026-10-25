@@ -163,12 +163,13 @@ func (w *collectionWriter) createRow(c hub.Collection) (realmObjectPtr, error) {
 }
 
 // writeFields 写白名单列 ∩ 目标实际列。isUpdate 时不动 ID（就地更新保
-// 目标 Guid，§4.2）；缺列计数由调用侧聚合（返回缺失列名切片）。
+// 目标 Guid，§4.2）且不动 LastModified（§0-B7/G10：端本地字段只随新行
+// 落盘，不就地覆盖目标端自己的时间戳）；缺列计数由调用侧聚合。
 func (w *collectionWriter) writeFields(obj realmObjectPtr, c hub.Collection, isUpdate bool) error {
 	if err := w.r.SetString(obj, w.cols[colCollectionName], c.Name); err != nil {
 		return fmt.Errorf("deploy: 写收藏 %q Name: %w", c.Name, err)
 	}
-	if key, ok := w.cols[colCollectionLast]; ok {
+	if key, ok := w.cols[colCollectionLast]; ok && !isUpdate {
 		if err := w.r.SetTimestamp(obj, key, c.LastModified); err != nil {
 			return fmt.Errorf("deploy: 写收藏 %q LastModified: %w", c.Name, err)
 		}

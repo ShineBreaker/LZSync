@@ -6,10 +6,22 @@ package deploy
 // 统一小写 8-4-4-4-12——往返自洽即满足投放断言需要。
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"strings"
 )
+
+// NewGuidHex 生成随机 Guid 的规范 hex（§0.3 键位集合判定新建行的主键：
+// 不沿用来源端 Guid——目标库可能已有不同行的同 Guid，撞主键会整批
+// 回滚；随机 Guid 无碰撞面）。
+func NewGuidHex() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("deploy: crypto/rand 不可用: " + err.Error())
+	}
+	return formatGuid(b)
+}
 
 // parseGuid 把 Guid 字符串解析为 realm UUID 字节。空串解析为零值 UUID
 //（fixture 播种未写 ID 列的行投影即零值，投放侧如实还原）。
