@@ -372,7 +372,13 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此谱面集当前版本（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := setW.exec(bs, item.OldContentKey, s8SameRealm(origin.Fork, targetFork), item.Action, item.Restore)
+			// §0.3-G9：S8 同域判定取决定值来源端（SourceFork），无则退回
+			// canonical origin_fork（首见出处，B2 后不再代表服务器域）。
+			src := origin.Fork
+			if item.SourceFork != "" {
+				src = item.SourceFork
+			}
+			ap, skip, rep, err := setW.exec(bs, item.OldContentKey, s8SameRealm(src, targetFork), item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}

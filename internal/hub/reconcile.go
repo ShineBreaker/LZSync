@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ReconcileCategory 是 hub→fork 对账分类（§4.2 四分类在投放预演方向的
@@ -362,9 +363,11 @@ func collectionConflicts(hubC, forkC Collection) []ConflictField {
 	return []ConflictField{{Field: "BeatmapMD5Hashes", HubValue: hf, ForkValue: ff}}
 }
 
-// beatmapSetConflicts 谱面集冲突字段（§4.2 清单：OnlineID/DateAdded/
-// StatusInt/Title；内容键 Hash 本身不比。清单数据化于 adapter 随 fork
-// 演进维护——hub 侧按设计基线内置，字段级 SQL 化留待 v2）。
+// beatmapSetConflicts 谱面集冲突字段（内容键 Hash 本身不比）。
+// §0.3-G10/B7：DateAdded/StatusInt/Protected 是端本地字段，OnlineID 是
+// S8 服务器域作用域值——天然按端发散，不参与冲突判定（参与即永久冲突）。
+// 比对面 = 就地更新实际会写的列：Title（内容元数据）+ DateSubmitted/
+// DateRanked（上游谱面状态，可同步面）。
 func beatmapSetConflicts(hubSet, forkSet BeatmapSet) []ConflictField {
 	var out []ConflictField
 	add := func(field string, a, b string) {
@@ -372,10 +375,14 @@ func beatmapSetConflicts(hubSet, forkSet BeatmapSet) []ConflictField {
 			out = append(out, ConflictField{Field: field, HubValue: a, ForkValue: b})
 		}
 	}
-	add("OnlineID", fmt.Sprint(hubSet.OnlineID), fmt.Sprint(forkSet.OnlineID))
-	add("DateAdded",
-		fmt.Sprint(hubSet.DateAdded.UnixMilli()), fmt.Sprint(forkSet.DateAdded.UnixMilli()))
-	add("StatusInt", fmt.Sprint(hubSet.StatusInt), fmt.Sprint(forkSet.StatusInt))
+	ts := func(p *time.Time) string {
+		if p == nil {
+			return "<null>"
+		}
+		return p.UTC().Format(time.RFC3339Nano)
+	}
 	add("Title", hubSet.Title, forkSet.Title)
+	add("DateSubmitted", ts(hubSet.DateSubmitted), ts(forkSet.DateSubmitted))
+	add("DateRanked", ts(hubSet.DateRanked), ts(forkSet.DateRanked))
 	return out
 }

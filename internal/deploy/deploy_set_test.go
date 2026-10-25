@@ -824,6 +824,8 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 	// 覆盖路径由显式构造的 update 动作项承载，新 canonical 场景换第二个
 	// hub）：g0v0 持有集 1 的同 Hash 新值（DateAdded/StatusInt 改）→
 	// update → OnlineID 保持同域投放的 7001。
+	// B7/G10：DateAdded/StatusInt 是端本地字段——就地更新不覆写、一致性
+	// 判定不比，故「仅本地字段不同」的同 Hash 更新判同跳过。
 	// presence 是整段快照语义——模拟完整收集必须带上目标现存的全部集。
 	applySnap(t, h, hub.Snapshot{ForkID: refB.ForkID, CollectedAt: t0.Add(3 * time.Hour),
 		BeatmapSets: []hub.BeatmapSet{set, set2}})
@@ -846,17 +848,20 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deploy(异域更新): %v", err)
 	}
-	if len(report3.Applied) != 1 || report3.Applied[0].Action != ActionUpdate {
-		t.Errorf("Deploy(异域更新) applied = %+v，期望 1 update", report3.Applied)
+	if len(report3.Applied) != 0 {
+		t.Errorf("Deploy(异域更新) applied = %+v，期望 0（仅 B7 本地字段差异→判同跳过）", report3.Applied)
 	}
 	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
 		got, ok := sr.readSetProjection(set.Hash)
 		if !ok {
 			t.Fatal("异域更新后读回缺集 1")
 		}
-		assertSetDeepEqual(t, got, modified, set.OnlineID, false) // 集行 OnlineID 保持 7001 不被触碰；难度/Author 不动（读回①段同域投放值）
-		if got.DateAdded.Equal(set.DateAdded) {
-			t.Error("异域更新未覆盖 DateAdded（S8 只豁免 OnlineID 列）")
+		if got.OnlineID != set.OnlineID {
+			t.Errorf("集行 OnlineID = %d，期望保持同域投放的 %d（S8 更新不触碰）", got.OnlineID, set.OnlineID)
+		}
+		if !got.DateAdded.Equal(set.DateAdded) || got.StatusInt != set.StatusInt {
+			t.Errorf("B7 本地字段被覆写：DateAdded=%v StatusInt=%d，期望保留目标端值 %v/%d",
+				got.DateAdded, got.StatusInt, set.DateAdded, set.StatusInt)
 		}
 	})
 }
@@ -1338,20 +1343,21 @@ func TestDeployBeatmapSetRepointed(t *testing.T) {
 	fillStore(t, store, files)
 
 	// 计划后、投放前：第三方写入同 Hash 裸行（DateAdded/Status 异于
-	// canonical）。
+	// canonical——B7 本地字段，改判后判同跳过且不覆写）。
 	insertBareSet(t, lib, refB.RealmPath, set.Hash, set.DateAdded.Add(72*time.Hour), 4, false)
+	bareAdded := set.DateAdded.Add(72 * time.Hour)
 
 	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	if len(report.Applied) != 1 || report.Applied[0].Action != ActionUpdate {
-		t.Errorf("applied = %+v（期望 1 项 update——create 改判）", report.Applied)
+		t.Errorf("applied = %+v（期望 1 update——裸行缺 DateSubmitted 等非本地字段需覆写补齐）", report.Applied)
 	}
 	if len(report.Repointed) != 1 || report.Repointed[0].Reason != "目标已出现同键行：新建 → 就地更新" {
 		t.Errorf("Repointed = %+v（期望 1 条新建→就地更新）", report.Repointed)
 	}
-	// 就地覆盖：单行、DateAdded 回到 canonical，不新建第二行。
+	// 就地更新路径不动本地字段：单行、DateAdded 保第三方写入值，不新建第二行。
 	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
 		if got := classRowCount(t, sr, "BeatmapSet"); got != 1 {
 			t.Errorf("BeatmapSet 行数 = %d（期望 1——改判不建第二行）", got)
@@ -1360,8 +1366,8 @@ func TestDeployBeatmapSetRepointed(t *testing.T) {
 		if !ok {
 			t.Fatal("改判后读回缺集")
 		}
-		if !got.DateAdded.Equal(set.DateAdded) {
-			t.Errorf("改判后 DateAdded = %v，期望覆盖回 canonical %v", got.DateAdded, set.DateAdded)
+		if !got.DateAdded.Equal(bareAdded) {
+			t.Errorf("改判后 DateAdded = %v，期望保留目标端值 %v（B7）", got.DateAdded, bareAdded)
 		}
 	})
 }
@@ -1462,8 +1468,8 @@ func TestDeployBeatmapSetSoftDeleteGuard(t *testing.T) {
 		if got.DeletePending {
 			t.Error("恢复后 DeletePending = true（期望 false——复活是用户显式意图）")
 		}
-		if !got.DateAdded.Equal(set.DateAdded) {
-			t.Errorf("恢复后 DateAdded = %v，期望 canonical %v", got.DateAdded, set.DateAdded)
+		if !got.DateAdded.Equal(goneAt) {
+			t.Errorf("恢复后 DateAdded = %v，期望保留软删行的目标端值 %v（B7 端本地字段）", got.DateAdded, goneAt)
 		}
 	})
 }

@@ -20,6 +20,7 @@ package deploy
 import (
 	"fmt"
 
+	"lzsync/internal/forks"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
 )
@@ -411,7 +412,9 @@ func (w *scoreWriter) writeScore(obj realmObjectPtr, sc hub.Score, isCreate, sam
 			return fmt.Errorf("deploy: 写成绩 LegacyTotalScore: %w", err)
 		}
 	}
-	if key, ok := w.scoreCols["PP"]; ok {
+	// PP 是 B7 端本地字段（各端 PP 算法不同，D10）：新建行落来源端值，
+	// 就地更新不覆写目标端已有值。
+	if key, ok := w.scoreCols["PP"]; ok && (isCreate || !forks.IsLocalField("Score", "PP")) {
 		var err error
 		if sc.PP == nil {
 			err = w.r.SetNull(obj, key)
@@ -598,7 +601,7 @@ func (w *scoreWriter) matchesCanonical(obj realmObjectPtr, sc hub.Score, sameRea
 			return false, err
 		}
 	}
-	if key, ok := w.scoreCols["PP"]; ok {
+	if key, ok := w.scoreCols["PP"]; ok && !forks.IsLocalField("Score", "PP") {
 		null, err := w.r.IsNull(obj, key)
 		if err != nil {
 			return false, err

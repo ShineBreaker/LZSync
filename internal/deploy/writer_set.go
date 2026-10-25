@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"time"
 
+	"lzsync/internal/forks"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
 )
@@ -481,8 +482,10 @@ func (w *beatmapSetWriter) createSet(bs hub.BeatmapSet, sameRealm bool) (realmOb
 }
 
 // writeSetScalars 写集行白名单标量列。isUpdate 时不动 ID / Hash（保目标
-// Guid，§4.2；内容键命中必相等，写它是死代码）。DeletePending/Protected
-// 恒写 canonical 值 false（正常进 hub 的行即如此，§4.1）。
+// Guid，§4.2；内容键命中必相等，写它是死代码）。DeletePending 恒写
+// canonical 值 false（正常进 hub 的行即如此，§4.1；恢复项靠它撤销软删）。
+// B7 端本地字段（forks.LocalFields["BeatmapSet"]：DateAdded/Status/
+// Protected）只在新建行落来源端值，就地更新不覆写目标端已有值。
 func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet, isCreate, sameRealm bool) error {
 	if isCreate {
 		// 主键形态的 ID 已由 CreateObjectWithGuidPK 落定（主键列不可再 set）。
@@ -515,7 +518,7 @@ func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet
 			}
 		}
 	}
-	if key, ok := w.setCols["DateAdded"]; ok {
+	if key, ok := w.setCols["DateAdded"]; ok && (isCreate || !forks.IsLocalField("BeatmapSet", "DateAdded")) {
 		if err := w.r.SetTimestamp(obj, key, bs.DateAdded); err != nil {
 			return fmt.Errorf("deploy: 写谱面集 %s DateAdded: %w", bs.Hash, err)
 		}
@@ -543,7 +546,7 @@ func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet
 			return fmt.Errorf("deploy: 写谱面集 %s %s: %w", bs.Hash, c.name, err)
 		}
 	}
-	if key, ok := w.setCols["Status"]; ok {
+	if key, ok := w.setCols["Status"]; ok && (isCreate || !forks.IsLocalField("BeatmapSet", "Status")) {
 		if err := w.r.SetInt64(obj, key, int64(bs.StatusInt)); err != nil {
 			return fmt.Errorf("deploy: 写谱面集 %s Status: %w", bs.Hash, err)
 		}
@@ -555,6 +558,11 @@ func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet
 		{"DeletePending", bs.DeletePending},
 		{"Protected", bs.Protected},
 	} {
+		// 端本地字段就地更新不写（Protected）；DeletePending 非 B7 字段
+		//——它是同步语义的一部分（恢复项写回 false）。
+		if !isCreate && forks.IsLocalField("BeatmapSet", c.name) {
+			continue
+		}
 		if key, ok := w.setCols[c.name]; ok {
 			if err := w.r.SetBool(obj, key, c.val); err != nil {
 				return fmt.Errorf("deploy: 写谱面集 %s %s: %w", bs.Hash, c.name, err)
@@ -566,7 +574,7 @@ func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet
 
 // matchesCanonical 现场集行是否已与 canonical 写面一致（重续判定输入）。
 // 与 writeSetScalars 严格对偶：不写的列（ID/Hash/难度/Files 列表、异域
-// 更新的 OnlineID）不比。
+// 更新的 OnlineID、就地更新的 B7 端本地列）不比。
 func (w *beatmapSetWriter) matchesCanonical(obj realmObjectPtr, bs hub.BeatmapSet, sameRealm bool) (bool, error) {
 	if sameRealm {
 		if key, ok := w.setCols["OnlineID"]; ok {
@@ -576,12 +584,8 @@ func (w *beatmapSetWriter) matchesCanonical(obj realmObjectPtr, bs hub.BeatmapSe
 			}
 		}
 	}
-	if key, ok := w.setCols["DateAdded"]; ok {
-		ts, err := w.r.GetTimestamp(obj, key)
-		if err != nil || !ts.UTC().Equal(bs.DateAdded) {
-			return false, err
-		}
-	}
+	// DateAdded/Status/Protected 是 B7 端本地字段（就地更新不写）→
+	// 不参与一致性判定，否则永远判定不一致、重复写。
 	for _, c := range []struct {
 		name string
 		val  *time.Time
@@ -614,12 +618,6 @@ func (w *beatmapSetWriter) matchesCanonical(obj realmObjectPtr, bs hub.BeatmapSe
 			return false, nil
 		}
 	}
-	if key, ok := w.setCols["Status"]; ok {
-		v, err := w.r.GetInt64(obj, key)
-		if err != nil || v != int64(bs.StatusInt) {
-			return false, err
-		}
-	}
 	for _, c := range []struct {
 		name string
 		val  bool
@@ -627,6 +625,9 @@ func (w *beatmapSetWriter) matchesCanonical(obj realmObjectPtr, bs hub.BeatmapSe
 		{"DeletePending", bs.DeletePending},
 		{"Protected", bs.Protected},
 	} {
+		if forks.IsLocalField("BeatmapSet", c.name) {
+			continue // 与写面对偶：就地更新不写 → 不比
+		}
 		if key, ok := w.setCols[c.name]; ok {
 			v, err := w.r.GetBool(obj, key)
 			if err != nil || v != c.val {
