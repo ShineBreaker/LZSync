@@ -89,6 +89,19 @@ func ModPresetContentKey(rulesetShortName, name string) string {
 	return encodeContentKey(rulesetShortName, name)
 }
 
+// KeyBindingIdentityKey 键位三段同步身份键 (RulesetName, Variant, ActionInt)
+// 的单列编码（§0.3 判定粒度——与内容键同编码域、少 KeyCombination 段；
+// 判定层以它聚合一动作的全部键位组合行）。
+func KeyBindingIdentityKey(rulesetName *string, variant *int, actionInt int) string {
+	return encodeContentKey(rulesetName, variant, actionInt)
+}
+
+// DecodeKeyBindingContentKey 是 KeyBindingContentKey 的导出解析面（判定
+// 层由四段内容键还原身份段）。
+func DecodeKeyBindingContentKey(key string) (rulesetName *string, variant *int, actionInt int, keyCombination string, err error) {
+	return decodeKeyBindingContentKey(key)
+}
+
 // decodeKeyBindingContentKey 是 KeyBindingContentKey 的解析侧（Load 按单列
 // 键取行时拆回复合主键参数；nil 段还原 null 语义）。
 func decodeKeyBindingContentKey(key string) (rulesetName *string, variant *int, actionInt int, keyCombination string, err error) {

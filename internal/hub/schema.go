@@ -2,7 +2,7 @@ package hub
 
 // SchemaVersion 当前 hub.db schema 版本（版本化迁移自管，§3.4；hub 是
 // LZSync 自有格式，与游戏库 schema 完全无关，S3 不受影响）。
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // ddl 是 schema v1 全部建表语句（§4.4 表族）。时间戳一律 Unix 毫秒。
 // 契约要点：
@@ -185,7 +185,31 @@ CREATE TABLE IF NOT EXISTS mod_preset(
 );
 `
 
+// ddlV4 是 schema v4 增量（§0.3 基线三方判定的持久面）：baseline 表记
+// 录「端 f 上同步身份 I 在上一轮同步结束时的取值指纹」b(f,I)。只做加法。
+//
+// 判定单位 = (fork_id, kind, identity, member)：
+//   - member 仅收藏夹逐成员判定使用（成员 = BeatmapMD5Hashes 单元素）；
+//     其他 kind 恒 ''；
+//   - kind 除实体类外含伪 kind "game_ini"（白名单键逐键判定，§0.3 表）；
+//   - value = 同步值指纹（谱面集 = 持有版本内容哈希、设置 = Value、键位 =
+//     该 action 的 KeyCombination 集合 JSON、收藏成员 = "0"/"1"、ini = 键
+//     值原文）；BaselineAbsent 哨兵 = 已知缺席（与「无行 = 无同步史」区分）。
+//   - 冲突单位的基线不推进（appsvc 决定哪些单位不进 AdvanceBaselines），
+//     行只增不删——历史基线是审计面，身份永远消失时行自然无人再读。
+const ddlV4 = `
+CREATE TABLE IF NOT EXISTS baseline(
+  fork_id   TEXT NOT NULL,
+  kind      TEXT NOT NULL,
+  identity  TEXT NOT NULL,
+  member    TEXT NOT NULL DEFAULT '',
+  value     TEXT NOT NULL,
+  synced_at INTEGER NOT NULL,
+  PRIMARY KEY(fork_id, kind, identity, member)
+);
+`
+
 // migrations 是版本化迁移链：migrations[i] 把库从 schema 版本 i+1 升到
 // i+2（migrations[0] = v1→v2）。新增版本 = 追加一段 DDL 并抬高
 // SchemaVersion；禁止改写既有条目（旧库可能已按其落盘）。
-var migrations = []string{ddlV2, ddlV3}
+var migrations = []string{ddlV2, ddlV3, ddlV4}

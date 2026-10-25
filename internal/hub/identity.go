@@ -26,6 +26,13 @@ const (
 // 弱键分隔符 "|" 与字段值碰撞时可能误并——v1 接受该极小概率（谱面身份仅
 // 用于配对建议，弱键本就需用户拍板），待真实数据暴露再归一化。
 func identityKey(bs *BeatmapSet) (key string, strong bool) {
+	return BeatmapSetIdentityKey(bs)
+}
+
+// BeatmapSetIdentityKey 计算谱面集身份键（§4.2 第二层）的导出面——
+// 判定层（§0.3）需对 presence.local_values（未建身份配对缓存的投影
+// DTO，如仅目标端的未知版本）同样算键。
+func BeatmapSetIdentityKey(bs *BeatmapSet) (key string, strong bool) {
 	if bs.OnlineID > 0 {
 		return "online:" + strconv.FormatInt(bs.OnlineID, 10), true
 	}
