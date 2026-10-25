@@ -21,6 +21,7 @@ import (
 	"lzsync/internal/forks"
 	"lzsync/internal/guard"
 	"lzsync/internal/hub"
+	"lzsync/internal/inisettings"
 )
 
 //go:embed resources/icon.png
@@ -117,6 +118,13 @@ func openDeps() (appsvc.Deps, error) {
 	if err != nil {
 		return appsvc.Deps{}, fmt.Errorf("打开备份目录: %w", err)
 	}
+	// game.ini 快照仓（§5.1-M3 收集面）：开仓失败不拦主链路（ini 面是
+	// 辅助面，collect 报 IniKeysCollected=0 如实呈现），只留日志。
+	gameIni, giErr := inisettings.OpenStore(filepath.Join(dataDir, "gameini"))
+	if giErr != nil {
+		log.Printf("game.ini 快照仓不可用（本会话不含 ini 收集面）: %v", giErr)
+		gameIni = nil
+	}
 	return appsvc.Deps{
 		Hub:       h,
 		Files:     filestore.NewEngine(store),
@@ -125,6 +133,7 @@ func openDeps() (appsvc.Deps, error) {
 		Guard:     guard.NewGuard(builtinProcessNames()),
 		DataRoot:  resolveDataRoot(),
 		DataDir:   dataDir,
+		GameIni:   gameIni,
 	}, nil
 }
 

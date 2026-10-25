@@ -21,6 +21,7 @@ import (
 	"lzsync/internal/forks"
 	"lzsync/internal/guard"
 	"lzsync/internal/hub"
+	"lzsync/internal/inisettings"
 )
 
 // ErrBusy 已有长任务在执行（同一时刻只允许一个收集/投放任务）。
@@ -225,6 +226,11 @@ type Deps struct {
 	Guard     *guard.Guard
 	DataRoot  string // fork 数据根（P-3 平台规则由装配方解析后传入）
 	DataDir   string // LZSync 自有数据目录（plan.json 持久落点）
+	// GameIni 是 game.ini 白名单键快照仓（hub 目录 gameini/，§5.1-M3 收
+	// 集面）。nil = ini 面未配置（collect 如实报 IniKeysCollected=0）；
+	// 投放面（SyncGameIni 的 source fork 决策）属「设置类三实体接线」
+	// 待办，不在本字段承诺范围。
+	GameIni *inisettings.Store
 }
 
 // NewRealBackend 构造真实后端。native 库加载失败时返回错误，由 main 进入

@@ -795,6 +795,7 @@ func (s *realSync) cRunner() *collect.Runner {
 		s.cRun = collect.NewRunner(collect.Deps{
 			Hub: s.deps.Hub, Files: s.deps.Files,
 			Snapshots: s.deps.Snapshots, Guard: s.deps.Guard,
+			GameIni: s.deps.GameIni,
 		})
 	}
 	return s.cRun
