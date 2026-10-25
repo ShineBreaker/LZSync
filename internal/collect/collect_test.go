@@ -374,14 +374,14 @@ func TestCollectM3SettingsEntities(t *testing.T) {
 	osuName, maniaName := "osu", "mania"
 	mania4, mania7 := 4, 7
 	wantKB := map[string]hub.KeyBinding{
-		hub.KeyBindingContentKey(nil, nil, 100): {
+		hub.KeyBindingContentKey(nil, nil, 100, "Ctrl,Shift+Z"): {
 			ID: guidNorm(seed.KeyBindings[0].Guid), ActionInt: 100, KeyCombination: "Ctrl,Shift+Z"},
-		hub.KeyBindingContentKey(&osuName, nil, 7): {
+		hub.KeyBindingContentKey(&osuName, nil, 7, "Z"): {
 			ID: guidNorm(seed.KeyBindings[1].Guid), RulesetName: &osuName, ActionInt: 7, KeyCombination: "Z"},
-		hub.KeyBindingContentKey(&maniaName, &mania4, 12): {
+		hub.KeyBindingContentKey(&maniaName, &mania4, 12, "F"): {
 			ID: guidNorm(seed.KeyBindings[2].Guid), RulesetName: &maniaName, Variant: &mania4,
 			ActionInt: 12, KeyCombination: "F"},
-		hub.KeyBindingContentKey(&maniaName, &mania7, 12): {
+		hub.KeyBindingContentKey(&maniaName, &mania7, 12, "D,F,J,K"): {
 			ID: guidNorm(seed.KeyBindings[3].Guid), RulesetName: &maniaName, Variant: &mania7,
 			ActionInt: 12, KeyCombination: "D,F,J,K"},
 	}
@@ -398,7 +398,7 @@ func TestCollectM3SettingsEntities(t *testing.T) {
 		}
 	}
 	// bms 键位（字符串列不解析）：照收。
-	got, _, ok, err := h.hub.LoadKeyBinding(ctx, hub.KeyBindingContentKey(strPtrC("bms"), nil, 3))
+	got, _, ok, err := h.hub.LoadKeyBinding(ctx, hub.KeyBindingContentKey(strPtrC("bms"), nil, 3, "Space"))
 	if err != nil || !ok || got.KeyCombination != "Space" || got.RulesetName == nil || *got.RulesetName != "bms" {
 		t.Errorf("bms 键位入仓 = (%+v,%v)，期望随行保留（D20 过滤在投放侧）", got, err)
 	}
@@ -877,5 +877,65 @@ func TestCollectG0v0MarketRulesetScore(t *testing.T) {
 	rows.Close()
 	if len(onlineIDs) != 1 || onlineIDs[0] == 99001 {
 		t.Errorf("hub score OnlineID = %v，期望仅标准行（-1），market 99001 不入", onlineIDs)
+	}
+}
+
+// TestDedupeSnapshotFirstWins 真实库实测踩坑回归：源库同键多行（如 lazer
+// 重复的全局键位行 [null,null,action]）必须首个生效、其余计数丢弃——
+// 否则 presence 整段重写撞 UNIQUE 约束（§4.2 键即身份、§1.5-4 计数告知）。
+// 键位身份含 KeyCombination（真库实证：一 action 多键是 lazer 正常形态），
+// 不同键组合行必须全部保留。
+func TestDedupeSnapshotFirstWins(t *testing.T) {
+	global := (*string)(nil)
+	noVar := (*int)(nil)
+	snap := &hub.Snapshot{
+		Collections: []hub.Collection{{Name: "dup"}, {Name: "dup"}, {Name: "ok"}},
+		KeyBindings: []hub.KeyBinding{
+			{ID: "a", RulesetName: global, Variant: noVar, ActionInt: 9, KeyCombination: "A"},
+			{ID: "a2", RulesetName: global, Variant: noVar, ActionInt: 9, KeyCombination: "A"},
+			{ID: "b", RulesetName: global, Variant: noVar, ActionInt: 9, KeyCombination: "B"},
+			{ID: "c", RulesetName: global, Variant: noVar, ActionInt: 8, KeyCombination: "C"},
+		},
+		RulesetSettings: []hub.RulesetSetting{
+			{RulesetName: "osu", Variant: 0, Key: "k", Value: "1"},
+			{RulesetName: "osu", Variant: 0, Key: "k", Value: "2"},
+		},
+		ModPresets: []hub.ModPreset{
+			{ID: "p1", RulesetShortName: "osu", Name: "n"},
+			{ID: "p2", RulesetShortName: "osu", Name: "n"},
+		},
+		Skins:  []hub.Skin{{Hash: "h1"}, {Hash: "h1"}},
+		Scores: []hub.Score{{BeatmapHash: "b", Hash: "s"}, {BeatmapHash: "b", Hash: "s"}},
+	}
+	skips := map[string]int{}
+	dedupeSnapshot(snap, skips)
+
+	if got := len(snap.Collections); got != 2 {
+		t.Errorf("收藏夹去重后 = %d，期望 2", got)
+	}
+	// 同 action 不同键组合（"A"/"B"）全部保留；仅全同行（"A","A"）去重。
+	if got := len(snap.KeyBindings); got != 3 {
+		t.Errorf("键位去重后 = %d，期望 3（多键绑定保留，仅全同行丢弃）", got)
+	}
+	if snap.KeyBindings[0].ID != "a" || snap.KeyBindings[0].KeyCombination != "A" {
+		t.Errorf("键位首个生效断言失败：got ID=%s combo=%s", snap.KeyBindings[0].ID, snap.KeyBindings[0].KeyCombination)
+	}
+	if got := len(snap.RulesetSettings); got != 1 || snap.RulesetSettings[0].Value != "1" {
+		t.Errorf("规则集设置去重后 = %d（值 %q），期望 1（首值 1）", got, snap.RulesetSettings[0].Value)
+	}
+	if got := len(snap.ModPresets); got != 1 || snap.ModPresets[0].ID != "p1" {
+		t.Errorf("模组预设去重后 = %d，期望 1（首行 p1）", got)
+	}
+	for kind, want := range map[string]int{
+		"重复收藏夹名行丢弃（首个生效）":   1,
+		"重复键位行丢弃（首个生效）":     1,
+		"重复规则集设置行丢弃（首个生效）": 1,
+		"重复模组预设行丢弃（首个生效）":  1,
+		"重复皮肤行丢弃（首个生效）":     1,
+		"重复成绩行丢弃（首个生效）":     1,
+	} {
+		if got := skips[kind]; got != want {
+			t.Errorf("skips[%q] = %d，期望 %d", kind, got, want)
+		}
 	}
 }

@@ -55,10 +55,14 @@ func encodeContentKey(parts ...any) string {
 	return string(b)
 }
 
-// KeyBindingContentKey 键位组合内容键 (RulesetName, Variant, ActionInt)
-// （§4.2 第一层）的单列编码；nil 段保真为 null（全局键位/无变体）。
-func KeyBindingContentKey(rulesetName *string, variant *int, actionInt int) string {
-	return encodeContentKey(rulesetName, variant, actionInt)
+// KeyBindingContentKey 键位组合内容键 (RulesetName, Variant, ActionInt,
+// KeyCombination)（§4.2 第一层）的单列编码；nil 段保真为 null（全局键位/
+// 无变体）。KeyCombination 段是 2026-10-25 真实库实测修订：lazer 一个
+// action 允许多行多键（默认键位大量一动作双键；真库探针 495 行塌缩成
+// 311 个三段键、183 组同键不同键组合、0 组全同重复），三段键会把副键位
+// 行误判为重复而吞掉。
+func KeyBindingContentKey(rulesetName *string, variant *int, actionInt int, keyCombination string) string {
+	return encodeContentKey(rulesetName, variant, actionInt, keyCombination)
 }
 
 // RulesetSettingContentKey 规则集设置组合内容键 (RulesetName, Variant,
@@ -75,21 +79,24 @@ func ModPresetContentKey(rulesetShortName, name string) string {
 
 // decodeKeyBindingContentKey 是 KeyBindingContentKey 的解析侧（Load 按单列
 // 键取行时拆回复合主键参数；nil 段还原 null 语义）。
-func decodeKeyBindingContentKey(key string) (rulesetName *string, variant *int, actionInt int, err error) {
-	var parts [3]json.RawMessage
+func decodeKeyBindingContentKey(key string) (rulesetName *string, variant *int, actionInt int, keyCombination string, err error) {
+	var parts [4]json.RawMessage
 	if dErr := json.Unmarshal([]byte(key), &parts); dErr != nil {
-		return nil, nil, 0, fmt.Errorf("hub: 非法的键位内容键 %q: %w", key, dErr)
+		return nil, nil, 0, "", fmt.Errorf("hub: 非法的键位内容键 %q: %w", key, dErr)
 	}
 	if dErr := json.Unmarshal(parts[0], &rulesetName); dErr != nil {
-		return nil, nil, 0, fmt.Errorf("hub: 键位内容键 %q 的 RulesetName 段非法: %w", key, dErr)
+		return nil, nil, 0, "", fmt.Errorf("hub: 键位内容键 %q 的 RulesetName 段非法: %w", key, dErr)
 	}
 	if dErr := json.Unmarshal(parts[1], &variant); dErr != nil {
-		return nil, nil, 0, fmt.Errorf("hub: 键位内容键 %q 的 Variant 段非法: %w", key, dErr)
+		return nil, nil, 0, "", fmt.Errorf("hub: 键位内容键 %q 的 Variant 段非法: %w", key, dErr)
 	}
 	if dErr := json.Unmarshal(parts[2], &actionInt); dErr != nil {
-		return nil, nil, 0, fmt.Errorf("hub: 键位内容键 %q 的 ActionInt 段非法: %w", key, dErr)
+		return nil, nil, 0, "", fmt.Errorf("hub: 键位内容键 %q 的 ActionInt 段非法: %w", key, dErr)
 	}
-	return rulesetName, variant, actionInt, nil
+	if dErr := json.Unmarshal(parts[3], &keyCombination); dErr != nil {
+		return nil, nil, 0, "", fmt.Errorf("hub: 键位内容键 %q 的 KeyCombination 段非法: %w", key, dErr)
+	}
+	return rulesetName, variant, actionInt, keyCombination, nil
 }
 
 // ApplyResult 是 ApplySnapshot 的执行摘要。
@@ -303,20 +310,21 @@ ON CONFLICT(beatmap_hash, content_hash) DO UPDATE SET
 }
 
 // upsertKeyBinding 键位实体行（v3，组合内容键 = (RulesetName, Variant,
-// ActionInt)；NULL 语义段归一化哨兵见 ddlV3 注释）。同 HB3 语义。
+// ActionInt, KeyCombination)；NULL 语义段归一化哨兵见 ddlV3 注释）。
+// 同 HB3 语义。
 func upsertKeyBinding(ctx context.Context, tx *sql.Tx, kb *KeyBinding, fork string, now int64) error {
 	payload, err := json.Marshal(kb)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt), err)
+		return fmt.Errorf("hub: 序列化键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), err)
 	}
 	rulesetName, variant := keyBindingKeyCols(kb.RulesetName, kb.Variant)
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO key_binding(ruleset_name, variant, action_int, payload, origin_guid, origin_fork, first_seen, updated_at)
-VALUES(?,?,?,?,?,?,?,?)
-ON CONFLICT(ruleset_name, variant, action_int) DO UPDATE SET
+INSERT INTO key_binding(ruleset_name, variant, action_int, key_combination, payload, origin_guid, origin_fork, first_seen, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?)
+ON CONFLICT(ruleset_name, variant, action_int, key_combination) DO UPDATE SET
   payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		rulesetName, variant, kb.ActionInt, string(payload), kb.ID, fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt), err)
+		rulesetName, variant, kb.ActionInt, kb.KeyCombination, string(payload), kb.ID, fork, now, now); err != nil {
+		return fmt.Errorf("hub: upsert 键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), err)
 	}
 	return nil
 }
@@ -431,7 +439,7 @@ func rewritePresence(ctx context.Context, tx *sql.Tx, snap *Snapshot, now int64)
 	}
 	for i := range snap.KeyBindings {
 		kb := &snap.KeyBindings[i]
-		if aErr := appendPlan(&plans[4], KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt), kb); aErr != nil {
+		if aErr := appendPlan(&plans[4], KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), kb); aErr != nil {
 			return 0, 0, aErr
 		}
 	}

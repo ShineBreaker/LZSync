@@ -223,12 +223,73 @@ func project(r *realmc.Realm, target forks.LibraryRef, prog ProgressFunc) (hub.S
 		}
 	}
 
+	// 源库同键重复行去重（真实库实测踩坑）：内容键即身份（§4.2），而
+	// hub 的 presence/payload 均以内容键为主键——源库存在同键多行（如
+	// lazer 重复的全局键位行 [null,null,action]）时按首个生效、其余计数
+	// 丢弃（§1.5-4 不静默吞），否则 presence 整段重写撞 UNIQUE 约束。
+	dedupeSnapshot(&snap, skips)
+
 	// 跳过计数 → 稳定顺序的 SkipStat 切片（collect_log 可断言）。
 	for reason, n := range skips {
 		snap.Skips = append(snap.Skips, hub.SkipStat{Reason: reason, Count: n})
 	}
-	sort.Slice(snap.Skips, func(i, j int) bool { return snap.Skips[i].Reason < snap.Skips[j].Reason })
+	sort.Slice(snap.Skips, func(i, j int) bool { return snap.Skips[i].Reason < snap.Skips[i].Reason })
 	return snap, nil
+}
+
+// dedupeByKey 按内容键去重（首个生效），返回保留切片与丢弃计数。
+func dedupeByKey[T any](in []T, key func(T) string) ([]T, int) {
+	seen := make(map[string]bool, len(in))
+	out := make([]T, 0, len(in))
+	dropped := 0
+	for _, v := range in {
+		k := key(v)
+		if seen[k] {
+			dropped++
+			continue
+		}
+		seen[k] = true
+		out = append(out, v)
+	}
+	return out, dropped
+}
+
+// dedupeSnapshot 对快照全部实体面按 §4.2 内容键去重；丢弃按实体类型分
+// 别计数（SkipStat 归因到具体面，真实库诊断可读）。
+func dedupeSnapshot(snap *hub.Snapshot, skips map[string]int) {
+	var n int
+	if snap.Collections, n = dedupeByKey(snap.Collections,
+		func(c hub.Collection) string { return c.Name }); n > 0 {
+		skips["重复收藏夹名行丢弃（首个生效）"] += n
+	}
+	if snap.BeatmapSets, n = dedupeByKey(snap.BeatmapSets,
+		func(s hub.BeatmapSet) string { return s.Hash }); n > 0 {
+		skips["重复谱面集行丢弃（首个生效）"] += n
+	}
+	if snap.Skins, n = dedupeByKey(snap.Skins,
+		func(s hub.Skin) string { return s.Hash }); n > 0 {
+		skips["重复皮肤行丢弃（首个生效）"] += n
+	}
+	if snap.Scores, n = dedupeByKey(snap.Scores,
+		func(s hub.Score) string { return hub.ScoreContentKey(s.BeatmapHash, s.Hash) }); n > 0 {
+		skips["重复成绩行丢弃（首个生效）"] += n
+	}
+	if snap.KeyBindings, n = dedupeByKey(snap.KeyBindings,
+		func(kb hub.KeyBinding) string {
+			return hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination)
+		}); n > 0 {
+		skips["重复键位行丢弃（首个生效）"] += n
+	}
+	if snap.RulesetSettings, n = dedupeByKey(snap.RulesetSettings,
+		func(rs hub.RulesetSetting) string {
+			return hub.RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key)
+		}); n > 0 {
+		skips["重复规则集设置行丢弃（首个生效）"] += n
+	}
+	if snap.ModPresets, n = dedupeByKey(snap.ModPresets,
+		func(mp hub.ModPreset) string { return hub.ModPresetContentKey(mp.RulesetShortName, mp.Name) }); n > 0 {
+		skips["重复模组预设行丢弃（首个生效）"] += n
+	}
 }
 
 // ownSkinsOf 取目标 fork 注册表声明的专有皮肤指纹（§4.3：fork 知识只在

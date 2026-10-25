@@ -957,7 +957,7 @@ func TestApplySnapshotSettingsRoundtrip(t *testing.T) {
 	}
 
 	// 键位：nil 键段（全局/无变体）经编码键与复合主键两路往返保真。
-	global, origin, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(nil, nil, 100))
+	global, origin, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(nil, nil, 100, "Ctrl,Shift+Z"))
 	if err != nil || !ok {
 		t.Fatalf("LoadKeyBinding(全局) = (%v,%v)", ok, err)
 	}
@@ -971,16 +971,16 @@ func TestApplySnapshotSettingsRoundtrip(t *testing.T) {
 	// 规则集级（RulesetName 非空、Variant nil）与 mania 双变体。
 	osuName, maniaName := "osu", "mania"
 	mania4 := 4
-	kb, _, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, nil, 7))
+	kb, _, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&osuName, nil, 7, "Z"))
 	if err != nil || !ok || kb.ID != "g-v3-osu" || kb.KeyCombination != "Z" {
 		t.Errorf("规则集级键位往返不一致: (%+v,%v)", kb, err)
 	}
-	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&maniaName, &mania4, 12))
+	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&maniaName, &mania4, 12, "F"))
 	if err != nil || !ok || kb.ID != "g-v3-mania4" || kb.KeyCombination != "F" {
 		t.Errorf("mania 4K 键位往返不一致: (%+v,%v)", kb, err)
 	}
 	mania7 := 7
-	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&maniaName, &mania7, 12))
+	kb, _, ok, err = s.LoadKeyBinding(context.Background(), KeyBindingContentKey(&maniaName, &mania7, 12, "D,F,J,K"))
 	if err != nil || !ok || kb.ID != "g-v3-mania7" || kb.KeyCombination != "D,F,J,K" {
 		t.Errorf("mania 7K 键位往返不一致: (%+v,%v)", kb, err)
 	}
@@ -1025,7 +1025,7 @@ func TestApplySnapshotSettingsRoundtrip(t *testing.T) {
 
 	// HB3：同键从 fork B 再收集 → origin_fork 随行更新、guid 首次固定。
 	applySnap(t, s, mkSettingsSnapshot("B", "g-b"))
-	if _, oc, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(nil, nil, 100)); err != nil || !ok ||
+	if _, oc, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(nil, nil, 100, "Ctrl,Shift+Z")); err != nil || !ok ||
 		oc != (Origin{GUID: "g-v3-global", Fork: "B"}) {
 		t.Errorf("HB3 键位 Origin = (%+v,%v)", oc, err)
 	}
@@ -1061,7 +1061,7 @@ func TestSettingsTombstoneLifecycle(t *testing.T) {
 		t.Fatalf("TombstonesAdded = %d，期望 3", res.TombstonesAdded)
 	}
 	for kind, key := range map[EntityKind]string{
-		KindKeyBinding:     KeyBindingContentKey(nil, nil, 100),
+		KindKeyBinding:     KeyBindingContentKey(nil, nil, 100, "Ctrl,Shift+Z"),
 		KindRulesetSetting: RulesetSettingContentKey("osu", 0, "hud_position"),
 		KindModPreset:      ModPresetContentKey("osu", "My Preset|with|pipes"),
 	} {
@@ -1086,27 +1086,28 @@ func TestSettingsContentKeyEncoding(t *testing.T) {
 	osuName := "osu"
 	mania4, mania7 := 4, 7
 	cases := []struct {
-		key  string
-		want string
-		rule *string
-		vnt  *int
-		act  int
+		key   string
+		want  string
+		rule  *string
+		vnt   *int
+		act   int
+		combo string
 	}{
-		{KeyBindingContentKey(nil, nil, 100), `[null,null,100]`, nil, nil, 100},
-		{KeyBindingContentKey(&osuName, nil, 7), `["osu",null,7]`, &osuName, nil, 7},
-		{KeyBindingContentKey(&osuName, &mania4, 12), `["osu",4,12]`, &osuName, &mania4, 12},
-		{KeyBindingContentKey(&osuName, &mania7, 12), `["osu",7,12]`, &osuName, &mania7, 12},
+		{KeyBindingContentKey(nil, nil, 100, "Ctrl,Shift+Z"), `[null,null,100,"Ctrl,Shift+Z"]`, nil, nil, 100, "Ctrl,Shift+Z"},
+		{KeyBindingContentKey(&osuName, nil, 7, "Z"), `["osu",null,7,"Z"]`, &osuName, nil, 7, "Z"},
+		{KeyBindingContentKey(&osuName, &mania4, 12, "F"), `["osu",4,12,"F"]`, &osuName, &mania4, 12, "F"},
+		{KeyBindingContentKey(&osuName, &mania7, 12, "D,F,J,K"), `["osu",7,12,"D,F,J,K"]`, &osuName, &mania7, 12, "D,F,J,K"},
 	}
 	for _, c := range cases {
 		if c.key != c.want {
 			t.Errorf("KeyBindingContentKey = %s，期望 %s", c.key, c.want)
 		}
-		rule, vnt, act, err := decodeKeyBindingContentKey(c.key)
+		rule, vnt, act, combo, err := decodeKeyBindingContentKey(c.key)
 		if err != nil {
 			t.Fatalf("decodeKeyBindingContentKey(%s): %v", c.key, err)
 		}
-		if !ptrEqStr(rule, c.rule) || !ptrEqInt(vnt, c.vnt) || act != c.act {
-			t.Errorf("键位键往返不一致: (%+v,%+v,%d)", rule, vnt, act)
+		if !ptrEqStr(rule, c.rule) || !ptrEqInt(vnt, c.vnt) || act != c.act || combo != c.combo {
+			t.Errorf("键位键往返不一致: (%+v,%+v,%d,%q)", rule, vnt, act, combo)
 		}
 	}
 	if got := RulesetSettingContentKey("osu", 0, "hud|position"); got != `["osu",0,"hud|position"]` {
@@ -1116,11 +1117,16 @@ func TestSettingsContentKeyEncoding(t *testing.T) {
 		t.Errorf("ModPresetContentKey = %s", got)
 	}
 	// 空串段与 null 段不混淆（编码位不同）。
-	if KeyBindingContentKey(strPtr(""), nil, 1) == KeyBindingContentKey(nil, nil, 1) {
+	if KeyBindingContentKey(strPtr(""), nil, 1, "Z") == KeyBindingContentKey(nil, nil, 1, "Z") {
 		t.Errorf("空串 RulesetName 与 null 编码冲突")
 	}
+	// 真库实证形态：同 (RulesetName, Variant, ActionInt) 不同键组合 =
+	// 不同内容键（lazer 一动作多键，KeyCombination 必须入身份）。
+	if KeyBindingContentKey(nil, nil, 9, "Z") == KeyBindingContentKey(nil, nil, 9, "X") {
+		t.Errorf("同 action 不同键组合被编码为同一键（会吞掉副键位行）")
+	}
 	// 非法键形态如实报错。
-	if _, _, _, err := decodeKeyBindingContentKey("not-json"); err == nil {
+	if _, _, _, _, err := decodeKeyBindingContentKey("not-json"); err == nil {
 		t.Errorf("非法键位内容键未报错")
 	}
 }

@@ -202,7 +202,7 @@ func (s *Store) LoadScore(ctx context.Context, beatmapHash, hash string) (Score,
 // LoadKeyBinding 按内容键编码（KeyBindingContentKey）读取键位 canonical
 // 值及其来源声明（v3）。不存在返回 (零值, Origin{}, false, nil)。
 func (s *Store) LoadKeyBinding(ctx context.Context, contentKey string) (KeyBinding, Origin, bool, error) {
-	rulesetName, variant, actionInt, err := decodeKeyBindingContentKey(contentKey)
+	rulesetName, variant, actionInt, keyCombination, err := decodeKeyBindingContentKey(contentKey)
 	if err != nil {
 		return KeyBinding{}, Origin{}, false, err
 	}
@@ -213,8 +213,8 @@ func (s *Store) LoadKeyBinding(ctx context.Context, contentKey string) (KeyBindi
 	)
 	name, variantCol := keyBindingKeyCols(rulesetName, variant)
 	qErr := s.db.QueryRowContext(ctx,
-		`SELECT payload, origin_guid, origin_fork FROM key_binding WHERE ruleset_name=? AND variant=? AND action_int=?`,
-		name, variantCol, actionInt).Scan(&payload, &originGUID, &originFork)
+		`SELECT payload, origin_guid, origin_fork FROM key_binding WHERE ruleset_name=? AND variant=? AND action_int=? AND key_combination=?`,
+		name, variantCol, actionInt, keyCombination).Scan(&payload, &originGUID, &originFork)
 	if errors.Is(qErr, sql.ErrNoRows) {
 		return KeyBinding{}, Origin{}, false, nil
 	}

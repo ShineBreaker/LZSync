@@ -139,7 +139,10 @@ CREATE TABLE IF NOT EXISTS score(
 //
 // 归一化哨兵：key_binding 的 RulesetName（realm 侧 string?，null = 全局
 // 键位）落库为 ”；Variant（int?，null = 无变体）落库为 -1（真实域是
-// mania 键数等非负值，-1 不碰撞）。ruleset_setting 的 realm 侧 Variant
+// mania 键数等非负值，-1 不碰撞）。KeyCombination 入主键是 2026-10-25
+// 真实库实测修订（v3 随 M3 发布前修订，无旧库在野）：lazer 一个 action
+// 允许多行多键，三段主键会把副键位行当重复吞掉（真库探针：495 行塌缩
+// 311 三段键、183 组同键不同键组合）。ruleset_setting 的 realm 侧 Variant
 // 是非空 int，无需哨兵；RulesetSetting 无 Guid 列（realm 侧无主键表，
 // lazer-baseline §2.13），origin_guid 列不设。mod_preset 无内容哈希列，
 // 取业务键 (RulesetShortName, Name)（§4.2）。
@@ -148,12 +151,13 @@ CREATE TABLE IF NOT EXISTS key_binding(
   ruleset_name TEXT NOT NULL,
   variant      INTEGER NOT NULL,
   action_int   INTEGER NOT NULL,
+  key_combination TEXT NOT NULL DEFAULT '',
   payload      TEXT NOT NULL,
   origin_guid  TEXT NOT NULL,
   origin_fork  TEXT NOT NULL,
   first_seen   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
-  PRIMARY KEY(ruleset_name, variant, action_int)
+  PRIMARY KEY(ruleset_name, variant, action_int, key_combination)
 );
 
 CREATE TABLE IF NOT EXISTS ruleset_setting(

@@ -522,7 +522,7 @@ func reconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]sett
 				if err := json.Unmarshal([]byte(p), &kb); err != nil {
 					return "", "", err
 				}
-				return hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt),
+				return hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination),
 					keyBindingSummary(kb), nil
 			},
 			func(a, b string) (bool, error) {
@@ -530,6 +530,8 @@ func reconcileSettings(ctx context.Context, h *hub.Store, forkID string) ([]sett
 				if err := decodeSettingPair(a, b, &x, &y); err != nil {
 					return false, err
 				}
+				// KeyCombination 入内容键后同键必等值，此比对退化为防御
+				//（键位行的全部非 Guid 列都在身份里，update 语义已空）。
 				return x.KeyCombination != y.KeyCombination, nil
 			}},
 		{hub.KindRulesetSetting,

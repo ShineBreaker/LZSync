@@ -412,6 +412,13 @@ internal static readonly Guid RANDOM_SKIN     = new Guid("D39DFEFB-477C-4372-B1E
 | `ActionInt`（MapTo "Action"） | `int` | | 动作枚举整数值（全局为 GlobalAction） |
 | `KeyCombinationString`（MapTo "KeyCombination"） | `string` | | 按键组合字符串（如 `Ctrl,Shift+Z`） |
 
+> **真实库实测修订（2026-10-25，LZSync 真库验收）**：`KeyCombination` 是
+> 逻辑键的一部分。lazer 允许且默认大量存在同一 `(RulesetName, Variant,
+> ActionInt)` 对应多行（一动作多键，如 fruits 动作 0 = `108`+`47` 双行）；
+> 本机官方 lazer 真库探针：495 行 / 311 个三段键 / **183 组同键不同键组合
+> / 0 组全同重复行**。因此逻辑键 = `(RulesetName, Variant, ActionInt,
+> KeyCombination)`，按三段键去重会吞掉全部副键位行。
+
 ### 2.13 RealmRulesetSetting（表名 "RulesetSetting"）
 
 `osu.Game/Configuration/RealmRulesetSetting.cs`：
@@ -645,7 +652,7 @@ public enum StorageConfig { FullPath }
 
 | 表 | 承载内容 | 键 |
 |---|---|---|
-| `RealmKeyBinding` | 全局键位（RulesetName=null）+ 各规则集键位 + 变体键位 | `(RulesetName, Variant, ActionInt)` |
+| `RealmKeyBinding` | 全局键位（RulesetName=null）+ 各规则集键位 + 变体键位 | `(RulesetName, Variant, ActionInt, KeyCombination)`（§2.12 真库实测修订：一动作多键是常态，组合必须入键） |
 | `RealmRulesetSetting` | per-ruleset/per-variant 设置（各规则集自己的 ConfigManager） | `(RulesetName, Variant, Key)` |
 | `BeatmapUserSettings` | per-谱面音频偏移（BeatmapInfo 内嵌） | 随 BeatmapInfo |
 

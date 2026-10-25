@@ -55,7 +55,7 @@ func wantSettingsKeyBindings(seed fixture.Seed) map[string]hub.KeyBinding {
 	out := map[string]hub.KeyBinding{}
 	for _, kb := range seed.KeyBindings {
 		c := conv(kb)
-		out[hub.KeyBindingContentKey(c.RulesetName, c.Variant, c.ActionInt)] = c
+		out[hub.KeyBindingContentKey(c.RulesetName, c.Variant, c.ActionInt, c.KeyCombination)] = c
 	}
 	return out
 }

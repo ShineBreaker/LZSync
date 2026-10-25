@@ -150,18 +150,18 @@ func TestDeploySettingsFullChain(t *testing.T) {
 	defer ro.Close()
 	// 键位：全键段形态（null/null、bms/null、bms/4、bms/7）逐一读回。
 	wantKB := map[string]string{
-		hub.KeyBindingContentKey(nil, nil, 100):         "Ctrl,Shift+Z",
-		hub.KeyBindingContentKey(&bmsName, nil, 3):      "Space",
-		hub.KeyBindingContentKey(&bmsName, &mania4, 12): "F",
-		hub.KeyBindingContentKey(&bmsName, &mania7, 12): "D,F,J,K",
+		hub.KeyBindingContentKey(nil, nil, 100, "Ctrl,Shift+Z"):          "Ctrl,Shift+Z",
+		hub.KeyBindingContentKey(&bmsName, nil, 3, "Space"):              "Space",
+		hub.KeyBindingContentKey(&bmsName, &mania4, 12, "F"):             "F",
+		hub.KeyBindingContentKey(&bmsName, &mania7, 12, "D,F,J,K"):       "D,F,J,K",
 	}
 	rd.eachKeyBinding(func(kb hub.KeyBinding) bool {
-		want, ok := wantKB[hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt)]
+		want, ok := wantKB[hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination)]
 		if !ok {
 			t.Errorf("多余键位行: %+v", kb)
 			return false
 		}
-		delete(wantKB, hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt))
+		delete(wantKB, hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination))
 		if kb.KeyCombination != want {
 			t.Errorf("键位组合不一致: %q ≠ %q", kb.KeyCombination, want)
 		}

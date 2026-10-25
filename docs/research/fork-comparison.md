@@ -227,7 +227,9 @@ internal static readonly Guid RANDOM_SKIN     = new Guid("D39DFEFB-477C-4372-B1E
 **事实**（lazer-baseline §2.12–§2.13 摘录，四端结构一致）：
 
 ```csharp
-// RealmKeyBinding（表名 "KeyBinding"，Guid 主键，逻辑键 = (RulesetName, Variant, ActionInt)）
+// RealmKeyBinding（表名 "KeyBinding"，Guid 主键，逻辑键 = (RulesetName, Variant, ActionInt, KeyCombination)）
+//（2026-10-25 真库实测修订：一动作多键是 lazer 常态——真库 495 行塌缩 311 个三段键、
+// 183 组同键不同键组合、0 组全同重复；三段键会把副键位行当重复吞掉，见 lazer-baseline §2.12）
 public Guid ID { get; set; }            // [PrimaryKey]
 public string? RulesetName { get; set; } // null = 全局键位；否则规则集 ShortName
 public int? Variant { get; set; }        // 规则集变体（如 mania 键数）
