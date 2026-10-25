@@ -11,15 +11,23 @@
       <aside id="sidebar">
         <div class="brand">
           <img src="./resources/icon.png" alt="LZSync" class="brand-icon" />
-          <span>LZSync</span>
+          <span class="brand-name">LZSync</span>
         </div>
         <nav id="nav"></nav>
-        <div id="fork-lights" class="fork-lights"></div>
+        <div id="side-client-card" class="side-client-card hidden">
+          <div class="t" data-i18n="sidebar.clients">客户端</div>
+          <div class="s" id="side-client-status"></div>
+          <div class="warn hidden" id="side-client-warn"></div>
+        </div>
       </aside>
-      <div id="content-wrapper">
-        <div id="global-warning" class="global-warning hidden"></div>
-        <main id="content"></main>
-      </div>
+      <header id="topbar">
+        <div class="searchbox">
+          <span class="icon"></span>
+          <input id="global-search" type="text" data-i18n-placeholder="search.placeholder" placeholder="搜索" />
+        </div>
+        <div id="global-warning" class="global-warn hidden"></div>
+      </header>
+      <main id="content"></main>
     </div>
     <script type="module" src="./src/main.ts"></script>
   </body>

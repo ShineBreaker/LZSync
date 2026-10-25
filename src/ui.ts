@@ -132,3 +132,73 @@ export function clear(node: HTMLElement): void {
     node.removeChild(node.firstChild);
   }
 }
+
+/* ===== 数据浏览页专用辅助（DESIGN.md §数据行 / §悬浮层） ===== */
+
+/** 同步状态语义（对应 DESIGN.md §同步状态语义色）。 */
+export type SyncState = "synced" | "update" | "conflict" | "needsConfirm" | "targetOnly";
+
+export function syncStateLabel(state: SyncState): string {
+  return t(`st.${state}`);
+}
+
+export function syncStateClass(state: SyncState): string {
+  switch (state) {
+    case "synced":
+      return "st-ok";
+    case "update":
+      return "st-update";
+    case "conflict":
+      return "st-err";
+    case "needsConfirm":
+      return "st-warn";
+    case "targetOnly":
+      return "st-neutral";
+  }
+}
+
+/** fork 色点（DESIGN.md §四端指示色只作 8px 圆点）。 */
+export function forkDot(forkID: string): HTMLElement {
+  const dot = el("span", { class: "dot" });
+  dot.style.background = `var(--fork-${forkID}, var(--fork-unknown))`;
+  return dot;
+}
+
+/** 悬浮层端行：`色点 + 端名 + 状态`（DESIGN.md §悬浮明细）。 */
+export function popoverForkRow(forkID: string, state: "ok" | "warn" | "err" | "missing", label: string): HTMLElement {
+  const row = el("div", { class: "popover-row" });
+  row.append(forkDot(forkID), el("span", { class: "name" }, [text(forkID)]), el("span", { class: `state ${state}` }, [text(label)]));
+  return row;
+}
+
+/** 悬浮层定位在父元素下方右对齐（数据行 x/y 块悬浮）。 */
+export function popoverAt(trigger: HTMLElement, build: (pop: HTMLElement) => void): () => void {
+  let pop: HTMLElement | null = null;
+
+  function open(): void {
+    if (pop) return;
+    pop = el("div", { class: "popover" });
+    build(pop);
+    const rect = trigger.getBoundingClientRect();
+    const parent = trigger.offsetParent;
+    if (parent instanceof HTMLElement) {
+      const prect = parent.getBoundingClientRect();
+      pop.style.top = `${rect.bottom - prect.top + 6}px`;
+      pop.style.right = `${prect.right - rect.right}px`;
+      parent.append(pop);
+    }
+  }
+
+  function close(): void {
+    if (pop) {
+      pop.remove();
+      pop = null;
+    }
+  }
+
+  trigger.addEventListener("mouseenter", open);
+  trigger.addEventListener("mouseleave", close);
+  trigger.addEventListener("click", open);
+  return close;
+}
+
