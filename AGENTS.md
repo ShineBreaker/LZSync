@@ -17,7 +17,7 @@ LZSync：管理同一台机器上多个 osu!lazer fork（官方 lazer、DeltaLaz
 | `internal/{filestore,guard}` | 内容寻址仓与链接分级、进程守卫与备份 |
 | `internal/{diff,fixture,itests}` | 对账查询、测试库构造器、集成验收断言 |
 | `internal/appsvc` + `src/` + `main.go` | mygo Bind 服务层与 vanilla TS 四页前端 |
-| `docs/design.md` | 施工蓝图（18 硬约束 + HB1-HB4 修订），改内核前必读 |
+| `docs/design.md` | 施工蓝图：**§0 产品行为模型（B1-B12、三方判定、一轮流程、G 差距清单）优先级最高**，其后 18 硬约束 + HB1-HB4；改同步行为/内核前必读 |
 | `docs/research/` | 四端差异的唯一事实源（自包含，reference/ 已删除） |
 | `GLOSSARY.md` / `docs/adr/` | 领域术语表与架构决策记录 |
 | `justfile` / `manifest.scm` / `lzsync.scm` | 开发指令封装 / guix 开发环境（direnv use guix 加载）/ guix 打包定义（`guix build -f lzsync.scm`） |
@@ -42,8 +42,9 @@ just dev         # mygo dev 热重载（vite 5173）
 - **C-1 自包含**：fork 知识（列白名单、目录名、版本编码）只进 `docs/research/` 摘录与 `internal/forks` 包数据，**代码与文档零引用 reference/**（该镜像已删除）。
 - **依赖方向**：`appsvc → {collect,deploy} → {hub,diff,filestore,guard} → {realmc,forks}`；`realmc` 之上无业务、`hub` 之下无 realm。
 - **内核不知道任何具体 fork**：新增第五个 fork = 新增一份 ForkProfile，不改内核。
+- **同步行为以 `docs/design.md` §0 为准**：收集只增不改、各端差异分别存；导出取全部目标端的全局交集；只传播基线三方判定能确定的改动，判不准保留差异；一切同步入口遵循设置（板块开关 + 端的来源/目标角色）。施工消除 §0.5 差距项后在该表标注。
 - **数据安全 18 条硬约束**见 `docs/design.md` §1（写前备份、不改 schema 版本、软删优先、占用拒写、DriftGuard 等），施工与修改不得违背。
-- 决策级改动先读 `docs/adr/`（为何 SQLite 中枢而非库对库直连、为何 purego+realm-core、为何绝不迁移 schema 版本）。
+- 决策级改动先读 `docs/adr/`（为何 SQLite 中枢而非库对库直连、为何 purego+realm-core、为何绝不迁移 schema 版本、为何基线三方判定 + 全局交集）。
 
 ## 协作约定
 
