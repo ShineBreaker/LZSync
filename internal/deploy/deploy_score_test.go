@@ -652,3 +652,139 @@ func TestSplitScoreContentKey(t *testing.T) {
 		}
 	}
 }
+
+// softDeleteScore 写会话把目标库现有成绩行置软删（模拟计划后游戏内删除，
+// S4：软删行先于 tombstone 出现——收集才产 tombstone，计划锚拦不住该窗口）。
+func softDeleteScore(t *testing.T, lib *realmc.Library, realmPath string, sc hub.Score) {
+	t.Helper()
+	r, err := lib.OpenDynamicReadWrite(realmPath)
+	if err != nil {
+		t.Fatalf("写会话打开 %s: %v", realmPath, err)
+	}
+	defer r.Close()
+	if err := r.BeginWrite(); err != nil {
+		t.Fatalf("BeginWrite: %v", err)
+	}
+	ck, err := r.FindClass("Score")
+	if err != nil {
+		t.Fatalf("FindClass(Score): %v", err)
+	}
+	hashKey, err := r.FindProperty(ck, "Hash")
+	if err != nil {
+		t.Fatalf("FindProperty(Hash): %v", err)
+	}
+	obj, err := r.FindFirstByString(ck, hashKey, sc.Hash)
+	if err != nil || obj == nil {
+		t.Fatalf("查成绩 %s: %v", hashPrefix(sc.Hash), err)
+	}
+	defer r.ReleaseObject(obj)
+	dpKey, err := r.FindProperty(ck, "DeletePending")
+	if err != nil {
+		t.Fatalf("FindProperty(DeletePending): %v", err)
+	}
+	if err := r.SetBool(obj, dpKey, true); err != nil {
+		r.Rollback() //nolint:errcheck
+		t.Fatalf("现场软删写入: %v", err)
+	}
+	if err := r.Commit(); err != nil {
+		t.Fatalf("提交软删: %v", err)
+	}
+}
+
+// TestDeployScoreSoftDeleteGuard HB2 执行面闭环（成绩侧，皮肤/谱面集/
+// ModPreset 写入器同款）：计划后游戏内软删的现场行不被就地更新复活；
+// 恢复项（用户显式勾选）才允许写回 DeletePending=false。
+func TestDeployScoreSoftDeleteGuard(t *testing.T) {
+	lib := mustLib(t)
+	ctx := context.Background()
+
+	setFiles := map[string][]byte{}
+	set, err := fixture.MaterializeSet(9103, "SoftDel Artist", "SoftDel Title", "mapperS",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("softdel anchor osu bytes")}}, nil, setFiles)
+	if err != nil {
+		t.Fatalf("MaterializeSet: %v", err)
+	}
+	refB, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkLazer, SchemaVersion: fixture.VersionLazer,
+		DataDir: t.TempDir(),
+		Seed:   fixture.Seed{BeatmapSets: []hub.BeatmapSet{set}, Files: setFiles},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build(B): %v", err)
+	}
+
+	files := map[string][]byte{}
+	sc := makeScore("c6666666-6666-4666-8666-6666666666c6", set.Beatmaps[0].Hash, "osu",
+		[]byte("softdel replay bytes"), files)
+	h := openMemHub(t)
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkDelta, CollectedAt: t0, Scores: []hub.Score{sc}})
+
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	runner := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)})
+
+	// 首轮正常投放：目标库出现同键行（防线的 existing 前置）。
+	plan := scorePlan(t, refB.ForkID, refB, []hub.Score{sc})
+	report1, err := runner.Deploy(ctx, plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy(首轮): %v（report=%+v）", err, report1)
+	}
+	if len(report1.Applied) != 1 {
+		t.Fatalf("首轮 applied = %+v（期望 1——软删防线的 existing 前置）", report1.Applied)
+	}
+
+	// 计划后、投放前：游戏内软删该成绩（S4，tombstone 尚未产生）。
+	softDeleteScore(t, lib, refB.RealmPath, sc)
+
+	report, err := runner.Deploy(ctx, scorePlan(t, refB.ForkID, refB, []hub.Score{sc}), nil)
+	if err != nil {
+		t.Fatalf("Deploy(现场软删): %v（report=%+v）", err, report)
+	}
+	if len(report.Applied) != 0 {
+		t.Errorf("applied = %+v（期望 0——软删行不复活）", report.Applied)
+	}
+	if got := skipCountOf(report, "防复活"); got != 1 {
+		t.Errorf("防复活计数 = %d（期望 1），Skipped = %+v", got, report.Skipped)
+	}
+	if len(report.Repointed) != 1 || report.Repointed[0].Reason != "目标已出现同键行：新建 → 就地更新" {
+		t.Errorf("Repointed = %+v（期望 1 条新建→就地更新改判）", report.Repointed)
+	}
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		got, ok := readScoreRow(t, sr, sc)
+		if !ok {
+			t.Fatal("软删成绩行消失（期望原地保留）")
+		}
+		if !got.DeletePending {
+			t.Error("现场软删成绩被复活：DeletePending = false，期望保持 true（HB2）")
+		}
+	})
+
+	// 恢复项（用户显式勾选）：写回 DeletePending=false 是明确意图。
+	restorePlan, err := NewPlan(refB.ForkID, []PlanItem{{
+		Kind: hub.KindScore, ContentKey: hub.ScoreContentKey(sc.BeatmapHash, sc.Hash),
+		Action: ActionCreate, Restore: true,
+	}})
+	if err != nil {
+		t.Fatalf("NewPlan(恢复): %v", err)
+	}
+	restorePlan.Target = refB
+	report2, err := runner.Deploy(ctx, restorePlan, nil)
+	if err != nil {
+		t.Fatalf("Deploy(恢复): %v（report=%+v）", err, report2)
+	}
+	if len(report2.Applied) != 1 || report2.Applied[0].Action != ActionUpdate {
+		t.Errorf("恢复 applied = %+v（期望 1 项 update——软删行现场命中改判）", report2.Applied)
+	}
+	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
+		got, ok := readScoreRow(t, sr, sc)
+		if !ok {
+			t.Fatal("恢复后成绩行消失（期望原地复活）")
+		}
+		if got.DeletePending {
+			t.Error("恢复后 DeletePending = true（期望 false——复活是用户显式意图）")
+		}
+	})
+}

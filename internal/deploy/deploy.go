@@ -412,7 +412,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此成绩（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), targetFork, item.Action)
+			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), targetFork, item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}

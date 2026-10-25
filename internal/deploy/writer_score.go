@@ -133,8 +133,10 @@ func prepareScoreWriter(r *realmc.Realm) (*scoreWriter, error) {
 
 // exec 执行单个成绩计划项（§3.3 执行期现场复核 + §5.4 目标端兼容过滤）。
 // sameRealm 是 S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）；
-// targetFork 驱动 mod/HitResult 白名单（Profile 数据，D7）。
-func (w *scoreWriter) exec(sc hub.Score, sameRealm bool, targetFork string, action Action) (applied, skipStat, string, error) {
+// targetFork 驱动 mod/HitResult 白名单（Profile 数据，D7）。restore 标记
+// 恢复项：现场同键行已软删时唯有恢复项才允许写回 DeletePending=false
+//（HB2 删除不复活，皮肤/谱面集/ModPreset 写入器同款）。
+func (w *scoreWriter) exec(sc hub.Score, sameRealm bool, targetFork string, action Action, restore bool) (applied, skipStat, string, error) {
 	if w.absent {
 		// §5.2-1：目标库没有 Score 表。
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
@@ -218,6 +220,22 @@ func (w *scoreWriter) exec(sc hub.Score, sameRealm bool, targetFork string, acti
 
 	if existing != nil {
 		defer w.r.ReleaseObject(existing)
+		// HB2 删除不复活（执行面闭环，皮肤/谱面集/ModPreset 写入器同款）：
+		// 计划后游戏内删除的现场软删行跳过防复活——收集侧 S4 跳过软删
+		// 成绩，canonical 恒 DeletePending=false，就地更新会把软删行写回
+		// false 静默复活；恢复项的复活是用户显式意图，放行。
+		if dpKey, ok := w.scoreCols["DeletePending"]; ok {
+			dp, err := w.r.GetBool(existing, dpKey)
+			if err != nil {
+				return applied{}, skipStat{}, "", fmt.Errorf("deploy: 读现场成绩 %s DeletePending: %w", hashPrefix(sc.Hash), err)
+			}
+			if dp && !restore {
+				return applied{}, skipStat{
+					reason: "目标已软删（计划后删除），跳过防复活（§5.4 删除不复活）",
+					count:  1,
+				}, repoint, nil
+			}
+		}
 		// 重续安全：已一致 → 跳过。判定面 = 写面的对偶（Files 列表同键必
 		// 同回放，不比；S8 豁免列异域更新不写、不比）。
 		same, err := w.matchesCanonical(existing, sc, sameRealm)
