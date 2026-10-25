@@ -361,3 +361,36 @@ FROM beatmap_set WHERE superseded_by IS NULL ORDER BY content_hash`)
 	}
 	return out, nil
 }
+
+// ForkPresenceEntry 单行 presence 投影（数据浏览 x/y 聚合的数据源）。
+type ForkPresenceEntry struct {
+	ForkID     string
+	Kind       EntityKind
+	ContentKey string
+	CollectedAt int64 // Unix 毫秒
+}
+
+// ForkPresence 返回某 kind 全部 fork×content_key 的 presence 行。
+// 用于数据浏览页 x/y 聚合（「几端持有此项」），不写。
+func (s *Store) ForkPresence(ctx context.Context, kind EntityKind) ([]ForkPresenceEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT fork_id, content_key, collected_at FROM presence WHERE kind=? ORDER BY content_key, fork_id`,
+		kind)
+	if err != nil {
+		return nil, fmt.Errorf("hub: 查 %s presence: %w", kind, err)
+	}
+	defer rows.Close()
+	out := []ForkPresenceEntry{}
+	for rows.Next() {
+		var e ForkPresenceEntry
+		e.Kind = kind
+		if err := rows.Scan(&e.ForkID, &e.ContentKey, &e.CollectedAt); err != nil {
+			return nil, fmt.Errorf("hub: 读 presence 行: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hub: 遍历 presence: %w", err)
+	}
+	return out, nil
+}

@@ -72,6 +72,15 @@ export interface FieldDiff {
   ForkValue: string;
 }
 
+/** ForkPresenceEntry 单行 presence 投影（数据浏览 x/y 聚合数据源）。 */
+export interface ForkPresenceEntry {
+  ForkID: string;
+  Kind: EntityKind;
+  ContentKey: string;
+  /** Unix 毫秒 */
+  CollectedAt: number;
+}
+
 export interface GameIniResult {
   Applied: Record<string, string>;
   Skipped: InisettingsSkipStat[];
@@ -272,6 +281,14 @@ export const CompareService = {
   compareForks(source: string, target: string): Promise<DiffRow[]> {
     return call("CompareService.CompareForks", source, target);
   },
+  /**
+   * CoverImage 谱面集封面图（DESIGN.md：bg/background 优先，否则 Files[0]
+   * 中的第一张图片；filestore 拿字节、转 data URL 喂前端 <img>）。找不到或
+   * 仓里没这份哈希就返回空串（行降级为纯色块，不报错）。
+   */
+  coverImage(contentKey: string): Promise<string> {
+    return call("CompareService.CoverImage", contentKey);
+  },
   /** CurrentPlan 返回持久化的当前计划。 */
   currentPlan(): Promise<Plan> {
     return call("CompareService.CurrentPlan");
@@ -283,6 +300,10 @@ export const CompareService = {
    */
   deletedEntries(target: string): Promise<DiffRow[]> {
     return call("CompareService.DeletedEntries", target);
+  },
+  /** ForkPresence 查 hub presence 表（数据浏览页 x/y 数据源，§6.2）。 */
+  forkPresence(kind: EntityKind): Promise<ForkPresenceEntry[]> {
+    return call("CompareService.ForkPresence", kind);
   },
   /**
    * PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）：

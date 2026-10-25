@@ -108,15 +108,18 @@ export async function renderSync(root: HTMLElement): Promise<void> {
   }
 
   // 同步前检查
+  let currentPlanTarget = "";
   async function renderPrecheck(): Promise<void> {
     clear(precheck);
     let plan: Awaited<ReturnType<typeof CompareService.currentPlan>>;
     try {
       plan = await CompareService.currentPlan();
     } catch {
+      currentPlanTarget = "";
       precheck.append(el("p", { class: "page-meta" }, [text(t("sync.noPlan"))]));
       return;
     }
+    currentPlanTarget = plan.TargetFork;
     const targetCard = cards.find((c) => c.ForkID === plan.TargetFork);
     const actions = plan.Items.filter((i) => i.Action !== "skip");
     const skips = plan.Items.filter((i) => i.Action === "skip");
@@ -199,8 +202,7 @@ export async function renderSync(root: HTMLElement): Promise<void> {
   }
 
   function plan2target(): string {
-    // 从 precheck 里拿到的 plan target——简单起见重查一次（缓存）
-    return "";
+    return currentPlanTarget;
   }
 
   // ---- 进度 ----

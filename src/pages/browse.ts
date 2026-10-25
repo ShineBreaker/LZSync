@@ -106,15 +106,25 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
     syncBtn,
   );
 
+  // presence: kind\u0000content_key → Set<forkID>
+  let presenceByKey = new Map<string, Set<string>>();
+
   async function load(): Promise<void> {
     if (!targetFork) return;
     clear(statusLine);
     statusLine.append(message("info", t("browse.loading")));
     try {
-      const [preview, deleted] = await Promise.all([
+      const [preview, deleted, presence] = await Promise.all([
         CompareService.previewDeploy(targetFork),
         CompareService.deletedEntries(targetFork),
+        CompareService.forkPresence(kind as never),
       ]);
+      presenceByKey = new Map();
+      for (const p of presence) {
+        const k = `${p.Kind}\u0000${p.ContentKey}`;
+        if (!presenceByKey.has(k)) presenceByKey.set(k, new Set());
+        presenceByKey.get(k)!.add(p.ForkID);
+      }
       const seen = new Set(preview.map((r) => `${r.Kind}\u0000${r.ContentKey}`));
       const merged = [...preview];
       for (const d of deleted) {
@@ -232,26 +242,37 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
       ]),
     ]);
 
-    // 右侧同步块
-    const sync = el("div", { class: `sync-block ${syncStateClass(r.state)}` }, [
-      el("span", { class: "n" }, [text(syncStateLabel(r.state))]),
-    ]);
-    // x/y 计数：N 端最新 = hub 持有最新版的端数（这里用占位 0/4，等后端给真实数）
-    // TODO(mygo): CompareService 需返回 per-fork presence 才能算真实 x/y
+    // 右侧同步块（x/y = 持有该 content_key 的端数 / 已注册端数）
+    const sync = el("div", { class: `sync-block ${syncStateClass(r.state)}` });
+    const holders = presenceByKey.get(r.key) ?? new Set<string>();
     const totalForks = allCards.length;
-    const syncedForks = r.state === "synced" ? totalForks : r.state === "targetOnly" ? 0 : 0;
-    const xylabel = `${syncedForks}/${totalForks}`;
-    sync.prepend(el("span", { class: "n" }, [text(xylabel)]));
+    const xylabel = `${holders.size}/${totalForks}`;
+    sync.append(
+      el("span", { class: "n" }, [text(xylabel)]),
+      el("span", { class: "s" }, [text(syncStateLabel(r.state))]),
+    );
 
-    // 悬浮层：列出各端状态（占位数据，等后端）
+    // 封面（仅谱面集）：content_key → data URL，设置到行 background。
+    if (r.kind === "beatmap_set") {
+      CompareService.coverImage(r.contentKey).then((url) => {
+        if (url) {
+          rowEl.style.backgroundImage = `url("${url}")`;
+          rowEl.classList.add("has-cover");
+        }
+      }).catch(() => {});
+    }
+
+    // 悬浮层：各端持有状态（presence 命中=该端持有；state=hub 视角的行态）
     popoverAt(sync, (pop) => {
       for (const c of allCards) {
-        // TODO(mygo): 真实 per-fork 状态需要后端返回 presence 数据
-        const st = r.state === "synced" ? "ok" : r.state === "conflict" ? "err" : "warn";
-        const label = r.state === "synced" ? t("st.ok") : r.state === "conflict" ? t("st.conflict") : t("st.old");
+        const has = holders.has(c.ForkID);
+        const st = !has ? "missing" : r.state === "conflict" ? "err" : r.state === "needsConfirm" ? "warn" : "ok";
+        const label = !has ? t("st.missing") : st === "ok" ? t("st.synced") : st === "err" ? t("st.conflict") : st === "warn" ? t("st.needsConfirm") : t("st.update");
         pop.append(popoverForkRow(c.ForkID, st, label));
       }
-      pop.append(el("div", { class: "popover-foot" }, [text(`${r.meta || "—"}`)]));
+      if (r.meta) {
+        pop.append(el("div", { class: "popover-foot" }, [text(r.meta)]));
+      }
     });
 
     // 冲突行：可点击展开差异表

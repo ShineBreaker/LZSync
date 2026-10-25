@@ -8,6 +8,7 @@ package appsvc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -401,6 +403,99 @@ func (s *realCompare) DeletedEntries(target string) ([]DiffRow, error) {
 		return rows[i].ContentKey < rows[j].ContentKey
 	})
 	return rows, nil
+}
+
+// ForkPresence 查 hub presence 表（数据浏览页 x/y 数据源，§6.2）。
+func (s *realCompare) ForkPresence(kind hub.EntityKind) ([]ForkPresenceEntry, error) {
+	rows, err := s.deps.Hub.ForkPresence(context.Background(), kind)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ForkPresenceEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, ForkPresenceEntry{
+			ForkID: r.ForkID, Kind: r.Kind, ContentKey: r.ContentKey, CollectedAt: r.CollectedAt,
+		})
+	}
+	return out, nil
+}
+
+// CoverImage 谱面集封面图（DESIGN.md：bg/background 优先，否则 Files[0]
+// 中的第一张图片；filestore 拿字节、转 data URL 喂前端 <img>）。找不到或
+// 仓里没这份哈希就返回空串（行降级为纯色块，不报错）。
+func (s *realCompare) CoverImage(contentKey string) (string, error) {
+	if s.deps.Files == nil {
+		return "", nil
+	}
+	// 拿谱面集当前版本行的 Files 列表。
+	sets, err := s.deps.Hub.CurrentBeatmapSets(context.Background())
+	if err != nil {
+		return "", err
+	}
+	var target *hub.BeatmapSet
+	for i := range sets {
+		if sets[i].Set.Hash == contentKey {
+			target = &sets[i].Set
+			break
+		}
+	}
+	if target == nil {
+		return "", nil
+	}
+	// 选封面：文件名（不含扩展名）为 bg/background 优先，否则第一张图。
+	// 图片扩展名白名单收紧到常见几类（避免 .osz 内打包的脚本/字体/视频混进来）。
+	isImage := func(name string) bool {
+		ext := strings.ToLower(filepath.Ext(name))
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp":
+			return true
+		}
+		return false
+	}
+	isBgName := func(name string) bool {
+		base := strings.ToLower(name)
+		base = strings.TrimSuffix(base, filepath.Ext(base))
+		return base == "bg" || base == "background"
+	}
+	var chosen *hub.NamedFile
+	for i := range target.Files {
+		f := &target.Files[i]
+		if isBgName(f.Filename) && isImage(f.Filename) {
+			chosen = f
+			break
+		}
+	}
+	if chosen == nil {
+		for i := range target.Files {
+			f := &target.Files[i]
+			if isImage(f.Filename) {
+				chosen = f
+				break
+			}
+		}
+	}
+	if chosen == nil {
+		return "", nil
+	}
+	// 从 filestore 取字节。
+	path := s.deps.Files.Store.Path(chosen.Hash)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil // 仓里没有/不可读 → 行降纯色
+	}
+	ext := strings.ToLower(filepath.Ext(chosen.Filename))
+	mime := "image/jpeg"
+	switch ext {
+	case ".png":
+		mime = "image/png"
+	case ".webp":
+		mime = "image/webp"
+	case ".gif":
+		mime = "image/gif"
+	case ".bmp":
+		mime = "image/bmp"
+	}
+	return fmt.Sprintf("data:%s;base64,%s", mime, base64.StdEncoding.EncodeToString(data)), nil
 }
 
 // BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。

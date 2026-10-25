@@ -323,6 +323,53 @@ func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
 	}, nil
 }
 
+// CoverImage mock：演示模式返回空串（行退化为纯色块），不编造图片。
+// 真实封面只在已有收集过的 hub+filestore 上有意义。
+func (m *mockCompare) CoverImage(contentKey string) (string, error) {
+	return "", nil
+}
+
+// ForkPresence mock 数据（数据浏览 x/y 聚合数据源）。
+// 演示：谱面集 0001 全 4 端持有 / 0002 lazer+delta / 0003 仅 lazer /
+// 0004 delta+ez2 / 其余 kind 简化覆盖。
+func (m *mockCompare) ForkPresence(kind hub.EntityKind) ([]ForkPresenceEntry, error) {
+	now := time.Now().UnixMilli()
+	mk := func(fork, key string, hoursAgo int) ForkPresenceEntry {
+		return ForkPresenceEntry{ForkID: fork, Kind: kind, ContentKey: key,
+			CollectedAt: now - int64(hoursAgo)*3600000}
+	}
+	switch kind {
+	case hub.KindBeatmapSet:
+		return []ForkPresenceEntry{
+			mk("lazer", "hash-new-set-0001", 1), mk("delta", "hash-new-set-0001", 1),
+			mk("ez2lazer", "hash-new-set-0001", 1), mk("g0v0", "hash-new-set-0001", 1),
+			mk("lazer", "hash-old-ver-0002", 2), mk("delta", "hash-old-ver-0002", 2),
+			mk("lazer", "hash-weak-0003", 3),
+			mk("delta", "hash-conflict-0004", 1), mk("ez2lazer", "hash-conflict-0004", 1),
+			mk("lazer", "hash-deleted-0009", 4),
+		}, nil
+	case hub.KindCollection:
+		return []ForkPresenceEntry{
+			mk("lazer", "新谱面收藏", 1), mk("delta", "新谱面收藏", 1),
+			mk("lazer", "常用练习", 1), mk("delta", "常用练习", 2),
+			mk("lazer", "旧收藏", 5), mk("delta", "旧收藏", 5),
+		}, nil
+	case hub.KindSkin:
+		return []ForkPresenceEntry{
+			mk("lazer", "hash-skin-new-0005", 1), mk("delta", "hash-skin-new-0005", 1),
+			mk("ez2lazer", "hash-skin-new-0005", 1),
+			mk("lazer", "hash-skin-conflict-0006", 1), mk("delta", "hash-skin-conflict-0006", 2),
+		}, nil
+	case hub.KindScore:
+		return []ForkPresenceEntry{
+			mk("lazer", "bh-new|sc-0008", 1), mk("delta", "bh-new|sc-0008", 1),
+			mk("lazer", "bh-old|sc-0009", 2), mk("delta", "bh-old|sc-0009", 2),
+		}, nil
+	default:
+		return []ForkPresenceEntry{}, nil
+	}
+}
+
 // BuildPlan 勾选 → 计划（内存持久；动作面与真实后端同构：M2 三类放行
 // ——谱面集 create/update/version-replace、皮肤/成绩 create/update，
 // 勾选恢复组 = 显式拍板；走 deploy.NewPlan 校验）。

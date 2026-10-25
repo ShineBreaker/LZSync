@@ -109,6 +109,14 @@ type Selection struct {
 	ContentKey string
 }
 
+// ForkPresenceEntry 单行 presence 投影（数据浏览 x/y 聚合数据源）。
+type ForkPresenceEntry struct {
+	ForkID      string
+	Kind        hub.EntityKind
+	ContentKey  string
+	CollectedAt int64 // Unix 毫秒
+}
+
 // SyncStatus 长任务运行状态（执行页轮询）。
 type SyncStatus struct {
 	Busy   bool
@@ -161,6 +169,13 @@ type CompareService interface {
 	// DeletedEntries 目标 fork 的「恢复（已删除）」组（tombstone 命中，
 	// 默认不勾选，展示删除时间）。
 	DeletedEntries(target string) ([]DiffRow, error)
+	// ForkPresence 某 kind 全部 fork×content_key 的 presence 快照。
+	// 数据浏览页 x/y 聚合（「几端持有此项」）的数据源。
+	ForkPresence(kind hub.EntityKind) ([]ForkPresenceEntry, error)
+	// CoverImage 谱面集封面图 data URL（DESIGN.md §数据行：bg/background
+	// 优先，否则第一张图；无图返回空串）。data:image/*;base64,... 形态，
+	// 前端直接喂 <img src> 或 background-image。
+	CoverImage(contentKey string) (string, error)
 	// BuildPlan 把勾选结果组装为投放计划（覆盖全部启用 kind：收藏夹/
 	// 谱面集/皮肤/成绩）。NeedsConfirm 项（元数据弱键疑似）必须已经用户
 	// 拍板——勾选即视为拍板（NeedsConfirm 置位留痕）；「恢复（已删除）」
