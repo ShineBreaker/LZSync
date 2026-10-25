@@ -3,8 +3,9 @@ package itests
 // M3 组合全链验收（design.md §7-M3-3/4/5、§5.1-M3）：设置类三类 + game.ini
 // 白名单键 + delta gimmick 告警 + .osz 导出，两 fork（delta 源 → lazer
 // 目标）全类型一轮：真实收集（含 ini 面）→ BuildPlan（gimmick 集告警
-// 标记 + 全类型 create）→ Deploy（三类落地 + 三条跳过分支计数 + 报告
-// GimmickWarnings 与预演一致）→ SyncGameIni（白名单键跨端落地、红灯键
+// 标记 + 全类型 create）→ Deploy（三类落地 + 四条跳过分支计数〔bms
+// 设置/预设、EZX 名录外、键位 D20 越域〕+ 报告 GimmickWarnings 与预演
+// 一致）→ SyncGameIni（白名单键跨端落地、红灯键
 // 原样）→ WriteOSZ（hub 链尾 + 仓 → 解包逐条与仓内字节一致，gimmick
 // section 头随 .osu 完整带出）→ 重投影（M3 三类 presence 计数收口）。
 // librealm 缺失时显式 SKIP（§8.1）。
@@ -149,9 +150,12 @@ func TestM3CombinedRoundtrip(t *testing.T) {
 	for _, ap := range report.Applied {
 		appliedKinds[ap.Kind]++
 	}
+	// 键位 4 行落地：SettingsSeed 的全局 ActionInt=100 越源端 delta 枚举
+	// 域 [0,99) 被 D20 拒（官方代新增、delta 基线无此枚举，域数据见
+	// ForkProfile.KeyBindingAction）。
 	for kind, want := range map[hub.EntityKind]int{
 		hub.KindBeatmapSet: 2, hub.KindCollection: 1,
-		hub.KindKeyBinding: 5, hub.KindRulesetSetting: 2, hub.KindModPreset: 2,
+		hub.KindKeyBinding: 4, hub.KindRulesetSetting: 2, hub.KindModPreset: 2,
 	} {
 		if got := appliedKinds[kind]; got != want {
 			t.Errorf("Applied[%s] = %d，期望 %d（Applied=%+v）", kind, got, want, report.Applied)
@@ -165,6 +169,11 @@ func TestM3CombinedRoundtrip(t *testing.T) {
 	}
 	if got := deploySkip(report, "含目标端不认识的 mod \"EZX\""); got != 1 {
 		t.Errorf("D7 名录外 mod 预设跳过 = %d，期望 1", got)
+	}
+	// 键位 D20（ActionInt 枚举域交集过滤，§7-M3-3）：全局 ActionInt=100
+	// 超出源端 delta 枚举域——越域跳过且不落地。
+	if got := deploySkip(report, "D20 越域跳过"); got != 1 {
+		t.Errorf("键位 D20 越域跳过 = %d，期望 1（Skipped=%+v）", got, report.Skipped)
 	}
 	if len(report.GimmickWarnings) != 1 ||
 		report.GimmickWarnings[0].Kind != hub.KindBeatmapSet ||
@@ -245,8 +254,9 @@ func TestM3CombinedRoundtrip(t *testing.T) {
 
 	// ---- 重投影：再收集目标 → M3 三类 presence 计数收口 ----
 	e.collectInto(refDst)
+	// 键位 presence 4：全局 ActionInt=100 行未落地（D20 越域拒）。
 	for kind, want := range map[hub.EntityKind]int{
-		hub.KindKeyBinding: 5, hub.KindRulesetSetting: 2, hub.KindModPreset: 2,
+		hub.KindKeyBinding: 4, hub.KindRulesetSetting: 2, hub.KindModPreset: 2,
 	} {
 		assertHubCount(t, e, `SELECT COUNT(*) FROM presence WHERE fork_id=? AND kind=?`,
 			want, "lazer 重投影 presence "+string(kind), "lazer", kind)

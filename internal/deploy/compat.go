@@ -36,48 +36,34 @@ type apiMod struct {
 
 // ---- 键位 ActionInt 枚举域（D20，§5.4） ----
 
-// keyBindingActionDomain 声明一端可解析的键位 ActionInt 值域。ActionInt
-// 是裸 int（全局 GlobalAction 或规则集 Action 枚举值），枚举随官方版本
-// 尾部追加演进（fork-comparison D20：官方 2026-07/08 后新增 13 个编辑器
-// 键位、delta 基线没有）——域建模为值域上界（开区间 [0, max)，枚举值域
-// 非负且新增值只出现在尾部）。0 = 该域未取样。
-type keyBindingActionDomain struct {
-	globalMax  int // 全局键位（RulesetName = null）的 GlobalAction 值域上界
-	rulesetMax int // 规则集键位的 Action 值域上界（各规则集共享一个保守上界）
-}
-
-// keyBindingActionDomains 各端 ActionInt 值域数据。数值成员清单不在
-// docs/research 摘录内（调研只给出「delta 缺 13 个新键位」的差异事实），
-// 无法确证任何一端的上界数值——按 C-1 纪律不凭空落数值，规则处于待
-// 数据激活态（ownSkinsOf 先例）：空表使全部判定自然放行，forks 包增补
-// 域数据（Profile 字段）后此处切换为 Profile 读取，无需改写入器。
-var keyBindingActionDomains = map[string]keyBindingActionDomain{}
-
 // keyBindingActionAllowed D20：键位行投放前按源端（origin_fork）与目标
 // 端的枚举域交集过滤，越域跳过（宁少勿错——高版本端的新增动作在低版本
-// 端可能指向错误动作或越界）。任一端域未取样 → 放行（交集不可判定的
-// 待激活态；结构一致（C10）下放行不产生坏库，仅语义可能错位）。
-// ActionInt 为负恒拒（枚举值域非负，负值是坏数据）。
+// 端可能指向错误动作或越界，fork-comparison D20：官方 2026-07/08 后新增
+// 22 个尾部键位〔含 EditorSelectTool 等 13 编辑器键位〕、delta 基线全缺）。
+// 域数据落 ForkProfile.KeyBindingAction（四端 2026-10-25 实测取样，见该
+// 字段注释）；任一端域未取样（0）或 fork 未注册 → 放行（交集不可判定；
+// 结构一致（C10）下放行不产生坏库，仅语义可能错位）。ActionInt 为负
+// 恒拒（枚举值域非负，负值是坏数据）。
 func keyBindingActionAllowed(originFork, targetFork string, kb hub.KeyBinding) (bool, string) {
 	if kb.ActionInt < 0 {
 		return false, fmt.Sprintf("键位 ActionInt=%d 为负（枚举值域非负，坏数据）", kb.ActionInt)
 	}
-	src, srcOK := keyBindingActionDomains[originFork]
-	dst, dstOK := keyBindingActionDomains[targetFork]
+	src, srcOK := forks.Profile(originFork)
+	dst, dstOK := forks.Profile(targetFork)
 	if !srcOK || !dstOK {
 		return true, ""
 	}
-	domainMax := func(d keyBindingActionDomain) int {
+	domainMax := func(d forks.KeyBindingActionDomain) int {
 		if kb.RulesetName == nil {
-			return d.globalMax
+			return d.GlobalMax
 		}
-		return d.rulesetMax
+		return d.RulesetMax
 	}
-	if m := domainMax(src); m > 0 && kb.ActionInt >= m {
+	if m := domainMax(src.KeyBindingAction); m > 0 && kb.ActionInt >= m {
 		return false, fmt.Sprintf("键位 ActionInt=%d 超出源端 %s 枚举域 [0,%d)（D20 越域跳过）",
 			kb.ActionInt, originFork, m)
 	}
-	if m := domainMax(dst); m > 0 && kb.ActionInt >= m {
+	if m := domainMax(dst.KeyBindingAction); m > 0 && kb.ActionInt >= m {
 		return false, fmt.Sprintf("键位 ActionInt=%d 超出目标端 %s 枚举域 [0,%d)（D20 越域跳过）",
 			kb.ActionInt, targetFork, m)
 	}

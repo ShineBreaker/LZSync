@@ -236,66 +236,88 @@ func TestDeploySettingsFullChain(t *testing.T) {
 	_ = ctx
 }
 
-// TestDeployKeyBindingActionDomainFilter D20 枚举域交集过滤（注入域数据
-// 的分支验证——数值清单无调研出处，四端域待数据激活态，此处以注入形态
-// 验证机制与跳过计数）。
+// TestDeployKeyBindingActionDomainFilter D20 枚举域交集过滤（四端真数据：
+// ForkProfile.KeyBindingAction，2026-10-25 上游实测取样——lazer/g0v0/
+// ez2lazer 键位枚举完全一致〔GlobalAction 0..120；规则集 Action 含
+// Editor*=10000 显式段，最大 OsuAction 10005〕，delta 基线〔Framework
+// 2026.731.0〕全面落后〔GlobalAction 0..98、规则集无 Editor* 段〕），
+// 交集过滤以 delta↔官方代双向验证。
 func TestDeployKeyBindingActionDomainFilter(t *testing.T) {
-	defer func(orig map[string]keyBindingActionDomain) {
-		keyBindingActionDomains = orig
-	}(keyBindingActionDomains)
-	keyBindingActionDomains = map[string]keyBindingActionDomain{
-		"ez2lazer": {globalMax: 200, rulesetMax: 20}, // 源端全域
-		"lazer":    {globalMax: 150, rulesetMax: 10}, // 目标端较窄（低版本端）
+	kbOf := func(action int, ruleset string) hub.KeyBinding {
+		out := hub.KeyBinding{ActionInt: action, KeyCombination: "Z"}
+		if ruleset != "" {
+			name := ruleset
+			out.RulesetName = &name
+		}
+		return out
 	}
-
-	snap := hub.Snapshot{
-		ForkID: "ez2lazer", CollectedAt: t0,
-		KeyBindings: []hub.KeyBinding{
-			{ID: "33333333-0001-0000-0000-000000000001", ActionInt: 100, KeyCombination: "A"}, // 全局域内
-			{ID: "33333333-0002-0000-0000-000000000002", ActionInt: 180, KeyCombination: "B"}, // 全局越目标域
-			{ID: "33333333-0003-0000-0000-000000000003", RulesetName: strPtrD("osu"),
-				ActionInt: 15, KeyCombination: "C"}, // 规则集越源端域
-			{ID: "33333333-0004-0000-0000-000000000004", RulesetName: strPtrD("osu"),
-				ActionInt: 8, KeyCombination: "D"}, // 规则集域内
-			{ID: "33333333-0005-0000-0000-000000000005", ActionInt: -1, KeyCombination: "E"}, // 负值坏数据
-		},
-	}
-	// 越域与负值全部拒绝、域内放行。
-	cases := []struct {
-		kb   hub.KeyBinding
-		want bool
+	for _, c := range []struct {
+		name   string
+		origin string
+		target string
+		kb     hub.KeyBinding
+		want   bool
 	}{
-		{snap.KeyBindings[0], true},
-		{snap.KeyBindings[1], false},
-		{snap.KeyBindings[2], false},
-		{snap.KeyBindings[3], true},
-		{snap.KeyBindings[4], false},
-	}
-	for _, c := range cases {
-		ok, reason := keyBindingActionAllowed("ez2lazer", "lazer", c.kb)
+		// delta→官方代：delta 是官方的前缀子集，域内值全部放行。
+		{"delta 全局边界 98 放行", "delta", "lazer", kbOf(98, ""), true},
+		{"delta 规则集边界 19 放行", "delta", "lazer", kbOf(19, "mania"), true},
+		// 官方代→delta：官方尾部新增（delta 无此枚举）越目标域拒。
+		{"官方全局 99 越目标端 delta 域拒", "lazer", "delta", kbOf(99, ""), false},
+		{"官方全局 120 越目标端 delta 域拒", "lazer", "delta", kbOf(120, ""), false},
+		{"官方规则集 Editor 段 10000 越 delta 域拒", "lazer", "delta", kbOf(10000, "osu"), false},
+		// 官方代同代（lazer/g0v0/ez 互投）：全域放行（含 Editor* 段）。
+		{"官方代全局 120 同代放行", "lazer", "g0v0", kbOf(120, ""), true},
+		{"官方代 Editor 段 10005 同代放行", "ez2lazer", "lazer", kbOf(10005, "osu"), true},
+		// 负值坏数据恒拒；未注册 fork 交集不可判定放行。
+		{"负值坏数据拒", "lazer", "delta", kbOf(-1, ""), false},
+		{"未注册 fork 放行", "ghost", "lazer", kbOf(99999, ""), true},
+	} {
+		ok, reason := keyBindingActionAllowed(c.origin, c.target, c.kb)
 		if ok != c.want {
-			t.Errorf("keyBindingActionAllowed(%+v) = %v（%q），期望 %v", c.kb, ok, reason, c.want)
+			t.Errorf("%s: keyBindingActionAllowed = %v（%q），期望 %v", c.name, ok, reason, c.want)
 		}
 		if !ok && reason == "" {
-			t.Errorf("拒绝必须带人话原因（D20）")
+			t.Errorf("%s: 拒绝必须带人话原因（D20）", c.name)
 		}
 	}
-	// 任一端未取样 → 放行（待激活态）。
-	delete(keyBindingActionDomains, "lazer")
-	if ok, _ := keyBindingActionAllowed("ez2lazer", "lazer", hub.KeyBinding{ActionInt: 99999}); !ok {
-		t.Errorf("目标端域未取样应放行（待激活态）")
-	}
 
-	// 集成面：注入域数据投放 → 越域项跳过计数、域内项落地。
+	// 集成面：官方代源（lazer 快照）→ delta 目标库投放，官方新增键位行
+	//（全局 100、规则集 Editor 段）D20 越域跳过计数、delta 域内行落地。
 	lib := mustLib(t)
-	ref, _ := buildSettingsLib(t, lib)
-	h := openMemHub(t)
-	applySettingsSnap(t, h, snap)
-	keyBindingActionDomains = map[string]keyBindingActionDomain{
-		"ez2lazer": {globalMax: 200, rulesetMax: 20},
-		"lazer":    {globalMax: 150, rulesetMax: 10},
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "client.realm")
+	schema, err := fixture.SchemaFor(fixture.ForkDelta, fixture.VersionDelta)
+	if err != nil {
+		t.Fatalf("SchemaFor(delta): %v", err)
 	}
-	report := deploySettingsOnce(t, h, ref)
+	w, err := lib.OpenWithSchema(path, schema, fixture.VersionDelta)
+	if err != nil {
+		t.Fatalf("建 delta 目标库: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("关闭目标库: %v", err)
+	}
+	refDelta := forks.LibraryRef{
+		ForkID: "delta", DataDir: dir, RealmPath: path,
+		DiskVersion: fixture.VersionDelta, VersionSource: forks.VersionFromOpen,
+	}
+	osuName := "osu"
+	h := openMemHub(t)
+	applySettingsSnap(t, h, hub.Snapshot{
+		ForkID: "lazer", CollectedAt: t0,
+		KeyBindings: []hub.KeyBinding{
+			{ID: "44444444-0001-0000-0000-000000000001", ActionInt: 98, KeyCombination: "A"}, // delta 全局域内边界
+			{ID: "44444444-0002-0000-0000-000000000002", ActionInt: 100, KeyCombination: "B"}, // 官方新增，delta 越域 → 跳
+			{ID: "44444444-0003-0000-0000-000000000003", RulesetName: &osuName,
+				ActionInt: 2, KeyCombination: "C"}, // 规则集域内 → 落
+			{ID: "44444444-0004-0000-0000-000000000004", RulesetName: &osuName,
+				ActionInt: 10000, KeyCombination: "D"}, // Editor 段，delta 越域 → 跳
+			{ID: "44444444-0005-0000-0000-000000000005", ActionInt: -1, KeyCombination: "E"}, // 负值坏数据 → 跳
+		},
+	})
+	_ = ctx
+	report := deploySettingsOnce(t, h, refDelta)
 	if len(report.Applied) != 2 {
 		t.Fatalf("Applied = %d，期望 2（%+v）", len(report.Applied), report.Applied)
 	}
@@ -424,8 +446,6 @@ func TestSplitKindBatchesSettingsOrder(t *testing.T) {
 	}
 }
 
-// strPtrD 测试内 *string 构造。
-func strPtrD(s string) *string { return &s }
 
 // newSettingsReader 覆盖目标库只读读回的设置类三类断言面（collect 投影的
 // deploy 侧内联形态——往返逐字段断言的读回端）。

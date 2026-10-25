@@ -57,6 +57,10 @@ type ForkProfile struct {
 	// fork-delta §5.1）。非空 = 含该头的谱面集流出本端生态时逐集告警
 	//（R6：官方编辑器重新保存会静默丢弃该节）。空 = 无此机制。
 	GimmickSectionHeaders []string
+	// KeyBindingAction 键位 ActionInt 枚举域上界（D20：高版本端新增键位
+	// 的 ActionInt 在低版本端可能指向错误动作——投放按两端枚举域交集
+	// 过滤，compat.keyBindingActionAllowed 消费）。
+	KeyBindingAction KeyBindingActionDomain
 	// MarketRulesetMinOnlineID 规则集市场的 OnlineID 下界（g0v0：服务端
 	// 市场第三方规则集 OnlineID >= 10 落库，fork-g0v0 §2.1）。> 0 时指向
 	// 该域规则集的成绩在收集侧跳过（D8）。0 = 无市场机制。
@@ -131,6 +135,28 @@ var officialStatisticsKeys = []string{
 	"ok", "meh", "great", "combo_break", "legacy_combo_increase",
 }
 
+// KeyBindingActionDomain 键位 ActionInt 枚举域上界（D20 数据面，deploy
+// 侧 compat 消费）：GlobalAction 与各规则集 Action 枚举的值域上界
+//（开区间 [0, max)）。枚举值域非负；官方 2026 编辑器重构给规则集
+// Action 枚举加了 Editor*=10000 起的显式段（Osu/Taiko/Catch/Mania
+// Action 均含），上界取两段总最大值+1——段间空隙值两端均无对应动作，
+// 放行无害。各端数值 2026-10-25 实测取样（上游源码枚举成员计数，含
+// 显式赋值段；GlobalActionContainer.cs + 各规则集 *InputManager.cs，
+// Ez 另有 BMSAction.cs 16 成员不达上界）：
+//   - lazer master c752ffb（2026-10-24）/ g0v0 v2@691c28e（2026-10-22）/
+//     ez2lazer tag 2026.1023.0-ez2lazer@9190e03（2026-10-23）：三端键位
+//     枚举完全一致——GlobalAction 121 成员（0..120）；规则集 Action
+//     最大 OsuAction 10005（EditorToggleDistanceSnap）。
+//   - delta master b50ac1d（2026-10-03，基线 Framework 2026.731.0，
+//     fork-delta §5.5）：GlobalAction 99 成员（0..98——官方尾部 22 个
+//     新增〔EditorSelectTool 等 13 编辑器键位 + EditorSeek 系列〕全
+//     缺，纯前缀子集）；规则集 Action 无 Editor* 段（最大 ManiaAction 19）。
+// 0 = 该端未取样（交集不可判定，投放侧放行）。
+type KeyBindingActionDomain struct {
+	GlobalMax  int // 全局键位（RulesetName=null）的 GlobalAction 值域上界
+	RulesetMax int // 规则集键位 Action 值域上界（各规则集共享一个保守上界）
+}
+
 var profiles = []ForkProfile{
 	{
 		// 官方 lazer：一切对比的基线（fork-comparison §0）。
@@ -144,6 +170,10 @@ var profiles = []ForkProfile{
 		// 目标端兼容基线（§5.4 adapter 输入）：官方 mod/HitResult 名录。
 		ModAcronyms:    officialModAcronyms,
 		StatisticsKeys: officialStatisticsKeys,
+		// 键位枚举域（D20，2026-10-25 实测取样，见 KeyBindingActionDomain）：
+		// GlobalAction 121 成员（0..120）；规则集 Action 含 Editor*=10000
+		// 显式段（最大 OsuAction 10005）。
+		KeyBindingAction: KeyBindingActionDomain{GlobalMax: 121, RulesetMax: 10006},
 		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys},
 	},
 	{
@@ -161,6 +191,11 @@ var profiles = []ForkProfile{
 		StatisticsKeys: officialStatisticsKeys,
 		// 专有 .osu section 头（fork-delta §5.1）：R6 告警的数据锚。
 		GimmickSectionHeaders: []string{"[BeatmapSectionGimmicks]", "[BeatmapHitObjectGimmicks]"},
+		// 键位枚举域（D20，2026-10-25 实测取样，见 KeyBindingActionDomain）：
+		// 基线 Framework 2026.731.0——GlobalAction 99 成员（0..98，官方
+		// 尾部 22 个新增全缺，§5.5）；规则集 Action 无 Editor* 段（最大
+		// ManiaAction 19）。
+		KeyBindingAction: KeyBindingActionDomain{GlobalMax: 99, RulesetMax: 20},
 		IniKeys: IniKeyPolicy{
 			Own: []string{ // fork 新增 6 键（fork-delta §3.1，官方不识别）
 				"MenuCursorFromSkin", "MenuCursorFromSkinConfirmed", "MenuCursorFromSkinSize",
@@ -212,6 +247,10 @@ var profiles = []ForkProfile{
 		// Ez 继承官方 mod 体系（专有 mod acronym 未取得调研数据）。
 		ModAcronyms:    officialModAcronyms,
 		StatisticsKeys: officialStatisticsKeys,
+		// 键位枚举域（D20，2026-10-25 实测取样，见 KeyBindingActionDomain）：
+		// tag 2026.1023.0 与官方代完全一致——GlobalAction 121 成员
+		//（0..120）；规则集 Action 含 Editor* 段（最大 10005）。
+		KeyBindingAction: KeyBindingActionDomain{GlobalMax: 121, RulesetMax: 10006},
 		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys}, // OsuSetting 枚举与官方一致（fork-ez2lazer §3.1）
 	},
 	{
@@ -234,6 +273,10 @@ var profiles = []ForkProfile{
 		//（RX/AP 是内存概念不落库——APIMods 为 [Ignored] 属性，D9）。
 		ModAcronyms:    officialModAcronyms,
 		StatisticsKeys: officialStatisticsKeys,
+		// 键位枚举域（D20，2026-10-25 实测取样，见 KeyBindingActionDomain）：
+		// v2@691c28e 与官方代完全一致——GlobalAction 121 成员（0..120）；
+		// 规则集 Action 含 Editor* 段（最大 10005）。
+		KeyBindingAction: KeyBindingActionDomain{GlobalMax: 121, RulesetMax: 10006},
 		IniKeys: IniKeyPolicy{
 			Own: []string{ // fork 新增 11 键（fork-g0v0 §3）
 				"UseRulesetSkins", "RulesetSkins", "UseV2ResultsScreen",
