@@ -177,19 +177,32 @@ func OpenBackups(dir string) (*Backups, error) {
 // BackupFile 为 srcPath 生成时间戳备份（S2 写前自动备份）：复制为
 // <Dir>/<文件名>.<UTC 时间戳>；已存在同名备份绝不覆盖（返回错误）；
 // 目录不可写时由调用方退化为库同目录带时间戳副本。
+// 毫秒级时间戳同 tick 内会撞名（测试连续两次 Backup 常见）：撞名时等
+// 一毫秒重试，最多三次。「绝不覆盖」语义保留。
 func (b *Backups) BackupFile(srcPath string) (string, error) {
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return "", fmt.Errorf("guard: 打开备份源 %s: %w", srcPath, err)
 	}
 	defer src.Close()
-	dst := filepath.Join(b.Dir, filepath.Base(srcPath)+"."+nowFunc().UTC().Format(backupStamp))
-	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return "", fmt.Errorf("guard: 同名备份已存在，绝不覆盖: %s", dst)
+	var dst string
+	var dstFile *os.File
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Millisecond)
 		}
-		return "", fmt.Errorf("guard: 创建备份文件 %s: %w", dst, err)
+		dst = filepath.Join(b.Dir, filepath.Base(srcPath)+"."+nowFunc().UTC().Format(backupStamp))
+		dstFile, err = os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("guard: 创建备份文件 %s: %w", dst, err)
+		}
+		// 撞名，等下一毫秒重试。
+	}
+	if dstFile == nil {
+		return "", fmt.Errorf("guard: 同名备份已存在，绝不覆盖: %s", dst)
 	}
 	if _, err := io.Copy(dstFile, src); err != nil {
 		dstFile.Close()

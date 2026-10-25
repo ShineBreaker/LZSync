@@ -606,6 +606,8 @@ func TestDeploySkinSoftDeleteGuard(t *testing.T) {
 		t.Fatalf("NewPlan(恢复): %v", err)
 	}
 	restorePlan.Target = refB
+	// 两次 Deploy 落到同一 realmPath，毫秒级时间戳可能撞名（S2 绝不覆盖）。
+	time.Sleep(2 * time.Millisecond)
 	report2, err := runner.Deploy(ctx, restorePlan, nil)
 	if err != nil {
 		t.Fatalf("Deploy(恢复): %v（report=%+v）", err, report2)

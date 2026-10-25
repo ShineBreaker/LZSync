@@ -33,17 +33,27 @@ const backupStamp = "20060102T150405.000Z"
 
 // backupTarget 写前自动备份（S2）：deps.Backups 非空走 guard 的集中备份
 // 目录；未配置（nil）退化为库同目录带时间戳副本——S2 的既定退化语义。
-// 已存在同名备份绝不覆盖（返回错误，中止投放）。
+// 已存在同名备份绝不覆盖（撞名时等一毫秒重试，最多三次；S2 语义保留）。
 func backupTarget(backups *guard.Backups, realmPath string) (string, error) {
 	if backups != nil {
 		return backups.BackupFile(realmPath)
 	}
-	dst := filepath.Join(filepath.Dir(realmPath),
-		filepath.Base(realmPath)+"."+time.Now().UTC().Format(backupStamp))
+	var dst string
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Millisecond)
+		}
+		dst = filepath.Join(filepath.Dir(realmPath),
+			filepath.Base(realmPath)+"."+time.Now().UTC().Format(backupStamp))
+		if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+			break
+		} else if err != nil {
+			return "", fmt.Errorf("deploy: 检查备份目标 %s: %w", dst, err)
+		}
+		// 撞名，等下一毫秒重试。
+	}
 	if _, err := os.Stat(dst); err == nil {
 		return "", fmt.Errorf("deploy: 备份 %s 已存在，绝不覆盖（S2）", dst)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("deploy: 检查备份目标 %s: %w", dst, err)
 	}
 	if err := copyFile(dst, realmPath); err != nil {
 		return "", fmt.Errorf("deploy: 生成备份 %s: %w", dst, err)

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lzsync/internal/filestore"
 	"lzsync/internal/fixture"
@@ -176,6 +177,8 @@ func TestDeployExternalSetGuard(t *testing.T) {
 		t.Fatalf("NewPlan: %v", err)
 	}
 	manual.Target = refB
+	// 两次 Deploy 同一 realmPath，毫秒级时间戳撞名（S2 绝不覆盖）。
+	time.Sleep(2 * time.Millisecond)
 	report2, err := NewRunner(Deps{Hub: h}).Deploy(ctx, manual, nil)
 	if err != nil {
 		t.Fatalf("Deploy#2: %v", err)
