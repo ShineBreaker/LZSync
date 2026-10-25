@@ -152,7 +152,8 @@ func TestG0v0CompatFullChain(t *testing.T) {
 		t.Fatalf("StandardSeed(D): %v", err)
 	}
 	seedD.BeatmapSets[0].OnlineID = 777001
-	seedD.BeatmapSets[0].StatusInt = 0 // 现场差异：matchesCanonical 不一致 → 覆盖写入确实发生
+	seedD.BeatmapSets[0].StatusInt = 0      // B7 端本地字段：现场差异但就地更新不覆写（G10 保留断言面）
+	seedD.BeatmapSets[0].DateSubmitted = nil // 非本地字段现场差异 → matchesCanonical 不一致 → 覆盖写入确实发生
 	seedD.Scores[0].OnlineID = 888001
 	seedD.Scores[0].LegacyOnlineID = 888002
 	seedD.Scores[0].User.OnlineID = 888003
@@ -206,10 +207,18 @@ func TestG0v0CompatFullChain(t *testing.T) {
 	}
 
 	withRO(t, lib, refD.RealmPath, func(r *realmc.Realm) {
-		// 集行：Status 被 canonical 覆盖回 1（覆盖证据），OnlineID 保持现场值。
+		// 集行：B7 端本地字段 Status 保留现场值 0（G10：就地更新不覆写），
+		// 非本地字段 DateSubmitted 被 canonical 覆盖（覆盖证据），OnlineID
+		// 保持现场值。
 		setObj := findRowByString(t, r, "BeatmapSet", "Hash", seedD.BeatmapSets[0].Hash)
 		defer r.ReleaseObject(setObj)
-		assertRealmInt64(t, r, setObj, "BeatmapSet", "Status", 1, "集行白名单覆盖")
+		assertRealmInt64(t, r, setObj, "BeatmapSet", "Status", 0, "集行 Status 端本地字段保留（B7）")
+		if k := propKey(t, r, "BeatmapSet", "DateSubmitted"); k != 0 {
+			null, err := r.IsNull(setObj, k)
+			if err != nil || null {
+				t.Errorf("DateSubmitted 覆盖后应非空 canonical 值: null=%v err=%v", null, err)
+			}
+		}
 		assertRealmInt64(t, r, setObj, "BeatmapSet", "OnlineID", 777001,
 			"异域更新不触碰集 OnlineID（canonical=1001，现场值保留）")
 

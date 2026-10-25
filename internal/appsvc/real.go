@@ -160,7 +160,7 @@ func newRealBackend(deps Deps, prog ProgressSink) (*Backend, error) {
 			}
 		}
 	}
-	cmp := &realCompare{deps: deps, reg: reg}
+	cmp := &realCompare{deps: deps, reg: reg, cfg: cfg}
 	if err := cmp.loadPersistedPlan(); err != nil {
 		return nil, err
 	}
@@ -389,6 +389,7 @@ func forkIDs() string {
 type realCompare struct {
 	deps Deps
 	reg  *registry
+	cfg  *configStore // G12：数据页行态叠加三方判定要读同步范围
 
 	mu   sync.Mutex
 	plan deploy.Plan // 持久化的当前计划（plan.json）
@@ -396,18 +397,89 @@ type realCompare struct {
 
 // PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）：
 // 覆盖全部启用 kind（collection/beatmap_set 走 hub 公共对账面，skin/score
-// 走本层过渡直查）。
+// 走本层过渡直查）。G12：行态再叠加三方判定结果——全局冲突/本端异值/
+// 本端保护的单位所在行升「冲突」态（自动轮不写；勾选仍走手动处置）。
 func (s *realCompare) PreviewDeploy(target string) ([]DiffRow, error) {
-	items, err := s.allReconcileItems(context.Background(), target)
+	ctx := context.Background()
+	items, err := s.allReconcileItems(ctx, target)
 	if err != nil {
 		return nil, err
 	}
+	decs, ckIx := s.decisionOverlay(ctx)
 	sum := newSummarizer(s.deps.Hub)
 	rows := make([]DiffRow, 0, len(items))
 	for _, it := range items {
-		rows = append(rows, reconcileToRow(it, sum))
+		row := reconcileToRow(it, sum)
+		if decs != nil && row.Category != CategoryRestore {
+			overlayRowDecision(&row, decs, ckIx, target)
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// decisionOverlay 三方判定在数据页的只读投影：参与端 = 设置里 Source||
+// Target 的全部端，目标端全部按 live 计（本层只做行态标注不出计划）。
+// 判定装载/计算失败返回 (nil,nil)——判定面的错误不挡对账行渲染，一轮
+// 同步自身会如实报错（歧义单位 fail-closed 同理）。
+func (s *realCompare) decisionOverlay(ctx context.Context) (map[unitKey]*unitDecision, map[string][]unitKey) {
+	if s.cfg == nil {
+		return nil, nil
+	}
+	sources := s.cfg.sourceForkIDs()
+	targets := s.cfg.targetForkIDs()
+	live := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		live[t] = true
+	}
+	in, err := loadDecideInput(ctx, &s.deps, sources, targets, live,
+		scopeKinds(s.cfg), false, nil)
+	if err != nil {
+		return nil, nil
+	}
+	units, ix := buildUnits(in)
+	return decideAll(units, in.sources, in.targets), ix
+}
+
+// overlayRowDecision 行态叠加判定结果：行涉及的任一单位全局冲突、或本端
+// 落 divergent/protected → 行升 CategoryConflict 并写清原因。version-update
+// 行同时查 CurrentKey（目标持旧版、决定值在链尾时单位挂在身份键下，两端
+// 内容键都进索引）。
+func overlayRowDecision(row *DiffRow, decs map[unitKey]*unitDecision,
+	ix map[string][]unitKey, target string) {
+	seen := map[unitKey]bool{}
+	check := func(ck string) bool {
+		for _, uk := range ix[string(row.Kind)+"\x00"+ck] {
+			if seen[uk] {
+				continue
+			}
+			seen[uk] = true
+			d := decs[uk]
+			if d == nil {
+				continue
+			}
+			switch {
+			case d.conflict:
+				row.SkipReason = "三方判定：多端取值分歧，本轮不写（§0.3 规则5；勾选即按 hub 变体处置）"
+			case d.divergent[target]:
+				row.SkipReason = "本端取值与 hub 不同且无同步基线（§0.3：保留差异；勾选即按 hub 变体处置）"
+			case d.protected[target]:
+				row.SkipReason = "本端自上轮同步后独立改动（§0.3 保护跳过；勾选即按 hub 变体处置）"
+			default:
+				continue
+			}
+			row.Category = CategoryConflict
+			row.DefaultChecked = false
+			return true
+		}
+		return false
+	}
+	if check(row.ContentKey) {
+		return
+	}
+	if row.CurrentKey != "" {
+		check(row.CurrentKey)
+	}
 }
 
 // CompareForks fork↔fork 快照对比（委托 diff 层：两份 presence 差集；

@@ -13,6 +13,7 @@ package itests
 
 import (
 	"testing"
+	"time"
 
 	"lzsync/internal/fixture"
 	"lzsync/internal/hub"
@@ -29,16 +30,19 @@ func TestReconcileFourCategories(t *testing.T) {
 	V1 := mustSet(t, 77, "V Artist", "V Title", "version one osu", filesA)
 	W1 := mustSet(t, 0, "W Artist", "W Title", "weak one osu", filesA) // 弱键素材
 	W2 := mustSet(t, 0, "W Artist", "W Title", "weak two osu", filesA) // 同元数据、异内容 → 弱键配对
-	// 冲突字段用 StatusInt（§4.2 冲突字段清单之一；镜像无 Beatmaps 列表列 →
-	// 投影 Title 恒空，Title 冲突在 fixture 形态下不可构造）。
-	CXA.StatusInt = 4
+	// 冲突字段用 DateSubmitted（G10/B7 后 StatusInt 是端本地字段不参与
+	// 冲突；投影 Title 在 fixture 形态下恒空不可构造 → 用就地更新写入面
+	// 的非本地字段差异构造同键冲突）。
+	CXA.StatusInt = 4 // 端本地字段差异：按 G10 不参与冲突判定
 
 	filesG := map[string][]byte{}
 	V2 := mustSet(t, 77, "V Artist", "V Title", "version two osu", filesG) // 同强键新版本
 
 	filesC := map[string][]byte{}
 	TO := mustSet(t, 103, "TO Artist", "TO Title", "target only osu", filesC)
-	CXC := mustSet(t, 102, "CX Artist", "Conflict From C", cxOSU, filesC) // 同键异 StatusInt → 冲突
+	CXC := mustSet(t, 102, "CX Artist", "Conflict From C", cxOSU, filesC) // 同键
+	cxSubmitted := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	CXC.DateSubmitted = &cxSubmitted // 同键异 DateSubmitted → 冲突（非本地字段）
 	V1C := mustSet(t, 77, "V Artist", "V Title", "version one osu", filesC)
 	W1C := mustSet(t, 0, "W Artist", "W Title", "weak one osu", filesC)
 
@@ -71,14 +75,24 @@ func TestReconcileFourCategories(t *testing.T) {
 		t.Errorf("源独有 %s = %+v，期望单条 create 非 Restorable", shortHash(SA.Hash), got)
 	}
 
-	// 冲突：CX 内容键相等、StatusInt 不同 → conflict 且字段级 diff 含
-	// StatusInt（§4.2：冲突字段只取内容键之外的字段）。
+	// 冲突：CX 内容键相等、DateSubmitted 不同 → conflict 且字段级 diff 含
+	// DateSubmitted（§4.2：冲突字段只取内容键之外的字段；G10 后端本地
+	// 字段 StatusInt 不入冲突面）。
 	got = byKey[CXA.Hash]
 	if len(got) != 1 || got[0].Category != hub.ReconcileConflict {
 		t.Fatalf("冲突 %s = %+v，期望单条 conflict", shortHash(CXA.Hash), got)
 	}
-	if len(got[0].ConflictFields) == 0 || got[0].ConflictFields[0].Field != "StatusInt" {
-		t.Errorf("冲突字段 = %+v，期望首位 StatusInt", got[0].ConflictFields)
+	var sawDateSubmitted bool
+	for _, cf := range got[0].ConflictFields {
+		if cf.Field == "DateSubmitted" {
+			sawDateSubmitted = true
+		}
+		if cf.Field == "StatusInt" {
+			t.Errorf("端本地字段 StatusInt 不应进冲突字段: %+v", cf)
+		}
+	}
+	if !sawDateSubmitted {
+		t.Errorf("冲突字段 = %+v，期望含 DateSubmitted", got[0].ConflictFields)
 	}
 
 	// 版本更新（强键）：g0v0 持有旧版本 v1，hub 链尾 v2 → version-update

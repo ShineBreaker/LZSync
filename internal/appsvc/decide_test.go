@@ -33,7 +33,7 @@ func decideFixture(t *testing.T) *decideInput {
 		canon: &canonicalIndex{
 			collections: map[string]string{},
 			sets:        map[string]bool{},
-			skins:       map[string]bool{},
+			skins:       map[string]string{},
 			scores:      map[string]string{},
 		},
 		sum: newSummarizer(h),
@@ -232,7 +232,7 @@ func TestAssembleGameIniPerKey(t *testing.T) {
 		"A": {"k1": "v1", "k2": "x"},
 		"B": {"k2": "y"}, // k1 在 B 缺席 → 可补缺
 	}
-	units := buildUnits(in)
+	units, _ := buildUnits(in)
 	decs := decideAll(units, in.sources, in.targets)
 	out := assemblePlans(in, units, decs)
 
@@ -307,7 +307,7 @@ func TestAssembleTombstoneGoesToRestore(t *testing.T) {
 	in.sources = []string{"A"}
 	in.targets = []string{"A", "B"}
 	in.live = map[string]bool{"A": true, "B": true}
-	in.canon.skins["sk1"] = true
+	in.canon.skins["sk1"] = `{"Hash":"sk1","Name":"s"}`
 	in.tombs["B"] = map[hub.EntityKind]map[string]int64{
 		hub.KindSkin: {"sk1": 123},
 	}

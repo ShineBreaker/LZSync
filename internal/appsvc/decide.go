@@ -103,7 +103,7 @@ type decideInput struct {
 type canonicalIndex struct {
 	collections map[string]string // name → canonical payload JSON
 	sets        map[string]bool   // 内容键 → canonical 行存在
-	skins       map[string]bool
+	skins       map[string]string // 内容键 → canonical payload JSON（G11：交集预检要 Protected/指纹段）
 	scores      map[string]string // 组合内容键 → canonical payload JSON
 	kbs         map[string]bool   // 四段内容键 → canonical 行存在
 	settings    map[string]bool
@@ -205,8 +205,16 @@ func decideUnit(key unitKey, row *unitRow, sources, targets []string) *unitDecis
 
 // buildUnits 提取判定面：presence/ini → 单位取值表。只纳入开启板块与
 // Source||Target 端的行；其余端 presence 行不参与判定（B9）。
-func buildUnits(in *decideInput) map[unitKey]*unitRow {
+// 第二返回是「内容键 → 判定单位」索引（kind\x00ck → 单位列表）：数据
+// 浏览页把对账行态叠加到三方判定结果时用（G12）——谱面集单位按身份键、
+// 键位按三段身份、收藏按哨兵+逐成员，行级内容键不直接等于单位身份。
+func buildUnits(in *decideInput) (map[unitKey]*unitRow, map[string][]unitKey) {
 	units := map[unitKey]*unitRow{}
+	ckIx := map[string][]unitKey{}
+	ix := func(kind hub.EntityKind, ck string, uk unitKey) {
+		k := string(kind) + "\x00" + ck
+		ckIx[k] = append(ckIx[k], uk)
+	}
 	rowOf := func(k unitKey) *unitRow {
 		r, ok := units[k]
 		if !ok {
@@ -245,11 +253,15 @@ func buildUnits(in *decideInput) map[unitKey]*unitRow {
 					// 身份级哨兵单位（每条收藏行都产）：持有态判定与
 					// 「目标端是否持有该收藏」的事实面——空收藏靠它才能
 					// 进判定；有成员的收藏也靠它区分「未持有」与「空集」。
-					r := rowOf(unitKey{string(kind), name, ""})
+					sentinel := unitKey{string(kind), name, ""}
+					r := rowOf(sentinel)
 					r.cur[fork] = unitVal{fp: "held", payload: lv}
+					ix(kind, ck, sentinel)
 					for _, m := range c.BeatmapMD5Hashes {
-						rm := rowOf(unitKey{string(kind), name, m})
+						mu := unitKey{string(kind), name, m}
+						rm := rowOf(mu)
 						rm.cur[fork] = unitVal{fp: "1", payload: lv}
+						ix(kind, ck, mu)
 					}
 				}
 			case hub.KindBeatmapSet:
@@ -259,11 +271,13 @@ func buildUnits(in *decideInput) map[unitKey]*unitRow {
 						continue
 					}
 					ik, _ := hub.BeatmapSetIdentityKey(&bs)
-					r := rowOf(unitKey{string(kind), ik, ""})
+					uk := unitKey{string(kind), ik, ""}
+					r := rowOf(uk)
 					hashes := decodeSetFP(r.cur[fork].fp)
 					hashes = append(hashes, ck)
 					sort.Strings(hashes)
 					r.cur[fork] = unitVal{fp: encodeSetFP(hashes)}
+					ix(kind, ck, uk)
 				}
 			case hub.KindRulesetSetting:
 				for ck, lv := range rows {
@@ -271,8 +285,10 @@ func buildUnits(in *decideInput) map[unitKey]*unitRow {
 					if json.Unmarshal([]byte(lv), &rs) != nil {
 						continue
 					}
-					r := rowOf(unitKey{string(kind), ck, ""})
+					uk := unitKey{string(kind), ck, ""}
+					r := rowOf(uk)
 					r.cur[fork] = unitVal{fp: rs.Value, payload: lv}
+					ix(kind, ck, uk)
 				}
 			case hub.KindModPreset:
 				for ck, lv := range rows {
@@ -280,17 +296,21 @@ func buildUnits(in *decideInput) map[unitKey]*unitRow {
 					if json.Unmarshal([]byte(lv), &mp) != nil {
 						continue
 					}
-					r := rowOf(unitKey{string(kind), ck, ""})
+					uk := unitKey{string(kind), ck, ""}
+					r := rowOf(uk)
 					r.cur[fork] = unitVal{fp: mp.Description + "\x00" + mp.ModsJson, payload: lv}
+					ix(kind, ck, uk)
 				}
 			case hub.KindKeyBinding:
-				for _, lv := range rows {
+				for ck, lv := range rows {
 					var kb hub.KeyBinding
 					if json.Unmarshal([]byte(lv), &kb) != nil {
 						continue
 					}
 					ik := hub.KeyBindingIdentityKey(kb.RulesetName, kb.Variant, kb.ActionInt)
-					r := rowOf(unitKey{string(kind), ik, ""})
+					uk := unitKey{string(kind), ik, ""}
+					ix(kind, ck, uk)
+					r := rowOf(uk)
 					combos := decodeSetFP(r.cur[fork].fp)
 					found := false
 					for _, c := range combos {
@@ -312,8 +332,10 @@ func buildUnits(in *decideInput) map[unitKey]*unitRow {
 				}
 			case hub.KindSkin, hub.KindScore:
 				for ck := range rows {
-					r := rowOf(unitKey{string(kind), ck, ""})
+					uk := unitKey{string(kind), ck, ""}
+					r := rowOf(uk)
 					r.cur[fork] = unitVal{fp: "held"}
+					ix(kind, ck, uk)
 				}
 			}
 		}
@@ -347,7 +369,7 @@ func buildUnits(in *decideInput) map[unitKey]*unitRow {
 			}
 		}
 	}
-	return units
+	return units, ckIx
 }
 
 // decideAll 逐单位判定。
@@ -694,7 +716,24 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 				}
 			}
 		case string(hub.KindSkin), string(hub.KindScore):
-			// 成绩先做名录全局交集预检（单位级一次判定全 peers）。
+			// 内容键即值的两类先跑名录/指纹全局交集预检（单位级一次判定
+			// 全 peers——G11 收全的出口闸：Protected/专有皮肤与专有规则
+			// 集成绩在 hub 留存但永不导出）。
+			if uk.kind == string(hub.KindSkin) {
+				payload, ok := in.canon.skins[uk.identity]
+				if !ok {
+					continue
+				}
+				var sk hub.Skin
+				if err := json.Unmarshal([]byte(payload), &sk); err != nil {
+					out.pending.Unsupported++
+					continue
+				}
+				if r := deploy.SkinIntersectionReject(sk, in.targets); r != "" {
+					out.pending.Unsupported++
+					continue
+				}
+			}
 			if uk.kind == string(hub.KindScore) {
 				payload, ok := in.canon.scores[uk.identity]
 				if !ok {
@@ -725,18 +764,12 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 					continue
 				}
 				if uk.kind == string(hub.KindSkin) {
-					if !in.canon.skins[uk.identity] {
-						continue
-					}
 					addItem(t, deploy.PlanItem{
 						Kind: hub.KindSkin, ContentKey: uk.identity,
 						Action: deploy.ActionCreate, SourceFork: dec.winner,
 						Summary: in.sum.summary(hub.KindSkin, uk.identity),
 					})
 				} else {
-					if _, ok := in.canon.scores[uk.identity]; !ok {
-						continue
-					}
 					addItem(t, deploy.PlanItem{
 						Kind: hub.KindScore, ContentKey: uk.identity,
 						Action: deploy.ActionCreate, SourceFork: dec.winner,
@@ -860,7 +893,7 @@ func sortedSet(m map[string]bool) []string {
 //   - tombs：逐目标端 tombstone；
 //   - evidence：beatmap_identity 的强键/已确认面；
 //   - canon：canonical 载荷索引（create/交集预检的载荷来源）。
-func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []string,
+func loadDecideInput(ctx context.Context, deps *Deps, sources, targets []string,
 	live map[string]bool, kinds map[hub.EntityKind]bool, wantGameIni bool,
 	freshIni map[string]bool) (*decideInput, error) {
 	in := &decideInput{
@@ -877,19 +910,19 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 		canon: &canonicalIndex{
 			collections: map[string]string{},
 			sets:        map[string]bool{},
-			skins:       map[string]bool{},
+			skins:       map[string]string{},
 			scores:      map[string]string{},
 			kbs:         map[string]bool{},
 			settings:    map[string]bool{},
 			presets:     map[string]bool{},
 		},
-		sum: newSummarizer(s.deps.Hub),
+		sum: newSummarizer(deps.Hub),
 	}
 	sort.Strings(in.sources)
 	sort.Strings(in.targets)
 
 	// presence 全量（只读；参与端过滤在 buildUnits）。
-	rows, err := s.deps.Hub.DB().QueryContext(ctx,
+	rows, err := deps.Hub.DB().QueryContext(ctx,
 		`SELECT fork_id, kind, content_key, local_values FROM presence`)
 	if err != nil {
 		return nil, fmt.Errorf("读 presence: %w", err)
@@ -918,7 +951,7 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 	rows.Close()
 
 	// baseline 全量。
-	base, err := s.deps.Hub.Baselines(ctx)
+	base, err := deps.Hub.Baselines(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -933,12 +966,12 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 	}
 
 	// ini 快照（仅本轮收集过的端——freshIni 由调用方按收集结果给出）。
-	if wantGameIni && s.deps.GameIni != nil {
+	if wantGameIni && deps.GameIni != nil {
 		for _, fid := range sortedKeys(freshIni) {
 			if !freshIni[fid] {
 				continue
 			}
-			vals, _, ok, err := s.deps.GameIni.Load(fid)
+			vals, _, ok, err := deps.GameIni.Load(fid)
 			if err != nil {
 				return nil, fmt.Errorf("读 %s 的 ini 快照: %w", fid, err)
 			}
@@ -950,7 +983,7 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 
 	// tombstone 逐目标端。
 	for _, t := range in.targets {
-		tm, err := s.deps.Hub.Tombstones(ctx, t)
+		tm, err := deps.Hub.Tombstones(ctx, t)
 		if err != nil {
 			return nil, fmt.Errorf("读 %s tombstone: %w", t, err)
 		}
@@ -959,7 +992,7 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 
 	// beatmap 身份证据：强键或用户已确认 → 自动路径可用；弱键未确认 →
 	// 需确认（§5.4 三选一前置，版本替换不自动）。
-	idRows, err := s.deps.Hub.DB().QueryContext(ctx,
+	idRows, err := deps.Hub.DB().QueryContext(ctx,
 		`SELECT identity_key, evidence, user_confirmed FROM beatmap_identity`)
 	if err != nil {
 		return nil, fmt.Errorf("读 beatmap_identity: %w", err)
@@ -981,7 +1014,7 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 
 	// canonical 索引。
 	load := func(q string, fn func(key, payload string)) error {
-		rs, err := s.deps.Hub.DB().QueryContext(ctx, q)
+		rs, err := deps.Hub.DB().QueryContext(ctx, q)
 		if err != nil {
 			return err
 		}
@@ -1006,7 +1039,7 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 		return nil, fmt.Errorf("读 canonical 谱面集: %w", err)
 	}
 	if err := load(`SELECT content_hash, payload FROM skin`, func(k, p string) {
-		in.canon.skins[k] = true
+		in.canon.skins[k] = p
 	}); err != nil {
 		return nil, fmt.Errorf("读 canonical 皮肤: %w", err)
 	}
@@ -1025,11 +1058,11 @@ func (s *realSync) loadDecideInput(ctx context.Context, sources, targets []strin
 func (s *realSync) runDecisions(ctx context.Context, sources, targets []string,
 	live map[string]bool, kinds map[hub.EntityKind]bool, wantGameIni bool,
 	freshIni map[string]bool) (*decideOutcome, error) {
-	in, err := s.loadDecideInput(ctx, sources, targets, live, kinds, wantGameIni, freshIni)
+	in, err := loadDecideInput(ctx, &s.deps, sources, targets, live, kinds, wantGameIni, freshIni)
 	if err != nil {
 		return nil, err
 	}
-	units := buildUnits(in)
+	units, _ := buildUnits(in)
 	decs := decideAll(units, in.sources, in.targets)
 	return assemblePlans(in, units, decs), nil
 }

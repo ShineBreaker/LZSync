@@ -406,7 +406,8 @@ export const CompareService = {
   /**
    * PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）：
    * 覆盖全部启用 kind（collection/beatmap_set 走 hub 公共对账面，skin/score
-   * 走本层过渡直查）。
+   * 走本层过渡直查）。G12：行态再叠加三方判定结果——全局冲突/本端异值/
+   * 本端保护的单位所在行升「冲突」态（自动轮不写；勾选仍走手动处置）。
    */
   previewDeploy(target: string): Promise<DiffRow[]> {
     return call("CompareService.PreviewDeploy", target);

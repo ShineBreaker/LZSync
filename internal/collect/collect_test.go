@@ -487,31 +487,8 @@ func strPtrC(s string) *string { return &s }
 
 // TestSkinIsOwnFingerprint fork 专有皮肤指纹规则单测（Name+Creator 双等值
 // 或 Guid 等值二通道；注册表数据属 forks 包，越界不补——规则语义在此
-// 独立验证）。
-func TestSkinIsOwnFingerprint(t *testing.T) {
-	own := []forks.SkinFingerprint{
-		{Name: "Ez Default", Creator: "Ez2Lazer"},
-		{Guid: "fc372386381d4f8e897ac1d89ef39f9c"},
-	}
-	for _, tc := range []struct {
-		guid, name, creator string
-		want                bool
-	}{
-		{"", "Ez Default", "Ez2Lazer", true},
-		{"", "Ez Default", "someone", false}, // 仅 Name 命中不算
-		{"", "other", "Ez2Lazer", false},     // 仅 Creator 命中不算
-		{"", "My Skin", "maker", false},
-		{"fc372386381d4f8e897ac1d89ef39f9c", "any", "any", true},        // Guid 通道
-		{"deadbeefdeadbeefdeadbeefdeadbeef", "Not Ez", "anyone", false}, // 两通道均不命中
-	} {
-		if got := skinIsOwn(own, tc.guid, tc.name, tc.creator); got != tc.want {
-			t.Errorf("skinIsOwn(%q,%q,%q) = %v，期望 %v", tc.guid, tc.name, tc.creator, got, tc.want)
-		}
-	}
-	if skinIsOwn(nil, "", "Ez Default", "Ez2Lazer") {
-		t.Error("空指纹清单不应命中")
-	}
-}
+// 独立验证——G11 后指纹判定移到投放侧（deploy.forkOwnSkinHit /
+// SkinIntersectionReject），覆盖在 deploy_skin_test.go）。
 
 // TestCollectM2EntitiesFullColumns M2 收集验收（design §7-M2 / §8.2-5）：
 // 全列谱面/皮肤/成绩入 hub 逐字段断言；跳过规则逐条断言计数与原因；
@@ -529,9 +506,10 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 	fullSet.ID = "77777777-7777-7777-7777-777777777777"
 	fullSet.Beatmaps[0].ID = "88888888-8888-8888-8888-888888888888"
 	fullSet.Beatmaps[1].ID = "99999999-9999-9999-9999-999999999999"
-	fullSet.Beatmaps[1].Hidden = true // Hidden 难度跳过夹具
+	fullSet.Beatmaps[1].Hidden = true // Hidden 难度夹具（G11 后照常入 hub）
 
-	// 谱面集跳过夹具：软删集（难度随集消失不重复计数）与 Protected 系统集。
+	// 谱面集跳过夹具：软删集（难度随集消失不重复计数）与 Protected 集
+	//（G11 后照常入 hub）。
 	softDelSet := hub.BeatmapSet{
 		ID: "aaaaaaa1-0000-0000-0000-000000000001", Hash: sha256Fixture(t, "m2-softdel-set-concat"),
 		OnlineID: 7002, DeletePending: true,
@@ -601,9 +579,10 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 
-	// 实体入仓计数（跳过行不入仓）。
+	// 实体入仓计数（跳过行不入仓；G11 收全：Protected 集、Hidden 难度
+	// 照常入仓；内置皮肤无 Hash 仍走身份不可判定跳过）。
 	for kind, want := range map[hub.EntityKind]int{
-		hub.KindCollection: 0, hub.KindBeatmapSet: 1, hub.KindBeatmap: 1,
+		hub.KindCollection: 0, hub.KindBeatmapSet: 2, hub.KindBeatmap: 2,
 		hub.KindSkin: 1, hub.KindScore: 1,
 	} {
 		if got := report.Entities[kind]; got != want {
@@ -611,23 +590,17 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 		}
 	}
 
-	// 跳过规则逐条：计数与原因。
+	// 跳过规则逐条：计数与原因（收集侧只剩「语义无法跨端表示」的拦截）。
 	for reason, want := range map[string]int{
 		skipSoftDeleted:    1, // 软删集（难度随集消失）
-		skipProtectedSet:   1,
-		skipHiddenDiff:     1,
 		skipSkinSoftDel:    1,
-		skipProtectedSkin:  6, // 内置六皮肤（fixture 恒播）
-		skipSkinNoHash:     1,
+		skipSkinNoHash:     7, // noHash 夹具行 + 六个无 Hash 内置皮肤
 		skipScoreSoftDel:   1,
 		skipScoreNoBeatmap: 1,
 	} {
 		if got := skipCount(report, reason); got != want {
 			t.Errorf("跳过[%s] = %d，期望 %d（Skips=%+v）", reason, got, want, report.Skips)
 		}
-	}
-	if skipCount(report, skipOwnSkin) != -1 {
-		t.Errorf("lazer 注册表未登记 OwnSkins，不应出现 fork 专有皮肤跳过（Skips=%+v）", report.Skips)
 	}
 
 	// collect_log：entity_counts 含五类实体、skip_reasons 可解析。
@@ -641,8 +614,8 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 	if err := json.Unmarshal([]byte(countsJSON), &counts); err != nil {
 		t.Fatalf("解码 entity_counts: %v", err)
 	}
-	if counts[hub.KindSkin] != 1 || counts[hub.KindScore] != 1 || counts[hub.KindBeatmap] != 1 {
-		t.Errorf("collect_log entity_counts = %v，期望含 skin=1/score=1/beatmap=1", counts)
+	if counts[hub.KindSkin] != 1 || counts[hub.KindScore] != 1 || counts[hub.KindBeatmap] != 2 {
+		t.Errorf("collect_log entity_counts = %v，期望含 skin=1/score=1/beatmap=2", counts)
 	}
 	var logSkips []hub.SkipStat
 	if err := json.Unmarshal([]byte(skipsJSON), &logSkips); err != nil {
@@ -704,24 +677,35 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 		t.Errorf("成绩 origin = %+v，期望 {lazer, 源 Guid}（HB3）", originScore)
 	}
 
-	// 谱面集逐字段断言（Hidden 难度被剔出 Beatmaps；Files 保留全部集内文件）。
+	// 谱面集逐字段断言（G11：Hidden 难度照常进 Beatmaps；Protected 集
+	// 也入 hub——sets 共两行，按 Hash 定位本集）。
 	wantSet := fullSet
 	wantSet.ID = guidNorm(fullSet.ID)
-	wantSet.Beatmaps = []hub.Beatmap{fullSet.Beatmaps[0]}
-	wantSet.Beatmaps[0].ID = guidNorm(fullSet.Beatmaps[0].ID)
+	for i := range wantSet.Beatmaps {
+		wantSet.Beatmaps[i].ID = guidNorm(wantSet.Beatmaps[i].ID)
+	}
 	sets, err := h.hub.CurrentBeatmapSets(context.Background())
 	if err != nil {
 		t.Fatalf("CurrentBeatmapSets: %v", err)
 	}
-	if len(sets) != 1 {
-		t.Fatalf("当前版本谱面集 = %d，期望 1", len(sets))
+	if len(sets) != 2 {
+		t.Fatalf("当前版本谱面集 = %d，期望 2（含 Protected 集）", len(sets))
 	}
-	if !reflect.DeepEqual(sets[0].Set, wantSet) {
-		t.Errorf("hub 谱面集 payload = %+v，期望 %+v", sets[0].Set, wantSet)
+	var gotSet hub.BeatmapSet
+	for _, s := range sets {
+		if s.Set.Hash == fullSet.Hash {
+			gotSet = s.Set
+		}
 	}
-	if sets[0].Set.Artist != "M2 Artist" || sets[0].Set.Title != "M2 Title" || sets[0].Set.AuthorUsername != "m2mapper" {
+	if gotSet.Hash == "" {
+		t.Fatalf("谱面集 %s 不在当前版本集中", fullSet.Hash)
+	}
+	if !reflect.DeepEqual(gotSet, wantSet) {
+		t.Errorf("hub 谱面集 payload = %+v，期望 %+v", gotSet, wantSet)
+	}
+	if gotSet.Artist != "M2 Artist" || gotSet.Title != "M2 Title" || gotSet.AuthorUsername != "m2mapper" {
 		t.Errorf("谱面身份键字段 = %q/%q/%q，期望首难度 Metadata 承载（§4.2）",
-			sets[0].Set.Artist, sets[0].Set.Title, sets[0].Set.AuthorUsername)
+			gotSet.Artist, gotSet.Title, gotSet.AuthorUsername)
 	}
 
 	// 难度行逐字段断言（beatmap 表 canonical，非集内嵌视图）。
@@ -740,21 +724,25 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 	if !reflect.DeepEqual(gotBM, wantBM) {
 		t.Errorf("hub 难度 payload = %+v，期望 %+v", gotBM, wantBM)
 	}
-	// Hidden 难度与跳过集的难度不得入仓。
-	for _, bad := range []string{fullSet.Beatmaps[1].Hash} {
-		var n int
+	// Hidden 难度照常入仓（G11 收全；Hidden 值随 payload 保留）。
+	{
+		var hidPayload string
 		if err := h.hub.DB().QueryRow(
-			`SELECT COUNT(*) FROM beatmap WHERE content_hash=?`, bad).Scan(&n); err != nil {
-			t.Fatalf("查隐藏难度行: %v", err)
+			`SELECT payload FROM beatmap WHERE content_hash=?`, fullSet.Beatmaps[1].Hash).Scan(&hidPayload); err != nil {
+			t.Fatalf("读 Hidden 难度 payload: %v", err)
 		}
-		if n != 0 {
-			t.Errorf("Hidden 难度 %s 入仓 %d 行，期望 0", bad, n)
+		var hidBM hub.Beatmap
+		if err := json.Unmarshal([]byte(hidPayload), &hidBM); err != nil {
+			t.Fatalf("解码 Hidden 难度 payload: %v", err)
+		}
+		if !hidBM.Hidden {
+			t.Error("Hidden 难度入仓但 Hidden 标记丢失")
 		}
 	}
 
-	// presence：五类实体快照完整。
+	// presence：五类实体快照完整（G11 收全后 beatmap_set=2）。
 	for kind, want := range map[hub.EntityKind]int{
-		hub.KindCollection: 0, hub.KindBeatmapSet: 1, hub.KindSkin: 1, hub.KindScore: 1,
+		hub.KindCollection: 0, hub.KindBeatmapSet: 2, hub.KindSkin: 1, hub.KindScore: 1,
 	} {
 		if got := h.presenceCount("lazer", kind); got != want {
 			t.Errorf("presence(%s) = %d，期望 %d", kind, got, want)
@@ -788,8 +776,10 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 }
 
 // TestCollectEzCompatFilters §5.4 收集侧兼容过滤（Ez 库，块 2/7 验收）：
-// bms 规则集成绩与难度（D6）、判定档成绩（R7）、Ez 专有皮肤（D21）、
-// 外部托管集（D5，M2 已有）逐条断言计数与人话原因；被滤行不入 hub。
+// G11 后 bms 规则集成绩/难度（D6）、Ez 专有皮肤（D21）、Protected 内置
+// 皮肤照常入 hub（导出面拦截）；收集侧只剩语义不可表示行的拦截——
+// 外部托管集（D5）、判定档成绩（R7）、市场规则集成绩（D8）逐条断言
+// 计数与人话原因。
 func TestCollectEzCompatFilters(t *testing.T) {
 	extRoot := filepath.Join(t.TempDir(), "external", "bms-lib")
 	seed, err := fixture.EzDiffSeed(extRoot)
@@ -810,44 +800,38 @@ func TestCollectEzCompatFilters(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 
-	// 跳过逐条：计数与原因（内置六皮肤 Protected 是 fixture 恒播底噪）。
+	// 跳过逐条：计数与原因（G11 后只剩 D5/D8/R7 三类语义拦截）。
 	for reason, want := range map[string]int{
-		skipExternalSet:    1, // ExternalSets（D5）
-		skipOwnRulesetDiff: 1, // bms 集的 bms 难度（D6）
-		skipOwnRuleset:     1, // bms 规则集成绩（D6）
-		skipJudgedScore:    1, // JudgeMode=31/HealthMode=34（R7）
-		skipOwnSkin:        1, // Ez 专有皮肤 GUID 指纹（D21）
-		skipProtectedSkin:  6, // 内置六皮肤恒播
+		skipExternalSet: 1, // ExternalSets（D5）
+		skipJudgedScore: 1, // JudgeMode=31/HealthMode=34（R7）
 	} {
 		if got := skipCount(report, reason); got != want {
 			t.Errorf("跳过[%s] = %d，期望 %d（Skips=%+v）", reason, got, want, report.Skips)
 		}
 	}
 
-	// 被滤行不入 hub：成绩仅剩标准行；皮肤无用户行（ezSkin 被滤）；
-	// 难度仅标准集 2 个（bms 难度被滤——beatmap 无 presence 面，实体入仓
-	// 计数断言）；集 = 标准 + bms 集壳。
+	// G11 收全：bms 规则集成绩、bms 难度、Ez 专有皮肤（Guid 指纹命中）
+	// 照常入 hub（presence 端侧记录；导出面交集负责拦住它们）；内置
+	// 皮肤无 Hash 仍走身份不可判定跳过。
 	for kind, want := range map[hub.EntityKind]int{
 		hub.KindCollection: 1, hub.KindBeatmapSet: 2,
-		hub.KindSkin: 0, hub.KindScore: 1,
+		hub.KindSkin: 1, hub.KindScore: 2,
 	} {
 		if got := h.presenceCount(fixture.ForkEz2Lazer, kind); got != want {
 			t.Errorf("presence(%s) = %d，期望 %d", kind, got, want)
 		}
 	}
-	if got := report.Entities[hub.KindBeatmap]; got != 2 {
-		t.Errorf("Entities[beatmap] = %d，期望 2（bms 难度被滤）", got)
+	if got := report.Entities[hub.KindBeatmap]; got != 3 {
+		t.Errorf("Entities[beatmap] = %d，期望 3（含 bms 难度）", got)
 	}
 
-	// 幂等重跑：同一批跳过计数稳定（非首跑独有行为）。
+	// 幂等重跑：语义拦截计数稳定（非首跑独有行为）。
 	report2, err := h.runner.Collect(context.Background(), ref, nil)
 	if err != nil {
 		t.Fatalf("二次 Collect: %v", err)
 	}
-	for _, reason := range []string{skipOwnRuleset, skipJudgedScore, skipOwnSkin, skipOwnRulesetDiff} {
-		if got := skipCount(report2, reason); got != 1 {
-			t.Errorf("二次收集跳过[%s] = %d，期望 1", reason, got)
-		}
+	if got := skipCount(report2, skipJudgedScore); got != 1 {
+		t.Errorf("二次收集跳过[%s] = %d，期望 1", skipJudgedScore, got)
 	}
 }
 

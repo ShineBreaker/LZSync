@@ -5,8 +5,9 @@ package deploy
 // 同事务（Find ?? Create，S6；files/ 链接先行由 CopyMissing 在批前完成，
 // §5.3 顺序铁律）。
 //
-// 写入防线（投影跳过规则 §4.1 的对偶——正常进 hub 的行恒非 Protected /
-// 非 fork 专有；hub 出现即异常路径，写入器侧宁可不写并计数）：
+// 写入防线（§0.2-B1 收全的出口闸——G11 后 Protected/专有皮肤正常进
+// hub，判定面经 SkinIntersectionReject 拦在计划外；本处是手动勾选等
+// 旁路路径的对偶防线，宁可不写并计数）：
 //   - Protected 内置皮肤：固定 Guid 四端自备，同步无收益（lazer-baseline
 //     §2.10 / fork-comparison C6）；
 //   - fork 专有皮肤（OwnSkins 指纹命中）：跨端投放无意义且可能覆盖目标

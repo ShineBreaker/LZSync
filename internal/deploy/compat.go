@@ -248,13 +248,38 @@ func keyBindingActionAllowedIntersection(originFork, targetFork string, peers []
 // 单位级一次判全部 peers——任一 peer 拒绝即该单位不进任何端的计划，
 // 原因统一带 IntersectionRejectPrefix 以便计入 Pending.Unsupported）。
 
-// ScoreIntersectionReject 成绩对全部目标端的兼容性预检：逐 peer 跑
+// ScoreIntersectionReject 成绩对全部目标端的兼容性预检：规则集可解析性
+//（G11 后专有规则集成绩也进 hub，靠此拦截出口）+ 逐 peer 跑
 // adaptScoreForTarget 的拒绝面（mod 名录外 / StatisticsJson 解析失败），
 // 首个拒绝返回带前缀原因；全过返回空串。
 func ScoreIntersectionReject(sc hub.Score, peers []string) string {
+	if r := RulesetIntersectionReject(sc.RulesetShortName, peers); r != "" {
+		return r
+	}
 	for _, f := range peers {
 		if _, _, r := adaptScoreForTarget(sc, f); r != "" {
 			return IntersectionRejectPrefix + f + " 不支持 — " + r
+		}
+	}
+	return ""
+}
+
+// SkinIntersectionReject 皮肤对全部目标端的兼容性预检（§0.2-B1 收全的
+// 出口对偶）：Protected 内置皮肤与命中任一已注册 fork 专有指纹的皮肤
+// 永不导出（它们是宿主 fork 的固定自备物，跨端投放无收益且会污染目标
+// 皮肤库）。peers 形参为同构签名留位——规则本身与端无关。
+func SkinIntersectionReject(sk hub.Skin, peers []string) string {
+	if sk.Protected {
+		return fmt.Sprintf("皮肤 %q 是 Protected 内置皮肤（固定 Guid 四端自备，不投放）", sk.Name)
+	}
+	for _, p := range forks.All() {
+		for _, f := range p.OwnSkins {
+			if f.Guid != "" && sk.ID == f.Guid {
+				return fmt.Sprintf("皮肤 %q 命中 fork %s 专有指纹（Guid 等值），属宿主自备物不投放", sk.Name, p.ID)
+			}
+			if f.Name != "" && f.Creator != "" && f.Name == sk.Name && f.Creator == sk.Creator {
+				return fmt.Sprintf("皮肤 %q 命中 fork %s 专有指纹（Name+Creator），属宿主自备物不投放", sk.Name, p.ID)
+			}
 		}
 	}
 	return ""

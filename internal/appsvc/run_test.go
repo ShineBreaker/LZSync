@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
@@ -197,6 +198,45 @@ func TestRunSameHashSetConflictStaysPending(t *testing.T) {
 	}
 }
 
+// TestPreviewDeployReflectsDecisions 数据页行态来自三方判定（G12）：同
+// 谱面身份两端各持异版本 → 单位全局冲突/本端异值 → delta 侧该键的行
+// 从「版本更新（可自动执行）」降格为「冲突、默认不勾选」。
+func TestPreviewDeployReflectsDecisions(t *testing.T) {
+	aSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "hash-v1", OnlineID: 9001, StatusInt: 1},
+	}}
+	bSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "hash-v2", OnlineID: 9001, StatusInt: 1},
+	}}
+	b, _, _, _ := newRunBackend(t, aSeed, bSeed)
+	setForkRole(t, b, "delta", false, true)
+
+	// 先跑一轮准备收集填 presence（PreviewDeploy 的数据面是最后已知值）。
+	if _, err := b.Sync.PrepareRun(); err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	rows, err := b.Compare.PreviewDeploy("delta")
+	if err != nil {
+		t.Fatalf("PreviewDeploy: %v", err)
+	}
+	var hit *DiffRow
+	for i := range rows {
+		if rows[i].Kind == hub.KindBeatmapSet && rows[i].ContentKey == "hash-v1" {
+			hit = &rows[i]
+		}
+	}
+	if hit == nil {
+		t.Fatalf("delta 预览缺谱面行: %+v", rows)
+	}
+	if hit.Category != CategoryConflict || hit.DefaultChecked {
+		t.Errorf("行态 = {Category:%s DefaultChecked:%v}，期望 {conflict,false}"+
+			"（判定面异值/分歧时不得按版本更新自动执行）", hit.Category, hit.DefaultChecked)
+	}
+	if hit.SkipReason == "" {
+		t.Error("冲突行应带判定原因（SkipReason）")
+	}
+}
+
 // TestRunCollectionsSectionOff 收藏板块关闭 → 不收集也不投放收藏数据。
 func TestRunCollectionsSectionOff(t *testing.T) {
 	aSeed := fixture.Seed{Collections: []hub.Collection{
@@ -288,18 +328,22 @@ func TestCommitRunUnknownRunID(t *testing.T) {
 }
 
 // TestPrepareSelectedExplicitDisposition 数据页显式勾选：冲突项以 update
-// 入计划（手动处置路径）。
+// 入计划（手动处置路径）。冲突用谱面集同 Hash 异 DateSubmitted——B7 后
+// StatusInt 是端本地字段不构成冲突；收藏成员列在 fixture 形态下不落库，
+// 成员冲突不可构造（见 decide 测试面）。
 func TestPrepareSelectedExplicitDisposition(t *testing.T) {
+	subA := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	subB := time.Date(2024, 3, 4, 0, 0, 0, 0, time.UTC)
 	aSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
-		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 1},
+		{Hash: "hash-cx", OnlineID: 9002, StatusInt: 1, DateSubmitted: &subA},
 	}}
 	bSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
-		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 3},
+		{Hash: "hash-cx", OnlineID: 9002, StatusInt: 1, DateSubmitted: &subB},
 	}}
 	b, _, _, _ := newRunBackend(t, aSeed, bSeed)
 	setForkRole(t, b, "delta", false, true)
 	preview, err := b.Sync.PrepareSelected([]Selection{
-		{Kind: hub.KindBeatmapSet, ContentKey: "conflict-hash"},
+		{Kind: hub.KindBeatmapSet, ContentKey: "hash-cx"},
 	})
 	if err != nil {
 		t.Fatalf("PrepareSelected: %v", err)

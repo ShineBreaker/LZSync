@@ -113,25 +113,25 @@ func TestEzCompatFullChain(t *testing.T) {
 	stdSet := seed.BeatmapSets[0] // 1001 标准集（与 lazer 源同内容键）
 	bmsSet := seed.BeatmapSets[1] // 5005 bms 集（难度/成绩连带丢弃夹具）
 	// 标准成绩预置判定档列（收集侧丢弃夹具 + 投放侧保留断言面）+ 现场差异
-	// 值（触发 writeScore 真覆盖，非重续幂等跳过）；集行 Status 现场差异 →
-	// 对账 conflict → update（StatusInt 在冲突判据内）。注意直接改 seed
-	// 元素（副本赋值不回写播种）。
+	// 值（触发 writeScore 真覆盖，非重续幂等跳过）；集行 B7 端本地字段
+	// Status 现场差异（G10 后保留断言面）+ DateSubmitted 现场差异（非本地
+	// 同步字段，update 覆盖写入的真触发点）。注意直接改 seed 元素
+	//（副本赋值不回写播种）。
 	seed.Scores[1].JudgeMode, seed.Scores[1].HealthMode = 31, 34
 	seed.Scores[1].TotalScore = 1
 	seed.BeatmapSets[0].StatusInt = 0
+	seed.BeatmapSets[0].DateSubmitted = nil
 	stdScore := seed.Scores[1]
 	refEz := buildLib(t, fixture.ForkEz2Lazer, fixture.VersionEzDisk, seed)
 	presetEzColumns(t, lib, refEz.RealmPath, stdSet)
 
-	// ---- 收集 Ez：连带行逐条丢弃 + 计数告知（§5.4：这些 Ez 侧产物在收集
-	// 面即拦，不入 hub 污染其他端）----
+	// ---- 收集 Ez：G11 收全后收集面只拦语义不可表示行（D5 外部托管 /
+	// R7 判定档）；bms 规则集难度与成绩、Ez 专有皮肤照常入 hub，出口由
+	// 投放侧全局交集拦截 ----
 	repEz := e.collectInto(refEz)
 	for reason, want := range map[string]int{
-		"Ez 外部托管谱面集":                    1, // D5：ext:set: Hash + HostingKind=1
-		"fork 专有规则集难度（OwnRulesets）": 1, // D6：bms 集唯一难度
-		"fork 专有规则集成绩（OwnRulesets）": 1, // D6：指向 bms 的成绩
-		"fork 专有判定档成绩":                 2, // R7：judge 夹具行 + 预置判定档的标准成绩
-		"fork 专有皮肤":                     1, // D21：Ez 专有皮肤指纹（Guid 通道）
+		"Ez 外部托管谱面集":    1, // D5：ext:set: Hash + HostingKind=1
+		"fork 专有判定档成绩": 2, // R7：judge 夹具行 + 预置判定档的标准成绩
 	} {
 		if got := collectSkip(repEz, reason); got != want {
 			t.Errorf("收集 Ez 跳过 %q = %d，期望 %d（Skips=%+v）", reason, got, want, repEz.Skips)
@@ -142,8 +142,8 @@ func TestEzCompatFullChain(t *testing.T) {
 		map[string]bool{stdSet.Hash: true, bmsSet.Hash: true}, "beatmap_set 链尾")
 	assertHubCount(t, e, `SELECT COUNT(*) FROM beatmap_set WHERE content_hash=?`, 0,
 		"外部托管集行（D5 收集侧应拦）", extHash)
-	assertHubCount(t, e, `SELECT COUNT(*) FROM score`, 0, "score（三条成绩全部被规则丢弃）")
-	assertHubCount(t, e, `SELECT COUNT(*) FROM skin`, 0, "skin（Ez 专有皮肤被指纹丢弃）")
+	assertHubCount(t, e, `SELECT COUNT(*) FROM score`, 1, "score（bms 成绩入 hub，两条判定档被滤）")
+	assertHubCount(t, e, `SELECT COUNT(*) FROM skin`, 1, "skin（Ez 专有皮肤入 hub，导出面拦截）")
 
 	// ---- lazer 源：标准种子 + 未知 StatisticsJson 键的合法成绩 ----
 	lazerSeed, err := fixture.StandardSeed()
@@ -240,10 +240,18 @@ func TestEzCompatFullChain(t *testing.T) {
 
 	// ---- 现场读回：覆盖写入后 10 扩展列原值保留 + 白名单确实被覆盖 ----
 	withRO(t, lib, refEz.RealmPath, func(r *realmc.Realm) {
-		// 集行：Status 被 canonical 覆盖回 1，两个 Ez 扩展列保持预置值。
+		// 集行：B7 端本地字段 Status 保留现场值 0（G10：就地更新不覆写）；
+		// 非本地字段 DateSubmitted 被 canonical 覆盖（覆盖证据）；两个
+		// Ez 扩展列保持预置值。
 		setObj := findRowByString(t, r, "BeatmapSet", "Hash", stdSet.Hash)
 		defer r.ReleaseObject(setObj)
-		assertRealmInt64(t, r, setObj, "BeatmapSet", "Status", 1, "集行白名单覆盖")
+		assertRealmInt64(t, r, setObj, "BeatmapSet", "Status", 0, "集行 Status 端本地字段保留（B7）")
+		if k := propKey(t, r, "BeatmapSet", "DateSubmitted"); k != 0 {
+			null, err := r.IsNull(setObj, k)
+			if err != nil || null {
+				t.Errorf("DateSubmitted 覆盖后应非空 canonical 值: null=%v err=%v", null, err)
+			}
+		}
 		assertRealmStr(t, r, setObj, "BeatmapSet", "ExternalContentRoot", ezPresetExternalRoot, "集行 Ez 扩展列保留")
 		assertRealmInt64(t, r, setObj, "BeatmapSet", "HostingKind", ezPresetHostingKind, "集行 Ez 扩展列保留")
 
