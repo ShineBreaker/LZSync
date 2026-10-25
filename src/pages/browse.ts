@@ -35,7 +35,6 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
   const listBox = el("div");
   root.append(toolbar, statusLine, listBox);
 
-  let targetFork = "";
   const checked = new Set<string>();
   let rows: RowView[] = [];
   let allCards: LibCard[] = [];
@@ -48,20 +47,6 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
   } catch {
     allCards = [];
   }
-
-  // 目标选择器（sync 的目标端）
-  const targetSel = el("select", { class: "input" }) as HTMLSelectElement;
-  for (const c of allCards) {
-    targetSel.append(el("option", { value: c.ForkID }, [text(c.ForkID)]));
-  }
-  if (allCards.length > 0) {
-    const first = allCards[0];
-    if (first) targetFork = first.ForkID;
-  }
-  targetSel.addEventListener("change", () => {
-    targetFork = targetSel.value;
-    void load();
-  });
 
   // 筛选按钮
   const filterBtns = new Map<string, HTMLButtonElement>();
@@ -80,7 +65,7 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
 
   const syncBtn = el("button", { class: "btn primary" }, [text(t("browse.syncBtn"))]);
   syncBtn.addEventListener("click", async () => {
-    if (checked.size === 0 || !targetFork) {
+    if (checked.size === 0 || allCards.length === 0) {
       clear(statusLine);
       statusLine.append(message("info", t("sync.noPlan")));
       return;
@@ -89,8 +74,17 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
     clear(statusLine);
     try {
       const sel = rows.filter((r) => checked.has(r.key)).map((r) => ({ Kind: r.kind, ContentKey: r.contentKey }));
-      await CompareService.buildPlan(targetFork, sel);
-      statusLine.append(message("ok", `${t("sync.pushDesc")} ${targetFork}`));
+      // hub-and-spoke：默认全端同步——对每张已注册端各 BuildPlan 一次。
+      const targets = allCards.map((c) => c.ForkID);
+      const results = await Promise.allSettled(targets.map((fork) => CompareService.buildPlan(fork, sel)));
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length === 0) {
+        statusLine.append(message("ok", t("browse.pushAll", sel.length, targets.length)));
+      } else {
+        const first = failed[0];
+        const errMsg = first && first.status === "rejected" ? errText(first.reason) : "";
+        statusLine.append(message("error", `${t("browse.pushAllFail", targets.length - failed.length, targets.length)} ${errMsg}`));
+      }
     } catch (err) {
       statusLine.append(message("error", errText(err)));
     } finally {
@@ -102,21 +96,25 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
     el("span", { class: "page-meta", id: "browse-meta" }, [text("…")]),
     el("span", { class: "spacer" }),
     ...[...filterBtns.values()],
-    targetSel,
     syncBtn,
   );
 
   // presence: kind\u0000content_key → Set<forkID>
   let presenceByKey = new Map<string, Set<string>>();
 
+  // 状态严重度：取各 fork 间的最差态做整行状态（同一条目可能在 delta 是「新增」在 g0v0 是「冲突」）。
+  const STATE_RANK: Record<SyncState, number> = { synced: 0, targetOnly: 1, update: 2, needsConfirm: 3, conflict: 4 };
+
   async function load(): Promise<void> {
-    if (!targetFork) return;
+    if (allCards.length === 0) return;
     clear(statusLine);
     statusLine.append(message("info", t("browse.loading")));
     try {
-      const [preview, deleted, presence] = await Promise.all([
-        CompareService.previewDeploy(targetFork),
-        CompareService.deletedEntries(targetFork),
+      const forks = allCards.map((c) => c.ForkID);
+      // 并发拉所有 fork 的 preview/deleted/presence，再做 union 聚合。
+      const [previews, deleteds, presence] = await Promise.all([
+        Promise.all(forks.map((f) => CompareService.previewDeploy(f))),
+        Promise.all(forks.map((f) => CompareService.deletedEntries(f))),
         CompareService.forkPresence(kind as never),
       ]);
       presenceByKey = new Map();
@@ -125,13 +123,19 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
         if (!presenceByKey.has(k)) presenceByKey.set(k, new Set());
         presenceByKey.get(k)!.add(p.ForkID);
       }
-      const seen = new Set(preview.map((r) => `${r.Kind}\u0000${r.ContentKey}`));
-      const merged = [...preview];
-      for (const d of deleted) {
-        const k = `${d.Kind}\u0000${d.ContentKey}`;
-        if (!seen.has(k)) merged.push(d);
-      }
-      rows = merged.map(toRowView).filter((r) => r.kind === kind);
+      // union：key → 最严重态的 DiffRow（同一 key 多端分类不同时，取 rank 最高的一条）
+      const byKey = new Map<string, DiffRow>();
+      const consider = (r: DiffRow): void => {
+        const k = `${r.Kind}\u0000${r.ContentKey}`;
+        const prev = byKey.get(k);
+        if (!prev) { byKey.set(k, r); return; }
+        const a = toRowView(prev).state;
+        const b = toRowView(r).state;
+        if (STATE_RANK[b] > STATE_RANK[a]) byKey.set(k, r);
+      };
+      for (const pv of previews) for (const r of pv) consider(r);
+      for (const dl of deleteds) for (const r of dl) consider(r);
+      rows = [...byKey.values()].map(toRowView).filter((r) => r.kind === kind);
       checked.clear();
       for (const r of rows) {
         if (r.evidence !== "weak" && r.state !== "synced") checked.add(r.key);
