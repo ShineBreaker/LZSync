@@ -122,7 +122,7 @@ func (s *Store) SchemaVersion() (int, error) {
 // Origin 声明实体行 canonical 值的来源（§4.4）。
 type Origin struct {
 	GUID string // 首次收集该实体时的源 fork Guid（投放新建行时沿用，§4.2）
-	Fork string // 本行 canonical 值的来源 fork（HB3）；派生 origin_realm 供 S8 判定
+	Fork string // 首见该实体的来源 fork（§0-B2 首见即定）；派生 origin_realm 供 S8 判定（G9 待办）
 }
 
 // LoadCollection 按内容键读取收藏夹 canonical 值及其来源声明。

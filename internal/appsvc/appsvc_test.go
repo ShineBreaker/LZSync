@@ -390,8 +390,8 @@ func TestRealComparePreviewFromHub(t *testing.T) {
 	if got["X"] != CategoryCreate || !checked["X"] {
 		t.Fatalf("X 应为默认勾选的新增: %+v", rows)
 	}
-	if got["Y"] != CategoryConflict || !checked["Y"] {
-		t.Fatalf("Y 应为默认勾选的冲突（hub 覆盖，§5.4）: %+v", rows)
+	if got["Y"] != CategoryConflict || checked["Y"] {
+		t.Fatalf("Y 应为默认不勾选的冲突（§0-B4 判不准不动）: %+v", rows)
 	}
 	if got["Z"] != CategoryRestore || checked["Z"] {
 		t.Fatalf("Z 应为默认不勾选的恢复组: %+v", rows)
@@ -616,12 +616,12 @@ func TestRealComparePreviewM2Kinds(t *testing.T) {
 	}
 	skinWant := map[string]want{
 		"sk1": {CategoryCreate, true},
-		"sk2": {CategoryConflict, true},
+		"sk2": {CategoryConflict, false}, // §0-B4 判不准不动：冲突默认不勾
 		"sk3": {CategoryRestore, false},
 	}
 	scoreWant := map[string]want{
 		"bh1|sc1": {CategoryCreate, true},
-		"bh2|sc2": {CategoryConflict, true},
+		"bh2|sc2": {CategoryConflict, false},
 		"bh3|sc3": {CategoryRestore, false},
 	}
 	skinGot, scoreGot := map[string]want{}, map[string]want{}
@@ -835,8 +835,8 @@ func TestRealComparePreviewSettingsKinds(t *testing.T) {
 	if r := got[hub.KindKeyBinding]; r.Category != CategoryCreate || !r.DefaultChecked {
 		t.Errorf("键位行 = %s/%v，期望 create 默认勾选", r.Category, r.DefaultChecked)
 	}
-	if r := got[hub.KindRulesetSetting]; r.Category != CategoryConflict || !r.DefaultChecked {
-		t.Errorf("规则集设置行 = %s/%v，期望 conflict 默认勾选（hub 覆盖）", r.Category, r.DefaultChecked)
+	if r := got[hub.KindRulesetSetting]; r.Category != CategoryConflict || r.DefaultChecked {
+		t.Errorf("规则集设置行 = %s/%v，期望 conflict 默认不勾（§0-B4 判不准不动）", r.Category, r.DefaultChecked)
 	}
 	if r := got[hub.KindModPreset]; r.Category != CategoryRestore || r.DefaultChecked || r.DeletedAt == 0 {
 		t.Errorf("ModPreset 行 = %s/%v/%d，期望 restore 默认不勾且带删除时间（HB2）", r.Category, r.DefaultChecked, r.DeletedAt)

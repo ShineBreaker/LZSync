@@ -3,11 +3,11 @@
 
 import { getLang, onLangChange, t, type DictKey } from "./i18n";
 import { LibraryService, events } from "./mygo";
-import { renderBrowse } from "./pages/browse";
+import { renderBrowse, setBrowseFilter } from "./pages/browse";
 import { renderClients } from "./pages/clients";
-import { dispatchProgress, detachProgress, renderSync } from "./pages/sync";
+import { dispatchProgress, detachProgress, renderSync, requestRun, setPendingPreview } from "./pages/sync";
 import { renderSettings } from "./pages/settings";
-import { clear, el, errText, text } from "./ui";
+import { clear, el, errText, setNavigator, text } from "./ui";
 
 type PageId = "beatmaps" | "collections" | "skins" | "scores" | "sync" | "clients" | "settings";
 
@@ -68,6 +68,30 @@ async function main(): Promise<void> {
     if (current === "sync") {
       dispatchProgress(ev);
     }
+  });
+
+  // 跨页导航钩子：同步页待处理计数 → 数据页带筛选；数据页勾选 → 同步页。
+  const PAGE_KIND: Partial<Record<PageId, string>> = {
+    beatmaps: "beatmap_set",
+    collections: "collection",
+    skins: "skin",
+    scores: "score",
+  };
+  setNavigator((page, filter) => {
+    const kind = PAGE_KIND[page as PageId];
+    if (kind && filter) {
+      setBrowseFilter(kind, filter as "conflict" | "needsConfirm");
+    }
+    void switchPage(page as PageId);
+  });
+
+  // 顶栏常驻「同步」按钮：切到同步页并跑一轮（清掉数据页勾选的预览）。
+  const topSync = $("#topbar-sync");
+  topSync.textContent = t("nav.sync");
+  topSync.addEventListener("click", () => {
+    setPendingPreview(null); // 顶栏 = 完整一轮，丢弃数据页勾选预览
+    requestRun();
+    void switchPage("sync");
   });
 
   await refreshSidebar();

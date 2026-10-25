@@ -25,14 +25,19 @@ type GameIniResult struct {
 
 // SyncGameIni 把快照仓中 sourceFork 的 game.ini 白名单键 canonical 值
 // 写到 target 端 game.ini：
-//   - 守卫拦截（S5：ini 写窗口同样要求游戏关闭）；
+//   - 逐端守卫拦截（§0-B1/G3：只检测目标 fork 的进程）；
 //   - 源端无快照（从未收集过 / 源端从未启动过客户端）→ 跳过计数；
 //   - 目标 game.ini 不存在 → 跳过计数（从未启动过客户端，绝不凭空
 //     创建）；
 //   - S12 原子写与白名单/红灯复核由 inisettings.SyncFile 承担。
 //
+// peers 是全局交集端清单（§0-B3/G6）：写入键集 = 目标端策略允许 ∩ 每个
+// peer 端策略允许——任一端不收的键所有端都不写（一轮同步的全部目标写
+// 同一份 ini 形态）。被交集排除的键逐键计跳过（原因带
+// IntersectionRejectPrefix）。peers 为空 = 仅目标端（旧行为）。
+//
 // store 为 nil（未配置 ini 面）按跳过计数返回，不报错。
-func SyncGameIni(target forks.LibraryRef, sourceFork string,
+func SyncGameIni(target forks.LibraryRef, sourceFork string, peers []string,
 	store *inisettings.Store, backups *guard.Backups, g *guard.Guard) (GameIniResult, error) {
 	res := GameIniResult{Applied: map[string]string{}}
 	skip := func(reason string) {
@@ -55,7 +60,7 @@ func SyncGameIni(target forks.LibraryRef, sourceFork string,
 		return res, fmt.Errorf("deploy: 目标 fork %q 未注册（game.ini 同步策略无从取数，拒绝）", target.ForkID)
 	}
 	if g != nil {
-		if err := g.EnsureClear(); err != nil {
+		if err := g.EnsureClearFork(target.ForkID); err != nil {
 			return res, err
 		}
 	}
@@ -67,13 +72,40 @@ func SyncGameIni(target forks.LibraryRef, sourceFork string,
 		skip("源端 " + sourceFork + " 无 game.ini 快照（未收集或源端从未启动过客户端）")
 		return res, nil
 	}
+	// 全局交集（§0-B3/G6）：写入键集 = 目标端可写 ∩ 每个 peer 端可写。
+	// 交集外的键所有目标都不写（含本轮因运行中跳过的端）。peer 未注册
+	// → 交集不可判定，保守全部不写（宁少勿错）。
+	filtered := make(map[string]string, len(values))
+	for k, v := range values {
+		filtered[k] = v
+	}
+	for _, p := range peers {
+		if p == target.ForkID {
+			continue // 目标端自身的键集已由 SyncFile 的策略复核承担
+		}
+		pp, ok := forks.Profile(p)
+		if !ok {
+			for k := range filtered {
+				delete(filtered, k)
+				skip(IntersectionRejectPrefix + p + " 不支持 — 该 fork 未注册，交集不可判定")
+			}
+			continue
+		}
+		allowed := inisettings.SyncableKeys(srcProf, pp)
+		for k := range filtered {
+			if !allowed[k] {
+				delete(filtered, k)
+				skip(IntersectionRejectPrefix + p + " 不支持 — " + k)
+			}
+		}
+	}
 	sync, err := inisettings.SyncFile(srcProf, tgtProf,
-		filepath.Join(target.DataDir, inisettings.GameIniName), values, backups)
+		filepath.Join(target.DataDir, inisettings.GameIniName), filtered, backups)
 	if err != nil {
 		return res, fmt.Errorf("deploy: 写 %s 端 game.ini: %w", target.ForkID, err)
 	}
 	res.Applied = sync.Applied
-	res.Skipped = sync.Skipped
+	res.Skipped = append(res.Skipped, sync.Skipped...)
 	res.BackupPath = sync.BackupPath
 	return res, nil
 }

@@ -1,8 +1,9 @@
-// 设置页：语言、后端状态、存储路径、监控进程、链接支持。
+// 设置页：语言、同步范围、后端状态、存储路径、监控进程、链接支持。
 
 import { getLang, setLang, t, trBackend, type Lang } from "../i18n";
 import { SettingsService } from "../mygo";
-import { clear, el, errText, message, text } from "../ui";
+import type { SyncScope } from "../mygo";
+import { clear, el, errText, forkDot, message, text } from "../ui";
 
 export async function renderSettings(root: HTMLElement): Promise<void> {
   clear(root);
@@ -20,6 +21,73 @@ export async function renderSettings(root: HTMLElement): Promise<void> {
     setLang(langSelect.value as Lang);
   });
   root.append(section(t("set.language"), [row(t("set.language"), langSelect)]));
+
+  // ---- 同步范围（§0-G1：板块开关 + 逐端拉取/写入角色） ----
+  try {
+    let scope = await SettingsService.getSyncScope();
+    const save = (next: SyncScope, rollback: () => void): void => {
+      void SettingsService.setSyncScope(next)
+        .then(() => {
+          scope = next; // 保存成功后以新态为基（否则连续改动互相回滚）
+          clear(statusLine);
+        })
+        .catch((err) => {
+          rollback();
+          clear(statusLine);
+          statusLine.append(message("error", errText(err)));
+        });
+    };
+    const children: (HTMLElement | null)[] = [];
+    for (const tg of scope.Sections) {
+      const cb = el("input", { type: "checkbox" }) as HTMLInputElement;
+      cb.checked = tg.Enabled;
+      cb.addEventListener("change", () => {
+        const next: SyncScope = {
+          Sections: scope.Sections.map((s) =>
+            s.Section === tg.Section ? { Section: s.Section, Enabled: cb.checked } : { ...s }),
+          Forks: scope.Forks.map((f) => ({ ...f })),
+        };
+        const prev = !cb.checked;
+        save(next, () => {
+          cb.checked = prev;
+        });
+      });
+      children.push(row(t(`sec.${tg.Section}` as never), cb));
+    }
+    for (const fr of scope.Forks) {
+      const pull = el("input", { type: "checkbox" }) as HTMLInputElement;
+      const write = el("input", { type: "checkbox" }) as HTMLInputElement;
+      pull.checked = fr.Source;
+      write.checked = fr.Target;
+      const applyRole = (role: "Source" | "Target", val: boolean, cbEl: HTMLInputElement): void => {
+        const next: SyncScope = {
+          Sections: scope.Sections.map((s) => ({ ...s })),
+          Forks: scope.Forks.map((f) =>
+            f.ForkID === fr.ForkID ? { ...f, [role]: val } : { ...f }),
+        };
+        const prev = !val;
+        save(next, () => {
+          cbEl.checked = prev;
+        });
+      };
+      pull.addEventListener("change", () => applyRole("Source", pull.checked, pull));
+      write.addEventListener("change", () => applyRole("Target", write.checked, write));
+      const forkRow = el("div", { class: "field" }, [
+        el("span", { class: "label", style: "display:flex;align-items:center;gap:8px" }, [
+          forkDot(fr.ForkID),
+          text(fr.ForkID),
+        ]),
+        el("span", { class: "value", style: "display:flex;align-items:center;gap:14px" }, [
+          el("label", { style: "display:flex;align-items:center;gap:6px" }, [pull, text(t("scope.pull"))]),
+          el("label", { style: "display:flex;align-items:center;gap:6px" }, [write, text(t("scope.write"))]),
+        ]),
+      ]);
+      children.push(forkRow);
+    }
+    root.append(section(t("set.syncScope"), children));
+  } catch (err) {
+    statusLine.append(message("error", errText(err)));
+  }
 
   try {
     const info = await SettingsService.get();

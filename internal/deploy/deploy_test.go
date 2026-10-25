@@ -114,21 +114,20 @@ func TestGuidRoundtrip(t *testing.T) {
 func TestBuildPlanDefaults(t *testing.T) {
 	ctx := context.Background()
 	s := openMemHub(t)
-	// forkB 先收集：有「冲突夹」（不同成员）；曾有「复活夹」后删除（tombstone）。
-	// 顺序关键（HB3 整行覆盖）：目标 fork 先收、源后收，canonical 才保留
-	// 源值并与目标 presence 形成冲突。
-	applySnap(t, s, hub.Snapshot{ForkID: "B", CollectedAt: t0, Collections: []hub.Collection{
-		{ID: "g-b2", Name: "冲突夹", BeatmapMD5Hashes: []string{"m2"}, LastModified: t0},
-		{ID: "g-b3", Name: "复活夹", BeatmapMD5Hashes: []string{"m9"}, LastModified: t0},
-	}})
-	applySnap(t, s, hub.Snapshot{ForkID: "B", CollectedAt: t0.Add(time.Hour), Collections: []hub.Collection{
-		{ID: "g-b2", Name: "冲突夹", BeatmapMD5Hashes: []string{"m2"}, LastModified: t0},
-	}})
-	// forkA 后收集：三个收藏（其一与 B 冲突，其一命中 B 的 tombstone）。
-	applySnap(t, s, hub.Snapshot{ForkID: "A", CollectedAt: t0.Add(2 * time.Hour), Collections: []hub.Collection{
+	// 顺序关键（§0-B2 首见即定）：forkA 先收集确立 canonical；forkB 后
+	// 收集同名不同值收藏不改 canonical——B 的取值留在 B 自己的 presence，
+	// 与 canonical 形成冲突。B 的「复活夹」第二次快照消失 → tombstone。
+	applySnap(t, s, hub.Snapshot{ForkID: "A", CollectedAt: t0, Collections: []hub.Collection{
 		{ID: "g-a1", Name: "新建夹", BeatmapMD5Hashes: []string{"m1"}, LastModified: t0},
 		{ID: "g-a2", Name: "冲突夹", BeatmapMD5Hashes: []string{"m1"}, LastModified: t0},
 		{ID: "g-a3", Name: "复活夹", BeatmapMD5Hashes: []string{"m1"}, LastModified: t0},
+	}})
+	applySnap(t, s, hub.Snapshot{ForkID: "B", CollectedAt: t0.Add(time.Hour), Collections: []hub.Collection{
+		{ID: "g-b2", Name: "冲突夹", BeatmapMD5Hashes: []string{"m2"}, LastModified: t0},
+		{ID: "g-b3", Name: "复活夹", BeatmapMD5Hashes: []string{"m9"}, LastModified: t0},
+	}})
+	applySnap(t, s, hub.Snapshot{ForkID: "B", CollectedAt: t0.Add(2 * time.Hour), Collections: []hub.Collection{
+		{ID: "g-b2", Name: "冲突夹", BeatmapMD5Hashes: []string{"m2"}, LastModified: t0},
 	}})
 
 	ref := forks.LibraryRef{ForkID: "B", RealmPath: "/tmp/x.realm", DiskVersion: 52}
@@ -142,13 +141,15 @@ func TestBuildPlanDefaults(t *testing.T) {
 		got[it.ContentKey] = it
 	}
 	if len(plan.Items) != 2 {
-		t.Fatalf("默认计划项数 = %d（期望 2：新建 + 冲突；恢复组默认排除），items=%+v", len(plan.Items), plan.Items)
+		t.Fatalf("默认计划项数 = %d（期望 2：新建 + 冲突跳过；恢复组默认排除），items=%+v", len(plan.Items), plan.Items)
 	}
 	if it := got["新建夹"]; it.Action != ActionCreate || it.Restore {
 		t.Errorf("新建夹 = %+v，期望 create 非 Restore", it)
 	}
-	if it := got["冲突夹"]; it.Action != ActionUpdate {
-		t.Errorf("冲突夹 = %+v，期望 update", it)
+	// §0-B4：冲突默认 skip（判不准不动，保留各端差异）；手动处置走
+	// appsvc 数据页勾选路径（planItemFrom → update）。
+	if it := got["冲突夹"]; it.Action != ActionSkip || !strings.Contains(it.SkipReason, "冲突") {
+		t.Errorf("冲突夹 = %+v，期望冲突跳过", it)
 	}
 	if _, ok := got["复活夹"]; ok {
 		t.Error("复活夹（tombstone 命中）不应进默认计划")

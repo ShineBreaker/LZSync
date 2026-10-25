@@ -247,16 +247,32 @@ func TestCollectOfficialLibraryIntoHub(t *testing.T) {
 }
 
 func TestCollectBlockedByGuard(t *testing.T) {
-	// 名单内进程 = 测试进程自身（S5 最小可复现占用夹具）。
-	h := newHarness(t, []string{filepath.Base(os.Args[0])})
-	ref := forks.LibraryRef{ForkID: "lazer", RealmPath: "whatever.realm", DataDir: t.TempDir()}
+	// 逐端守卫（§0-B1/G3）无注入点用例：名单内进程 = 测试进程自身
+	//（S5 最小可复现占用夹具），经未注册 fork 回落全名单的路径拦截。
+	// 已知 fork 的逐端名单命中（伪造 argv[0] 进程）会与并行跑的其他包
+	// 的真实收集互相污染，不可在测试里造——profile 名单命中路径由
+	// guard 包单测（TestEnsureClearForkPerForkNames 的回落分支）覆盖。
+	self := filepath.Base(os.Args[0])
+	h := newHarness(t, []string{self})
+	ref := forks.LibraryRef{ForkID: "unlisted-fork", RealmPath: "whatever.realm", DataDir: t.TempDir()}
 	_, err := h.runner.Collect(context.Background(), ref, nil)
 	if !errors.Is(err, guard.ErrGameRunning) {
-		t.Fatalf("Collect = %v，期望 guard.ErrGameRunning", err)
+		t.Fatalf("Collect(未注册 fork) = %v，期望 guard.ErrGameRunning", err)
 	}
 	// 守卫在投影前拦截：hub 无任何该 fork 快照（HB2：部分收集不落库）。
-	if got := h.presenceCount("lazer", hub.KindCollection); got != 0 {
+	if got := h.presenceCount("unlisted-fork", hub.KindCollection); got != 0 {
 		t.Errorf("拦截后 presence = %d，期望 0", got)
+	}
+	// 逐端语义（§0-B1）：同一个运行中的测试进程不拦别的端——delta 的
+	// ProcessNames 未记录（nil 名单恒放行）。RealmPath 给目录路径使开库
+	// 必然失败，断言失败不是守卫拦截。
+	_, err = h.runner.Collect(context.Background(),
+		forks.LibraryRef{ForkID: "delta", RealmPath: t.TempDir(), DataDir: t.TempDir()}, nil)
+	if errors.Is(err, guard.ErrGameRunning) {
+		t.Fatalf("Collect(delta) = %v，期望非守卫错误（名单外进程不拦 delta）", err)
+	}
+	if err == nil {
+		t.Fatal("Collect(delta 目录路径) 应失败")
 	}
 }
 
@@ -750,11 +766,13 @@ func TestCollectM2EntitiesFullColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("二次 Collect: %v", err)
 	}
-	if got := report2.Entities[hub.KindSkin]; got != 1 {
-		t.Errorf("二次收集 skin = %d，期望 1", got)
+	// §0-B2：二次收集的实体计数为 0（insert-if-absent 只计实际新插入行），
+	// canonical 首见即定不重写。
+	if got := report2.Entities[hub.KindSkin]; got != 0 {
+		t.Errorf("二次收集 skin = %d，期望 0（B2 首见即定）", got)
 	}
-	if got := report2.Entities[hub.KindScore]; got != 1 {
-		t.Errorf("二次收集 score = %d，期望 1", got)
+	if got := report2.Entities[hub.KindScore]; got != 0 {
+		t.Errorf("二次收集 score = %d，期望 0（B2 首见即定）", got)
 	}
 	skin2, _, ok, err := h.hub.LoadSkin(context.Background(), skin.Hash)
 	if err != nil || !ok || !reflect.DeepEqual(skin2, wantSkin) {
@@ -937,5 +955,112 @@ func TestDedupeSnapshotFirstWins(t *testing.T) {
 		if got := skips[kind]; got != want {
 			t.Errorf("skips[%q] = %d，期望 %d", kind, got, want)
 		}
+	}
+}
+
+// TestCollectModeSourceOnlyLeavesFilesAlone 仅来源端模式（§0 角色模型）：
+// fork 的 files/ 保持普通文件且字节不变，对应哈希已入仓（入仓不回链）。
+func TestCollectModeSourceOnlyLeavesFilesAlone(t *testing.T) {
+	h := newHarness(t, nil)
+	hashes := map[string]string{
+		"audio": sha256Fixture(t, "src-only-audio"),
+	}
+	dataDir := t.TempDir()
+	ref, err := fixture.Build(context.Background(), fixture.Spec{
+		ForkID:        fixture.ForkLazer,
+		SchemaVersion: fixture.VersionLazer,
+		DataDir:       dataDir,
+		Seed: fixture.Seed{
+			Collections: []hub.Collection{{Name: "src-only"}},
+			BeatmapSets: []hub.BeatmapSet{{
+				Hash: sha256Fixture(t, "src-only-set"), OnlineID: 5, StatusInt: 4,
+				Files: []hub.NamedFile{{Hash: hashes["audio"], Filename: "a.mp3"}},
+			}},
+			Files: map[string][]byte{hashes["audio"]: []byte("src-only-audio")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build: %v", err)
+	}
+	// files/ 实体文件路径（两级哈希布局）。
+	fpath := filepath.Join(filestore.ResolveFilesDir(ref.RealmPath),
+		hashes["audio"][:1], hashes["audio"][:2], hashes["audio"])
+	before, err := os.ReadFile(fpath)
+	if err != nil {
+		t.Fatalf("读 fixture files/: %v", err)
+	}
+	report, err := h.runner.CollectWith(context.Background(), ref, Options{Mode: ModeSourceOnly}, nil)
+	if err != nil {
+		t.Fatalf("CollectWith(SourceOnly): %v", err)
+	}
+	after, err := os.ReadFile(fpath)
+	if err != nil {
+		t.Fatalf("收集后读 files/: %v", err)
+	}
+	info, err := os.Lstat(fpath)
+	if err != nil {
+		t.Fatalf("Lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		t.Errorf("files/ 实体仍为普通文件？mode=%v（期望非链接的常规文件）", info.Mode())
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Error("files/ 字节被改动（SourceOnly 不得回链）")
+	}
+	// 仓内已有对应哈希副本。
+	if _, err := os.Stat(h.engine.Store.Path(hashes["audio"])); err != nil {
+		t.Errorf("仓内缺哈希 %s: %v", hashes["audio"], err)
+	}
+	if report.Entities[hub.KindCollection] != 1 {
+		t.Errorf("实体入仓 = %+v，期望 collection=1", report.Entities)
+	}
+}
+
+// TestCollectModeSnapshotOnly 仅目标端模式：只写 presence/快照——不入
+// canonical 实体、不碰任何文件、不收 game.ini。
+func TestCollectModeSnapshotOnly(t *testing.T) {
+	h := newHarness(t, nil)
+	dataDir := t.TempDir()
+	ref, err := fixture.Build(context.Background(), fixture.Spec{
+		ForkID:        fixture.ForkLazer,
+		SchemaVersion: fixture.VersionLazer,
+		DataDir:       dataDir,
+		Seed: fixture.Seed{
+			Collections: []hub.Collection{{Name: "target-only-col"}},
+			KeyBindings: []fixture.SeedKeyBinding{{ActionInt: 7, KeyCombination: "Ctrl+Q"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build: %v", err)
+	}
+	report, err := h.runner.CollectWith(context.Background(), ref, Options{Mode: ModeSnapshotOnly}, nil)
+	if err != nil {
+		t.Fatalf("CollectWith(SnapshotOnly): %v", err)
+	}
+	// hub 无新实体。
+	for _, table := range []string{"collection", "key_binding", "beatmap_set"} {
+		var n int
+		if err := h.hub.DB().QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+			t.Fatalf("查 %s: %v", table, err)
+		}
+		if n != 0 {
+			t.Errorf("SnapshotOnly 后 %s 实体行 = %d，期望 0", table, n)
+		}
+	}
+	// presence 有。
+	if got := h.presenceCount("lazer", hub.KindCollection); got != 1 {
+		t.Errorf("presence(collection) = %d，期望 1", got)
+	}
+	if got := h.presenceCount("lazer", hub.KindKeyBinding); got != 1 {
+		t.Errorf("presence(key_binding) = %d，期望 1", got)
+	}
+	// 报告实体计数全 0。
+	for kind, n := range report.Entities {
+		if n != 0 {
+			t.Errorf("Entities[%s] = %d，期望 0（PresenceOnly 不插实体）", kind, n)
+		}
+	}
+	if got := report.IniKeysCollected; got != 0 {
+		t.Errorf("IniKeysCollected = %d，期望 0（SnapshotOnly 不收 ini）", got)
 	}
 }

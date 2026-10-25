@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"lzsync/internal/forks"
 )
 
 // ErrGameRunning 目标游戏进程正在运行（§3.3 用户可解错误四值枚举中的
@@ -37,18 +39,25 @@ func NewGuard(processNames []string) *Guard {
 // Running 返回当前正在运行的名单内进程名（全平台枚举）。返回按名排序，
 // 便于错误消息稳定可断言。
 func (g *Guard) Running() []string {
-	names := make(map[string]bool, len(g.ProcessNames))
-	for _, n := range g.ProcessNames {
+	return g.RunningAmong(g.ProcessNames)
+}
+
+// RunningAmong 返回给定进程名名单中当前正在运行的进程名（逐端守卫，
+// §0-B1/G3：只检测相关 fork 的进程，别的端在跑不拦本端）。返回按名排序。
+// names 为空 = 无需检测，返回 nil。
+func (g *Guard) RunningAmong(names []string) []string {
+	wanted := make(map[string]bool, len(names))
+	for _, n := range names {
 		if n != "" {
-			names[n] = true
+			wanted[n] = true
 		}
 	}
-	if len(names) == 0 {
+	if len(wanted) == 0 {
 		return nil
 	}
 	var hit []string
 	for proc := range listProcessNames() {
-		if matchProcess(proc, names) {
+		if matchProcess(proc, wanted) {
 			hit = append(hit, proc)
 		}
 	}
@@ -78,11 +87,28 @@ func matchProcess(proc string, names map[string]bool) bool {
 // EnsureClear 确认无名单内进程在运行；有则返回 ErrGameRunning
 // （错误消息携带运行中进程名单）。
 func (g *Guard) EnsureClear() error {
-	running := g.Running()
+	return g.EnsureClearFor(g.ProcessNames)
+}
+
+// EnsureClearFor 只检测给定名单中的进程是否在运行（逐端守卫，§0-B1/G3）：
+// 无匹配返回 nil；有匹配返回包装 ErrGameRunning 的错误并携带命中名单。
+func (g *Guard) EnsureClearFor(names []string) error {
+	running := g.RunningAmong(names)
 	if len(running) == 0 {
 		return nil
 	}
 	return fmt.Errorf("%w：%s", ErrGameRunning, strings.Join(running, "、"))
+}
+
+// EnsureClearFork 逐端守卫入口（§0-B1/G3）：按 forkID 的 ForkProfile.
+// ProcessNames 只检测该端进程；fork 未注册（无 Profile）回落全名单
+// EnsureClear——身份未知的库无法圈定进程名，保守用全名单。Profile 已知但
+// ProcessNames 为空（如 delta 进程名未记录）= 该端无可检测进程，恒放行。
+func (g *Guard) EnsureClearFork(forkID string) error {
+	if p, ok := forks.Profile(forkID); ok {
+		return g.EnsureClearFor(p.ProcessNames)
+	}
+	return g.EnsureClear()
 }
 
 // listProcessNames 枚举当前系统全部进程名（每进程贡献两个候选名：

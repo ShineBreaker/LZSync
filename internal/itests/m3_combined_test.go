@@ -187,7 +187,7 @@ func TestM3CombinedRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读目标 game.ini: %v", err)
 	}
-	iniRes, err := deploy.SyncGameIni(refDst, "delta", iniStore, e.backups, guard.NewGuard(nil))
+	iniRes, err := deploy.SyncGameIni(refDst, "delta", nil, iniStore, e.backups, guard.NewGuard(nil))
 	if err != nil {
 		t.Fatalf("SyncGameIni: %v", err)
 	}

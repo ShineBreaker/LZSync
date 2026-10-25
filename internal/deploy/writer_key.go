@@ -64,12 +64,13 @@ func prepareKeyBindingWriter(r *realmc.Realm) (*keyBindingWriter, error) {
 }
 
 // exec 执行单个键位计划项（§3.3 执行期现场复核 + D20 过滤 + 写入）。
-// originFork/ targetFork 驱动枚举域交集判定（HB3 origin_fork 面与目标端）。
-func (w *keyBindingWriter) exec(kb hub.KeyBinding, originFork, targetFork string, action Action) (applied, skipStat, string, error) {
+// originFork/ targetFork 驱动枚举域交集判定（origin_fork 面与目标端）；
+// peers 是全局交集端清单（§0-B3/G6：任一目标端的枚举域越界即不落地）。
+func (w *keyBindingWriter) exec(kb hub.KeyBinding, originFork, targetFork string, peers []string, action Action) (applied, skipStat, string, error) {
 	if w.absent {
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
 	}
-	if ok, reject := keyBindingActionAllowed(originFork, targetFork, kb); !ok {
+	if ok, reject := keyBindingActionAllowedIntersection(originFork, targetFork, peers, kb); !ok {
 		return applied{}, skipStat{reason: reject, count: 1}, "", nil
 	}
 	targetKey := hub.KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination)

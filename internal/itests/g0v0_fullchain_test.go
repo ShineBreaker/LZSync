@@ -13,8 +13,10 @@ package itests
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
+	"lzsync/internal/collect"
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
 	"lzsync/internal/guard"
@@ -121,14 +123,28 @@ func TestG0v0CompatFullChain(t *testing.T) {
 	})
 
 	// ---- ②b 官方 → g0v0（座 C 源 / 座 D 目标）：异域更新不触碰 OnlineID ----
-	// C 收集刷新 canonical 为 lazer 域值（最近一次收集为准，§4.4）。
+	// §0-B2 首见即定：座 A（g0v0）已锁定集/成绩 canonical 的 origin=g0v0，
+	// C 端再收集不改 canonical——异域更新覆盖面换第二个 hub（其 canonical
+	// 由 C 端 lazer 确立，origin=lazer）。
 	seedC, err := fixture.StandardSeed()
 	if err != nil {
 		t.Fatalf("StandardSeed(C): %v", err)
 	}
 	seedC.Scores[0].OnlineID = 12345 // ppy 域值（异域更新断言的 canonical 侧）
 	refC := buildLib(t, fixture.ForkLazer, fixture.VersionLazer, seedC)
-	e.collectInto(refC)
+	h2, err := hub.Open(filepath.Join(t.TempDir(), "hub2.db"))
+	if err != nil {
+		t.Fatalf("hub.Open(h2): %v", err)
+	}
+	defer h2.Close()
+	if _, err := collect.NewRunner(collect.Deps{
+		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: guard.NewGuard(nil),
+	}).Collect(ctx, refC, nil); err != nil {
+		t.Fatalf("收集 C(lazer): %v", err)
+	}
+	runner2 := deploy.NewRunner(deploy.Deps{
+		Hub: h2, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+	})
 
 	// D 座：同键现场行带 g0v0 域独有 OnlineID（播种直设——副本赋值不回写）。
 	seedD, err := fixture.StandardSeed()
@@ -162,7 +178,7 @@ func TestG0v0CompatFullChain(t *testing.T) {
 			},
 		},
 	}
-	reportD, err := runner.Deploy(ctx, planD, nil)
+	reportD, err := runner2.Deploy(ctx, planD, nil)
 	if err != nil {
 		t.Fatalf("Deploy(D): %v（report=%+v）", err, reportD)
 	}

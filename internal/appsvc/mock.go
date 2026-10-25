@@ -32,6 +32,9 @@ type mockBackend struct {
 	exp   *mockExport
 	mode  string
 	reasn string
+
+	mu    sync.Mutex
+	scope *SyncScope // 内存态同步范围（M-4 冒烟，不落盘）
 }
 
 func newMockBackend(mode, reason string, prog ProgressSink) *Backend {
@@ -39,15 +42,15 @@ func newMockBackend(mode, reason string, prog ProgressSink) *Backend {
 		prog = func(ProgressEvent) {}
 	}
 	cmp := &mockCompare{createdAt: time.Now()}
-	sync := &mockSync{prog: prog}
 	b := &mockBackend{
 		lib:   &mockLibrary{},
 		cmp:   cmp,
-		sync:  sync,
 		exp:   &mockExport{},
 		mode:  mode, reasn: reason,
 	}
+	sync := &mockSync{prog: prog, b: b, runs: map[string]*mockRun{}}
 	sync.cmp = cmp
+	b.sync = sync
 	return &Backend{
 		Library:  b.lib,
 		Compare:  cmp,
@@ -469,12 +472,19 @@ func (m *mockCompare) CurrentPlan() (deploy.Plan, error) {
 
 // --- 同步执行 ---
 
+// mockRun 是 mock 的一轮同步占位（prepare 产物的运行时参照）。
+type mockRun struct {
+	preview RunPreview
+}
+
 type mockSync struct {
 	cmp    *mockCompare
+	b      *mockBackend
 	prog   ProgressSink
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	status SyncStatus
+	runs   map[string]*mockRun
 }
 
 func (m *mockSync) emit(ev ProgressEvent) {
@@ -626,6 +636,150 @@ func remaining(plan deploy.Plan, applied []deploy.ItemResult) []deploy.PlanItem 
 	return out
 }
 
+// PrepareRun 模拟一轮同步准备（§0.4 步骤 1-4）：按内存态 scope 逐端
+// 守卫（g0v0 模拟运行中跳过）、收集进度事件、逐目标端预览计数与待
+// 处理计数；产物存 m.runs 供 CommitRun 消费。
+func (m *mockSync) PrepareRun() (RunPreview, error) {
+	return m.prepareRun(nil)
+}
+
+// PrepareSelected 数据页勾选触发的一轮：预览计数按 sel 条目数模拟。
+func (m *mockSync) PrepareSelected(sel []Selection) (RunPreview, error) {
+	return m.prepareRun(sel)
+}
+
+func (m *mockSync) prepareRun(sel []Selection) (RunPreview, error) {
+	if err := m.begin("run", ""); err != nil {
+		return RunPreview{}, err
+	}
+	defer m.finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.setCancel(cancel)
+	defer cancel()
+
+	scope := m.b.getScope()
+	runID := fmt.Sprintf("run-mock-%d", time.Now().UnixMilli())
+	preview := RunPreview{RunID: runID, Targets: []RunTargetPreview{}, Skipped: []RunSkippedFork{}}
+
+	// 模拟逐端收集进度（g0v0 守卫拦截）。
+	for _, fr := range scope.Forks {
+		if fr.ForkID == "g0v0" {
+			preview.Skipped = append(preview.Skipped, RunSkippedFork{
+				ForkID: "g0v0", Reason: "游戏运行中：g0v0!"})
+			continue
+		}
+		if !fr.Source && !fr.Target {
+			continue
+		}
+		for _, st := range []collect.Stage{collect.StageProject, collect.StageApply, collect.StageAdopt} {
+			m.emit(ProgressEvent{Service: "run", Stage: string(st), Current: 1, Total: 1,
+				Message: fmt.Sprintf("%s · %s", fr.ForkID, stageLabel(st)), At: time.Now()})
+			time.Sleep(mockSleep)
+			if ctx.Err() != nil {
+				return RunPreview{}, ctx.Err()
+			}
+		}
+	}
+
+	// 逐目标端预览：条目数 = 板块开时 create 项计数；PrepareSelected 按
+	// 勾选数模拟。
+	createCount := 0
+	for _, r := range mockPreviewRows() {
+		if r.Category == CategoryCreate {
+			createCount++
+		}
+	}
+	for _, fr := range scope.Forks {
+		if !fr.Target || fr.ForkID == "g0v0" {
+			continue
+		}
+		n := createCount
+		if sel != nil {
+			n = len(sel)
+		}
+		preview.Targets = append(preview.Targets, RunTargetPreview{ForkID: fr.ForkID, Items: n})
+	}
+	// 待处理计数演示（冲突/弱键需确认/恢复/交集不支持各一条）。
+	preview.Pending = PendingSummary{Conflicts: 1, NeedsConfirm: 1, Restore: 1, Unsupported: 1}
+
+	m.mu.Lock()
+	m.runs = map[string]*mockRun{runID: {preview: preview}}
+	m.mu.Unlock()
+	return preview, nil
+}
+
+// CommitRun 模拟一轮同步提交（§0.4 步骤 6-7）：逐目标端 run 进度
+// （守卫 → 备份 → 批写入），g0v0 守卫跳过；报告逐端收集/投放摘要与
+// 待处理计数。未知 runID 报「请重新同步」。
+func (m *mockSync) CommitRun(runID string) (RunReport, error) {
+	m.mu.Lock()
+	run, ok := m.runs[runID]
+	if ok {
+		delete(m.runs, runID)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return RunReport{}, errors.New("appsvc: 本轮同步计划已失效或不存在，请重新同步")
+	}
+	if err := m.begin("run", ""); err != nil {
+		return RunReport{}, err
+	}
+	defer m.finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.setCancel(cancel)
+	defer cancel()
+
+	scope := m.b.getScope()
+	report := RunReport{Pending: run.preview.Pending, Forks: []ForkRunReport{}}
+	skipSet := map[string]string{}
+	for _, sk := range run.preview.Skipped {
+		skipSet[sk.ForkID] = sk.Reason
+	}
+	items := map[string]int{}
+	for _, tp := range run.preview.Targets {
+		items[tp.ForkID] = tp.Items
+	}
+	for _, fr := range scope.Forks {
+		frp := ForkRunReport{ForkID: fr.ForkID, Source: fr.Source, Target: fr.Target}
+		if reason, skip := skipSet[fr.ForkID]; skip {
+			frp.Skipped, frp.SkipReason = true, reason
+			report.Forks = append(report.Forks, frp)
+			continue
+		}
+		frp.Collect = &collect.Report{
+			Entities:        map[hub.EntityKind]int{hub.KindCollection: 3},
+			Skips:           []hub.SkipStat{},
+			AdoptModeCounts: map[filestore.LinkMode]int{},
+		}
+		if fr.Target {
+			for _, st := range []deploy.Stage{deploy.StageGuard, deploy.StageBackup, deploy.StageLink, deploy.StageWrite, deploy.StageVerify} {
+				if ctx.Err() != nil {
+					report.Forks = append(report.Forks, frp)
+					return report, ctx.Err()
+				}
+				m.emit(ProgressEvent{Service: "run", Stage: string(st), Current: 1, Total: 1,
+					Message: fmt.Sprintf("%s · %s", fr.ForkID, stageLabel(st)), At: time.Now()})
+				time.Sleep(mockSleep)
+			}
+			n := items[fr.ForkID]
+			applied := make([]deploy.ItemResult, 0, n)
+			for i := 0; i < n; i++ {
+				applied = append(applied, deploy.ItemResult{Kind: hub.KindCollection, ContentKey: fmt.Sprintf("mock-item-%02d", i), Action: deploy.ActionCreate})
+			}
+			frp.Deploy = &deploy.Report{
+				Applied:       applied,
+				Skipped:       []hub.SkipStat{{Reason: deploy.IntersectionRejectPrefix + "g0v0 不支持 — 演示键（整条跳过）", Count: 1}},
+				FailedBatches: []deploy.BatchFailure{},
+				NotRun:        []deploy.PlanItem{},
+				Repointed:     []deploy.RepointedItem{},
+				BackupPath:    "/mock/data/backups/client.realm.run",
+			}
+		}
+		report.Forks = append(report.Forks, frp)
+	}
+	return report, nil
+}
+
 func (m *mockSync) Cancel() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -690,4 +844,93 @@ func (b *mockBackend) Get() (SettingsInfo, error) {
 		NativeLibOK:  false,
 		NativeLibErr: "Mock 后端不加载 native 库（M-4 冒烟模式）",
 	}, nil
+}
+
+// getScope 当前同步范围（内存态；新注册的端自动补默认双角色条目）。
+func (b *mockBackend) getScope() SyncScope {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.scope == nil {
+		s := &SyncScope{}
+		for _, sec := range AllSections {
+			s.Sections = append(s.Sections, SectionToggle{Section: sec, Enabled: true})
+		}
+		b.scope = s
+	}
+	// 注册态与角色表对齐：新注册的端补默认双角色。
+	b.lib.mu.Lock()
+	refs := b.lib.reg()
+	for _, r := range refs {
+		found := false
+		for _, fr := range b.scope.Forks {
+			if fr.ForkID == r.ForkID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			b.scope.Forks = append(b.scope.Forks, ForkRole{
+				ForkID: r.ForkID, RealmPath: r.RealmPath, Source: true, Target: true})
+		}
+	}
+	b.lib.mu.Unlock()
+	out := SyncScope{
+		Sections: append([]SectionToggle(nil), b.scope.Sections...),
+		Forks:    append([]ForkRole(nil), b.scope.Forks...),
+	}
+	sort.Slice(out.Forks, func(i, j int) bool { return out.Forks[i].ForkID < out.Forks[j].ForkID })
+	return out
+}
+
+// GetSyncScope 同步范围（§0-G1 mock：内存态）。
+func (b *mockBackend) GetSyncScope() (SyncScope, error) {
+	return b.getScope(), nil
+}
+
+// SetSyncScope 持久化同步范围（mock：内存态）；校验与真实后端同构
+// （未知板块 / 未注册端报错）。
+func (b *mockBackend) SetSyncScope(scope SyncScope) error {
+	for _, tg := range scope.Sections {
+		if !knownSection(tg.Section) {
+			return fmt.Errorf("appsvc: 未知同步板块 %q", tg.Section)
+		}
+	}
+	b.lib.mu.Lock()
+	refs := b.lib.reg()
+	b.lib.mu.Unlock()
+	for _, fr := range scope.Forks {
+		if _, ok := refs[fr.ForkID]; !ok {
+			return fmt.Errorf("appsvc: 未注册的 fork %q，无法设置同步角色", fr.ForkID)
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.scope == nil {
+		s := &SyncScope{}
+		for _, sec := range AllSections {
+			s.Sections = append(s.Sections, SectionToggle{Section: sec, Enabled: true})
+		}
+		b.scope = s
+	}
+	for _, tg := range scope.Sections {
+		for i := range b.scope.Sections {
+			if b.scope.Sections[i].Section == tg.Section {
+				b.scope.Sections[i].Enabled = tg.Enabled
+			}
+		}
+	}
+	for _, fr := range scope.Forks {
+		found := false
+		for i := range b.scope.Forks {
+			if b.scope.Forks[i].ForkID == fr.ForkID {
+				b.scope.Forks[i].Source, b.scope.Forks[i].Target = fr.Source, fr.Target
+				found = true
+				break
+			}
+		}
+		if !found {
+			b.scope.Forks = append(b.scope.Forks, fr)
+		}
+	}
+	return nil
 }

@@ -247,12 +247,13 @@ func prepareModPresetWriter(r *realmc.Realm) (*modPresetWriter, error) {
 }
 
 // exec 执行单个模组预设计划项：D7 mod 白名单 → Ruleset 目标端解析（§4.2
-// 三态）→ 现场复核（软删防复活，HB2）→ 写入。
-func (w *modPresetWriter) exec(mp hub.ModPreset, targetFork string, action Action, restore bool) (applied, skipStat, string, error) {
+// 三态）→ 现场复核（软删防复活，HB2）→ 写入。peers 是全局交集端清单
+//（§0-B3/G6：任一目标端的 mod 名录外即不落地）。
+func (w *modPresetWriter) exec(mp hub.ModPreset, targetFork string, peers []string, action Action, restore bool) (applied, skipStat, string, error) {
 	if w.absent {
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
 	}
-	if reject := adaptModPresetModsForTarget(mp, targetFork); reject != "" {
+	if reject := adaptModPresetForIntersection(mp, targetFork, peers); reject != "" {
 		return applied{}, skipStat{reason: reject, count: 1}, "", nil
 	}
 	rsObj, ok, err := resolveRulesetObj(w.r, w.rulesetCK, w.rulesetCols, mp.RulesetShortName)

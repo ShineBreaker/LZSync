@@ -16,8 +16,10 @@ package itests
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
+	"lzsync/internal/collect"
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
 	"lzsync/internal/guard"
@@ -161,28 +163,51 @@ func TestEzCompatFullChain(t *testing.T) {
 	refLazer := buildLib(t, fixture.ForkLazer, fixture.VersionLazer, lazerSeed)
 	e.collectInto(refLazer)
 
-	// ---- 计划：集 conflict→update（BuildPlan 产出）+ 成绩手工补项 ----
-	//（BuildPlan 的 score 面未放开，fullchain_test 先例：hub canonical 键补入。）
+	// ---- 计划（§0-B2/B4：canonical 首见即定（Ez 先收确立）+ 冲突默认不
+	// 落地——集 update 覆盖路径由显式构造的动作项承载（数据页勾选冲突行的
+	// 手动处置）；canonical 换用 lazer 侧取值经第二个 hub 重演）+ 成绩手工
+	// 补项（BuildPlan 的 score 面未放开，fullchain_test 先例）。----
+	// Ez 侧 stdSet presence 与其自身 canonical 一致 → 主 hub 上无计划项。
 	plan, err := deploy.BuildPlan(ctx, e.hub, refEz, deploy.BuildOptions{Files: e.engine.Store})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	if len(plan.Items) != 1 || plan.Items[0].Kind != hub.KindBeatmapSet ||
-		plan.Items[0].ContentKey != stdSet.Hash || plan.Items[0].Action != deploy.ActionUpdate {
-		t.Fatalf("计划 = %+v，期望仅 1 项 %s… conflict→update（5005 与 presence 同值无差异）",
-			plan.Items, stdSet.Hash[:12])
+	for _, it := range plan.Items {
+		if it.Kind == hub.KindBeatmapSet && it.ContentKey == stdSet.Hash && it.Action != deploy.ActionSkip {
+			t.Fatalf("stdSet 计划动作 = %s（§0-B4 冲突应 skip），plan=%+v", it.Action, plan.Items)
+		}
 	}
+	h2, err := hub.Open(filepath.Join(t.TempDir(), "hub2.db"))
+	if err != nil {
+		t.Fatalf("hub.Open(h2): %v", err)
+	}
+	defer h2.Close()
+	if _, err := collect.NewRunner(collect.Deps{
+		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: guard.NewGuard(nil),
+	}).Collect(ctx, refLazer, nil); err != nil {
+		t.Fatalf("h2 收集 lazer: %v", err)
+	}
+	plan2, err := deploy.NewPlan(refEz.ForkID, []deploy.PlanItem{
+		{
+			Kind: hub.KindBeatmapSet, ContentKey: stdSet.Hash,
+			Action: deploy.ActionUpdate, Summary: "谱面集 " + stdSet.Hash[:12] + "…",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPlan: %v", err)
+	}
+	plan2.Target = refEz
 	for _, sc := range []fixture.SeedScore{lazerSeed.Scores[0], statsScore} {
-		plan.Items = append(plan.Items, deploy.PlanItem{
+		plan2.Items = append(plan2.Items, deploy.PlanItem{
 			Kind: hub.KindScore, ContentKey: hub.ScoreContentKey(sc.BeatmapHash, sc.Hash),
 			Action: deploy.ActionCreate, Summary: "成绩 " + sc.Hash[:12] + "…",
 		})
 	}
 
 	runner := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: h2, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
 	})
-	report, err := runner.Deploy(ctx, plan, nil)
+	report, err := runner.Deploy(ctx, plan2, nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v（report=%+v）", err, report)
 	}

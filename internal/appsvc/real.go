@@ -25,7 +25,6 @@ import (
 	"lzsync/internal/diff"
 	"lzsync/internal/filestore"
 	"lzsync/internal/forks"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
 )
@@ -77,8 +76,9 @@ func (s *realCompare) allReconcileItems(ctx context.Context, target string) ([]h
 	return items, nil
 }
 
-// registry 已注册库（forkID → 解析结果）。M1 内存态；盘面持久待设置页
-// 落 config.json 时一并施工（notes 已记）。
+// registry 已注册库（forkID → 解析结果）的运行时内存态；持久来源是
+// config.json 的 forks（configStore，§0-G1）——启动时按配置回填、运行期
+// 每次发现/注册/移除都同步写盘。
 type registry struct {
 	mu   sync.Mutex
 	byID map[string]forks.LibraryRef
@@ -114,8 +114,11 @@ func (r *registry) remove(forkID string) {
 	delete(r.byID, forkID)
 }
 
-// newRealBackend 构造真实后端：加载 native 库（P-2 判定）→ 装配四服务 →
-// 恢复持久化的投放计划。
+// newRealBackend 构造真实后端：加载 native 库（P-2 判定）→ 载入同步范围
+// 配置（config.json；解析失败如实上抛，由 mock-fallback 呈现原因，§0-G1）
+// → 配置端清单回注册表（RealmPath 不存在的条目留在配置但不进注册表）→
+// 自动发现合并（不在配置且不在 ignored 的发现追加为双角色）→ 装配五服务
+// → 恢复持久化的投放计划。
 func newRealBackend(deps Deps, prog ProgressSink) (*Backend, error) {
 	if deps.Hub == nil {
 		return nil, errors.New("appsvc: 真实后端缺少 hub 存储")
@@ -126,11 +129,35 @@ func newRealBackend(deps Deps, prog ProgressSink) (*Backend, error) {
 	if prog == nil {
 		prog = func(ProgressEvent) {}
 	}
+	cfg, err := loadSyncConfig(deps.DataDir)
+	if err != nil {
+		return nil, err
+	}
 	reg := &registry{byID: map[string]forks.LibraryRef{}}
+	// 配置端清单回注册表（身份取配置；版本重新探测走 Scan）。
+	for _, role := range cfg.scope().Forks {
+		if role.RealmPath == "" {
+			continue
+		}
+		if _, err := os.Stat(role.RealmPath); err != nil {
+			continue // RealmPath 已不存在：留在配置但不进注册表
+		}
+		reg.put(forks.LibraryRef{
+			ForkID:    role.ForkID,
+			RealmPath: role.RealmPath,
+			DataDir:   filepath.Dir(role.RealmPath),
+		})
+	}
 	// 发现失败（数据根不可读等）不阻塞后端构造：库管理页可手动注册。
 	if refs, err := discoverRefs(deps); err == nil {
 		for _, ref := range refs {
-			reg.put(ref)
+			ok, dErr := cfg.discoverFork(ref)
+			if dErr != nil {
+				return nil, dErr
+			}
+			if ok {
+				reg.put(ref)
+			}
 		}
 	}
 	cmp := &realCompare{deps: deps, reg: reg}
@@ -138,11 +165,11 @@ func newRealBackend(deps Deps, prog ProgressSink) (*Backend, error) {
 		return nil, err
 	}
 	b := &Backend{
-		Library:  &realLibrary{deps: deps, reg: reg},
+		Library:  &realLibrary{deps: deps, reg: reg, cfg: cfg},
 		Compare:  cmp,
-		Sync:     &realSync{deps: deps, reg: reg, cmp: cmp, prog: prog},
+		Sync:     &realSync{deps: deps, reg: reg, cfg: cfg, cmp: cmp, prog: prog},
 		Export:   newRealExport(deps, reg),
-		Settings: &realSettings{deps: deps},
+		Settings: &realSettings{deps: deps, reg: reg, cfg: cfg},
 		Mode:     "real",
 		Reason:   "",
 	}
@@ -166,21 +193,32 @@ func discoverRefs(deps Deps) (refs []forks.LibraryRef, err error) {
 type realLibrary struct {
 	deps Deps
 	reg  *registry
+	cfg  *configStore
 }
 
-// Scan 扫描数据根（§6.1 自动发现），发现的库自动并入注册表。
+// Scan 扫描数据根（§6.1 自动发现）：不在配置且不在 ignored 的发现追加为
+// 拉取+写入双角色并落盘；ignored 路径（用户 Remove 过的）不再加回。
 func (s *realLibrary) Scan() ([]forks.LibraryRef, error) {
 	refs, err := forks.Discover(s.deps.DataRoot)
 	if err != nil {
 		return nil, err
 	}
+	var visible []forks.LibraryRef
 	for _, ref := range refs {
+		ok, err := s.cfg.discoverFork(ref)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
 		s.reg.put(ref)
+		visible = append(visible, ref)
 	}
-	if refs == nil {
-		refs = []forks.LibraryRef{}
+	if visible == nil {
+		visible = []forks.LibraryRef{}
 	}
-	return refs, nil
+	return visible, nil
 }
 
 // Register 手动注册：识别失败返回 ForkID 为空串的 ref（携带原始版本供
@@ -192,6 +230,9 @@ func (s *realLibrary) Register(path string) (forks.LibraryRef, error) {
 	ref, _ := safeIdentify(path, s.deps.Snapshots)
 	if ref.ForkID != "" {
 		s.reg.put(ref)
+		if err := s.cfg.registerFork(ref); err != nil {
+			return forks.LibraryRef{}, err
+		}
 	}
 	return ref, nil
 }
@@ -223,6 +264,9 @@ func (s *realLibrary) AssignFork(path, forkID string) (forks.LibraryRef, error) 
 			ref.ForkID = forkID
 			ref.UpstreamVersion, ref.ForkRev = p.DecodeVersion(ref.DiskVersion)
 			s.reg.put(ref)
+			if err := s.cfg.registerFork(ref); err != nil {
+				return forks.LibraryRef{}, err
+			}
 			return ref, nil
 		}
 	}
@@ -235,6 +279,9 @@ func (s *realLibrary) AssignFork(path, forkID string) (forks.LibraryRef, error) 
 	}
 	ref.UpstreamVersion, ref.ForkRev = p.DecodeVersion(ver)
 	s.reg.put(ref)
+	if err := s.cfg.registerFork(ref); err != nil {
+		return forks.LibraryRef{}, err
+	}
 	return ref, nil
 }
 
@@ -254,13 +301,16 @@ func (s *realLibrary) List() []LibraryCard {
 	return cards
 }
 
-// Remove 解除管理（不碰磁盘）。
+// Remove 解除管理（不碰磁盘）：配置条目删除并把 RealmPath 记入 ignored，
+// 自动发现不再加回（§0-G1；之后 Register 同路径会重新注册并摘除
+// ignored 标记）。
 func (s *realLibrary) Remove(forkID string) error {
-	if _, ok := s.reg.get(forkID); !ok {
+	ref, ok := s.reg.get(forkID)
+	if !ok {
 		return fmt.Errorf("appsvc: 未注册的 fork %q", forkID)
 	}
 	s.reg.remove(forkID)
-	return nil
+	return s.cfg.removeFork(forkID, ref.RealmPath)
 }
 
 // buildCard 从解析结果组装卡片：体积统计 + 版本标注 + 运行状态。
@@ -671,8 +721,9 @@ func reconcileToRow(it hub.ReconcileItem, sum *summarizer) DiffRow {
 	row.IdentityKey, row.Evidence = it.IdentityKey, it.Evidence
 	row.CurrentKey = it.CurrentKey
 	row.DeletedAt = it.DeletedAt
-	// 默认勾选（§6.2）：新增/冲突默认勾选（冲突默认 hub 覆盖，§5.4）；
-	// 版本更新强键勾选、弱键需拍板不勾；恢复组默认不勾。
+	// 默认勾选（§6.2 + §0-B4）：新增默认勾选；冲突默认不勾（无三方基线
+	// 裁决，判不准不动——显式勾选即选定 hub 变体）；版本更新强键勾选、
+	// 弱键需拍板不勾；恢复组默认不勾。
 	checked := false
 	switch {
 	case it.Restorable:
@@ -680,7 +731,8 @@ func reconcileToRow(it hub.ReconcileItem, sum *summarizer) DiffRow {
 	case it.Category == hub.ReconcileCreate:
 		row.Category, checked = CategoryCreate, true
 	case it.Category == hub.ReconcileConflict:
-		row.Category, checked = CategoryConflict, true
+		row.Category = CategoryConflict
+		row.SkipReason = "冲突：各端取值不同，勾选投放即按 hub 值覆盖（§0 B4）"
 	case it.Category == hub.ReconcileVersionUpdate:
 		row.Category = CategoryVersionUpdate
 		checked = it.Evidence == EvidenceStrong
@@ -790,6 +842,7 @@ func shortKey(key string) string {
 type realSync struct {
 	deps  Deps
 	reg   *registry
+	cfg   *configStore
 	cmp   *realCompare
 	prog  ProgressSink
 	cRun  *collect.Runner
@@ -798,6 +851,7 @@ type realSync struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	status SyncStatus
+	runs   map[string]*preparedRun // 已准备的一轮同步（只保留最新一轮）
 }
 
 // Collect 对单个 fork 执行收集（§6.3 收集阶段）。游戏运行中被守卫拦截；
@@ -811,7 +865,7 @@ func (s *realSync) Collect(forkID string) (collect.Report, error) {
 	if !ok {
 		return collect.Report{}, fmt.Errorf("appsvc: 未注册的 fork %q，请先在库管理页发现或注册", forkID)
 	}
-	if err := s.guardClear(); err != nil {
+	if err := s.guardClear(forkID); err != nil {
 		return collect.Report{}, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -845,7 +899,7 @@ func (s *realSync) DeployCurrentPlan() (deploy.Report, error) {
 		return deploy.Report{}, err
 	}
 	defer s.finish()
-	if err := s.guardClear(); err != nil {
+	if err := s.guardClear(plan.TargetFork); err != nil {
 		return deploy.Report{}, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -863,7 +917,8 @@ func (s *realSync) DeployCurrentPlan() (deploy.Report, error) {
 		// 未配置 ini 面或无源快照时不做 ini 段（如实无键可投）。
 		if s.deps.GameIni != nil {
 			if src := s.gameIniSourceFork(plan.TargetFork); src != "" {
-				gi, giErr := deploy.SyncGameIni(plan.Target, src, s.deps.GameIni, s.deps.Backups, s.deps.Guard)
+				// 单目标投放的兼容路径：peers 仅目标端（交集面空）。
+				gi, giErr := deploy.SyncGameIni(plan.Target, src, nil, s.deps.GameIni, s.deps.Backups, s.deps.Guard)
 				if giErr != nil {
 					return report, giErr
 				}
@@ -958,15 +1013,13 @@ func (s *realSync) gameIniSourceFork(target string) string {
 	return best
 }
 
-// guardClear 守卫预检：名单内进程在运行即拒绝（S5 友好提示先行）。
-func (s *realSync) guardClear() error {
+// guardClear 逐端守卫预检（§0-B1/G3）：只检测该 fork Profile 名单内的
+// 进程；未知 fork 回落全名单（EnsureClearFork 语义）。nil 守卫恒放行。
+func (s *realSync) guardClear(forkID string) error {
 	if s.deps.Guard == nil {
 		return nil
 	}
-	if names := s.deps.Guard.Running(); len(names) > 0 {
-		return fmt.Errorf("%w（运行中：%v）", guard.ErrGameRunning, names)
-	}
-	return nil
+	return s.deps.Guard.EnsureClearFork(forkID)
 }
 
 func (s *realSync) begin(kind, forkID string) error {
@@ -1025,6 +1078,34 @@ func stageLabel(stage any) string {
 
 type realSettings struct {
 	deps Deps
+	reg  *registry
+	cfg  *configStore
+}
+
+// GetSyncScope 同步范围（§0-G1）。
+func (s *realSettings) GetSyncScope() (SyncScope, error) {
+	return s.cfg.scope(), nil
+}
+
+// SetSyncScope 校验并持久化同步范围：未知板块报错；未注册端报错；落盘
+// 走配置原子写（configStore.applyScope）。
+func (s *realSettings) SetSyncScope(scope SyncScope) error {
+	for _, tg := range scope.Sections {
+		if !knownSection(tg.Section) {
+			return fmt.Errorf("appsvc: 未知同步板块 %q", tg.Section)
+		}
+	}
+	for _, fr := range scope.Forks {
+		if _, ok := s.reg.get(fr.ForkID); !ok {
+			return fmt.Errorf("appsvc: 未注册的 fork %q，无法设置同步角色", fr.ForkID)
+		}
+	}
+	return s.cfg.applyScope(scope, func(forkID string) string {
+		if ref, ok := s.reg.get(forkID); ok {
+			return ref.RealmPath
+		}
+		return ""
+	})
 }
 
 // Get 组装设置页数据（§6.4 M1 骨架，只读显示）。

@@ -146,10 +146,11 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 		}
 	}
 
-	// 阶段 1：守卫复查（进程名扫描可用则先行给友好提示；占用探测随后）。
+	// 阶段 1：守卫复查（逐端进程名扫描——只检测目标 fork 的进程，§0-B1
+	// /G3；占用探测随后）。
 	emit(StageGuard, 0, 0, 1)
 	if r.deps.Guard != nil {
-		if err := r.deps.Guard.EnsureClear(); err != nil {
+		if err := r.deps.Guard.EnsureClearFork(plan.TargetFork); err != nil {
 			return report, err
 		}
 	}
@@ -199,6 +200,8 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	}
 
 	// 阶段 4：逐批执行。批失败 → 整批回滚并停止；已提交批保留（§3.3）。
+	// peers = 全局交集面（§0-B3/G6）：写入形态须满足全部目标端。
+	peers := intersectionPeers(plan)
 	var skipped = map[string]int{}
 	for bi, batch := range batches {
 		if err := ctx.Err(); err != nil { // 批间取消点
@@ -206,7 +209,7 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 			report.GimmickWarnings = appliedGimmickWarnings(plan, report.Applied)
 			return report, err
 		}
-		applied, repointed, batchSkips, err := r.runBatch(ctx, realm, plan.TargetFork, batch, func(cur, n int) {
+		applied, repointed, batchSkips, err := r.runBatch(ctx, realm, plan.TargetFork, peers, batch, func(cur, n int) {
 			emit(StageWrite, bi, cur, n)
 		})
 		if err == nil {
@@ -251,8 +254,9 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 
 // runBatch 执行一个同 kind 批（§3.3 批 = 事务）：DriftGuard 骨架内逐项
 // 现场复核 + 写入；任何写入异常整批回滚。skip 计数不触发回滚（合法落地
-// 形态）。targetFork 用于 S8 判定（谱面集 OnlineID 携带面）。
-func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork string, batch []PlanItem,
+// 形态）。targetFork 用于 S8 判定（谱面集 OnlineID 携带面）；peers 是全局
+// 交集端清单（§0-B3/G6：成绩/mod/键位的静态兼容性逐端判定）。
+func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork string, peers []string, batch []PlanItem,
 	emit func(cur, total int)) ([]ItemResult, map[int]string, map[string]int, error) {
 	dg, err := beginDriftGuard(realm)
 	if err != nil {
@@ -413,7 +417,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此成绩（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), targetFork, item.Action, item.Restore)
+			ap, skip, rep, err := scoreW.exec(sc, s8SameRealm(origin.Fork, targetFork), targetFork, peers, item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}
@@ -438,7 +442,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此键位（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := kbW.exec(kb, origin.Fork, targetFork, item.Action)
+			ap, skip, rep, err := kbW.exec(kb, origin.Fork, targetFork, peers, item.Action)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}
@@ -486,7 +490,7 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 				skips["hub 实体表中无此模组预设（计划与真相源不符，跳过）"]++
 				continue
 			}
-			ap, skip, rep, err := mpW.exec(mp, targetFork, item.Action, item.Restore)
+			ap, skip, rep, err := mpW.exec(mp, targetFork, peers, item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}

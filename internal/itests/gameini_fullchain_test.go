@@ -93,7 +93,7 @@ func TestGameIniFullChain(t *testing.T) {
 	// ② 投放：lazer canonical → delta 目标。
 	targetIniPath := filepath.Join(dst.DataDir, "game.ini")
 	beforeTarget, _ := os.ReadFile(targetIniPath)
-	res, err := deploy.SyncGameIni(dst, "lazer", store, env.backups, guard.NewGuard(nil))
+	res, err := deploy.SyncGameIni(dst, "lazer", nil, store, env.backups, guard.NewGuard(nil))
 	if err != nil {
 		t.Fatalf("SyncGameIni: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestGameIniFullChain(t *testing.T) {
 	}
 
 	// ③ 幂等重跑：值已一致 → no-op（零落地零新备份）。
-	res2, err := deploy.SyncGameIni(dst, "lazer", store, env.backups, guard.NewGuard(nil))
+	res2, err := deploy.SyncGameIni(dst, "lazer", nil, store, env.backups, guard.NewGuard(nil))
 	if err != nil {
 		t.Fatalf("重跑 SyncGameIni: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestGameIniTargetNeverLaunched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := deploy.SyncGameIni(ref, "lazer", store, env.backups, guard.NewGuard(nil))
+	res, err := deploy.SyncGameIni(ref, "lazer", nil, store, env.backups, guard.NewGuard(nil))
 	if err != nil {
 		t.Fatalf("SyncGameIni: %v", err)
 	}

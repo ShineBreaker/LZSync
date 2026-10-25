@@ -120,9 +120,11 @@ func TestDeployFullFeaturedCollection(t *testing.T) {
 	}
 
 	// 就地更新保目标 Guid：① 模拟「投放后重新收集目标 fork」（投放不写
-	// presence——hub 语义：presence 只由收集维护）；② forkC 收集同键收藏
-	//（不同 Guid + 不同成员）→ canonical 整行覆盖（HB3）→ 对账出冲突 →
-	// update 计划 → 目标 Guid 不变。
+	// presence——hub 语义：presence 只由收集维护）；② 更新路径由显式
+	// 构造的 update 动作项覆盖——§0-B2 后 canonical 首见即定（同名不同
+	// 值的收藏落 forkC 的 presence 不改 canonical），且 §0-B4 冲突默认
+	// skip（见 TestBuildPlanDefaults），故换第二个 hub 演「目标持有旧
+	// 变体、canonical 为新值」的手动处置（数据页勾选冲突行 = NewPlan）。
 	withReadOnly(t, lib, ref.RealmPath, func(r *realmc.Realm) {
 		collected := []hub.Collection{readCollectionOr(t, r, "满配夹"), readCollectionOr(t, r, "第二夹")}
 		applySnap(t, h, hub.Snapshot{ForkID: ref.ForkID, CollectedAt: t0.Add(time.Hour + time.Minute),
@@ -133,16 +135,19 @@ func TestDeployFullFeaturedCollection(t *testing.T) {
 		ID: "33333333-3333-3333-3333-333333333333", Name: "满配夹",
 		BeatmapMD5Hashes: []string{"md5-a", "md5-b", "md5-c", "md5-d"}, LastModified: t1,
 	}
-	applySnap(t, h, hub.Snapshot{ForkID: "fork-c", CollectedAt: t1, Collections: []hub.Collection{fav1v2}})
+	h2 := openMemHub(t)
+	applySnap(t, h2, hub.Snapshot{ForkID: "fork-c", CollectedAt: t1, Collections: []hub.Collection{fav1v2}})
 
-	plan3, err := BuildPlan(ctx, h, ref, BuildOptions{})
+	plan3, err := NewPlan(ref.ForkID, []PlanItem{{
+		Kind: hub.KindCollection, ContentKey: "满配夹",
+		Action: ActionUpdate, Summary: "收藏夹「满配夹」",
+	}})
 	if err != nil {
-		t.Fatalf("BuildPlan#3: %v", err)
+		t.Fatalf("NewPlan#3: %v", err)
 	}
-	if len(plan3.Items) != 1 || plan3.Items[0].Action != ActionUpdate {
-		t.Fatalf("计划#3 = %+v（期望仅「满配夹」update）", plan3.Items)
-	}
-	report3, err := runner.Deploy(ctx, plan3, nil)
+	plan3.Target = ref
+	runner3 := NewRunner(Deps{Hub: h2})
+	report3, err := runner3.Deploy(ctx, plan3, nil)
 	if err != nil {
 		t.Fatalf("Deploy#3: %v", err)
 	}

@@ -147,6 +147,30 @@ const DICT = {
     "sync.restoreBtn": "还原",
     "sync.restoreDone": "已还原",
 
+    // ===== 一轮同步（§0.4） =====
+    "run.confirm": "写入 {0} 端 · {1} 项",
+    "run.go": "同步",
+    "run.cancel": "取消",
+    "run.preparing": "正在预演…",
+    "run.pulled": "拉取",
+    "pend.conflicts": "冲突",
+    "pend.needsConfirm": "需确认",
+    "pend.unsupported": "不支持",
+    "pend.restore": "已删除",
+
+    // ===== 同步范围 =====
+    "set.syncScope": "同步范围",
+    "scope.pull": "拉取",
+    "scope.write": "写入",
+    "sec.beatmap_set": "谱面集",
+    "sec.collection": "收藏",
+    "sec.skin": "皮肤",
+    "sec.score": "成绩",
+    "sec.key_binding": "键位",
+    "sec.ruleset_setting": "规则集设置",
+    "sec.mod_preset": "Mod 预设",
+    "sec.game_ini": "game.ini",
+
     // ===== 客户端页 =====
     "clients.title": "客户端",
     "clients.scan": "自动扫描",
@@ -284,6 +308,30 @@ const DICT = {
     "sync.restorePath": "Path",
     "sync.restoreBtn": "Restore",
     "sync.restoreDone": "Restored",
+
+    // ===== One sync round (§0.4) =====
+    "run.confirm": "Write {0} forks · {1} items",
+    "run.go": "Sync",
+    "run.cancel": "Cancel",
+    "run.preparing": "Preparing…",
+    "run.pulled": "Pulled",
+    "pend.conflicts": "Conflicts",
+    "pend.needsConfirm": "Needs confirm",
+    "pend.unsupported": "Unsupported",
+    "pend.restore": "Deleted",
+
+    // ===== Sync scope =====
+    "set.syncScope": "Sync Scope",
+    "scope.pull": "Pull",
+    "scope.write": "Write",
+    "sec.beatmap_set": "Beatmap Sets",
+    "sec.collection": "Collections",
+    "sec.skin": "Skins",
+    "sec.score": "Scores",
+    "sec.key_binding": "Key Bindings",
+    "sec.ruleset_setting": "Ruleset Settings",
+    "sec.mod_preset": "Mod Presets",
+    "sec.game_ini": "game.ini",
 
     // ===== Clients page =====
     "clients.title": "Clients",

@@ -3,11 +3,22 @@
 // 当前实现：beatmap_set / collection / skin / score 四类，kind 由调用方传入。
 
 import { t, trBackend } from "../i18n";
-import { CompareService, ExportService, LibraryService } from "../mygo";
-import { clear, el, errText, message, popoverAt, popoverForkRow, syncStateClass, syncStateLabel, text, type SyncState } from "../ui";
+import { CompareService, ExportService, LibraryService, SyncService } from "../mygo";
+import { setPendingPreview } from "./sync";
+import { clear, el, errText, message, navigate, popoverAt, popoverForkRow, syncStateClass, syncStateLabel, text, type SyncState } from "../ui";
 
 type DiffRow = Awaited<ReturnType<typeof CompareService.previewDeploy>>[number];
 type LibCard = Awaited<ReturnType<typeof LibraryService.list>>[number];
+
+type BrowseFilter = "all" | "diff" | "conflict" | "needsConfirm";
+
+// 同步页待处理计数点进来的目标筛选（kind → filter，一次性消费）。
+const pendingFilters = new Map<string, BrowseFilter>();
+
+/** setBrowseFilter 供同步页跳转到指定数据页时带筛选。 */
+export function setBrowseFilter(kind: string, filter: BrowseFilter): void {
+  pendingFilters.set(kind, filter);
+}
 
 interface RowView {
   key: string;
@@ -39,8 +50,9 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
   let rows: RowView[] = [];
   let allCards: LibCard[] = [];
 
-  // 筛选：全部 / 仅差异 / 冲突 / 需确认
-  let filter: "all" | "diff" | "conflict" | "needsConfirm" = "all";
+  // 筛选：全部 / 仅差异 / 冲突 / 需确认（同步页待处理计数可带初始筛选进来）
+  let filter: BrowseFilter = pendingFilters.get(kind) ?? "all";
+  pendingFilters.delete(kind);
 
   try {
     allCards = await LibraryService.list();
@@ -74,17 +86,10 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
     clear(statusLine);
     try {
       const sel = rows.filter((r) => checked.has(r.key)).map((r) => ({ Kind: r.kind, ContentKey: r.contentKey }));
-      // hub-and-spoke：默认全端同步——对每张已注册端各 BuildPlan 一次。
-      const targets = allCards.map((c) => c.ForkID);
-      const results = await Promise.allSettled(targets.map((fork) => CompareService.buildPlan(fork, sel)));
-      const failed = results.filter((r) => r.status === "rejected");
-      if (failed.length === 0) {
-        statusLine.append(message("ok", t("browse.pushAll", sel.length, targets.length)));
-      } else {
-        const first = failed[0];
-        const errMsg = first && first.status === "rejected" ? errText(first.reason) : "";
-        statusLine.append(message("error", `${t("browse.pushAllFail", targets.length - failed.length, targets.length)} ${errMsg}`));
-      }
+      // 一轮编排：勾选经 prepareSelected 预演，预览交同步页确认执行。
+      const preview = await SyncService.prepareSelected(sel);
+      setPendingPreview(preview);
+      navigate("sync");
     } catch (err) {
       statusLine.append(message("error", errText(err)));
     } finally {

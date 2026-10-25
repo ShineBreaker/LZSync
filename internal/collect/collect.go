@@ -63,24 +63,56 @@ type Runner struct {
 	deps Deps
 }
 
+// Mode 收集模式（§0 角色模型：端的 Source/Target 角色决定收集面深浅）。
+type Mode int
+
+const (
+	// ModeFull 来源+目标（默认）：投影 → 入 hub → 收仓+回链（既有一轮
+	// 同步前的行为：fork 的 files/ 收仓后呈链接形态）。
+	ModeFull Mode = iota
+	// ModeSourceOnly 仅来源：投影 → 入 hub → 只把非链接实体文件复制进
+	// 仓（filestore.IngestDir），绝不改动 fork 的 files/。
+	ModeSourceOnly
+	// ModeSnapshotOnly 仅目标：投影 → PresenceOnly 快照（实体不插、
+	// 版本链不建、文件不碰、game.ini 不收）——目标端取值只刷新该端
+	// 自己的 presence.local_values。
+	ModeSnapshotOnly
+)
+
+// Options 一轮收集的可选范围（§0 板块开关 + 角色）。
+type Options struct {
+	Mode    Mode
+	Kinds   map[hub.EntityKind]bool // nil = 全部实体类；非 nil 时投影出的未选 kind 不放进快照
+	GameIni bool                    // 是否收 game.ini（仍需 Deps.GameIni 非 nil）
+}
+
 // NewRunner 创建收集编排器。
 func NewRunner(deps Deps) *Runner {
 	return &Runner{deps: deps}
 }
 
-// Collect 对 target 库执行收集：
-//  1. 守卫拦截（游戏运行中直接报 guard.ErrGameRunning；呈现缓存快照的
-//     回退策略属 appsvc，不在本层）——收集只读不惧并发，但 realm 开库
-//     在游戏运行时会因进程锁失败（go-realm-options §1.3-7），守卫把
-//     这一失败提前为友好提示；
+// Collect 以默认 Options 对 target 库执行收集（ModeFull + 全 kind + 收
+// game.ini——行为与 §3.2 一轮收集一致）。
+func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog ProgressFunc) (Report, error) {
+	return r.CollectWith(ctx, target, Options{GameIni: true}, prog)
+}
+
+// CollectWith 对 target 库执行收集：
+//  1. 逐端守卫拦截（§0-B1/G3：只检测该 fork 的进程名；游戏运行中直接报
+//     guard.ErrGameRunning；呈现缓存快照的回退策略属 appsvc，不在本层）——
+//     收集只读不惧并发，但 realm 开库在游戏运行时会因进程锁失败
+//     （go-realm-options §1.3-7），守卫把这一失败提前为友好提示；
 //  2. 动态只读投影（跳过规则 §4.1；跳过项计数入 Report.Skips——不静默吞）；
-//  3. hub.ApplySnapshot 单事务入仓（部分失败不产生 tombstone，HB2）；
+//  3. hub.ApplySnapshot 单事务入仓（部分失败不产生 tombstone，HB2；
+//     §0-B2 首见即定——insert-if-absent，后到端取值留在 presence）；
 //  4. 顺手采集结构档案（同版本只留首份，§4.3）；
-//  5. 收仓 + 回链（HB4：能力探测 + 首文件试探失败 → 该 fork 整体跳过
-//     收仓、文件留原地 + 计数——纯增益操作，跳过只损失磁盘节约）。
+//  5. 文件面按 Mode：ModeFull = 收仓 + 回链（HB4：能力探测 + 首文件试探
+//     失败 → 该 fork 整体跳过收仓、文件留原地 + 计数——纯增益操作，
+//     跳过只损失磁盘节约）；ModeSourceOnly = 只入仓不回链（fork 的
+//     files/ 保持普通文件）；ModeSnapshotOnly = 不碰任何文件。
 //
 // 幂等：重跑 = 重写快照 + 补收文件，无部分完成风险（§3.3）。
-func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog ProgressFunc) (Report, error) {
+func (r *Runner) CollectWith(ctx context.Context, target forks.LibraryRef, opts Options, prog ProgressFunc) (Report, error) {
 	report := Report{}
 	if err := ctx.Err(); err != nil {
 		return report, err
@@ -88,7 +120,7 @@ func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog Prog
 	if target.ForkID == "" || target.RealmPath == "" {
 		return report, fmt.Errorf("collect: 目标库未解析（ForkID/RealmPath 为空）")
 	}
-	if err := r.deps.Guard.EnsureClear(); err != nil {
+	if err := r.deps.Guard.EnsureClearFork(target.ForkID); err != nil {
 		return report, err
 	}
 	lib, err := realmc.Load()
@@ -119,6 +151,17 @@ func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog Prog
 		return report, fmt.Errorf("collect: 关闭只读会话: %w", err)
 	}
 
+	// 板块圈定（§0 同步范围）：未选 kind 的投影结果不放进快照，且
+	// Snapshot.Kinds 如实设置——presence/tombstone 重写只动圈定 kind，
+	// 关掉板块不会把该 kind 既有 presence 误标成删除（HB2 前置条件）。
+	filterSnapshotKinds(&snap, opts.Kinds)
+	if opts.Kinds != nil {
+		snap.Kinds = opts.Kinds
+	}
+	if opts.Mode == ModeSnapshotOnly {
+		snap.PresenceOnly = true
+	}
+
 	// ③ 单事务入 hub（HB2：到这步为止的任何失败都不落任何快照/tombstone）。
 	if prog != nil {
 		prog(StageApply, 0, len(snap.Collections)+len(snap.BeatmapSets)+len(snap.Skins)+
@@ -133,8 +176,8 @@ func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog Prog
 
 	// ③b game.ini 白名单键入快照仓（文件级、投影事务之后：投影失败则
 	// ini 快照同样不落）。源端无 game.ini 是从未启动过客户端的正常态，
-	// 计数不静默（§1.5-4）。
-	if r.deps.GameIni != nil {
+	// 计数不静默（§1.5-4）。仅目标端（ModeSnapshotOnly）不收 ini。
+	if r.deps.GameIni != nil && opts.GameIni && opts.Mode != ModeSnapshotOnly {
 		n, gerr := collectGameIni(target, r.deps.GameIni)
 		if gerr != nil {
 			return report, fmt.Errorf("collect: 收 game.ini 白名单键: %w", gerr)
@@ -161,21 +204,64 @@ func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog Prog
 		}
 	}
 
-	// ⑤ 收仓 + 回链：files/ 不存在视为「无实体文件」（无文件 fork 的
+	// ⑤ 文件面按 Mode：files/ 不存在视为「无实体文件」（无文件 fork 的
 	// 正常态），扫描失败如实上抛。
 	if prog != nil {
 		prog(StageAdopt, 0, 0)
 	}
 	if filesDir, ok := resolveFilesDir(target.RealmPath); ok {
-		stats, aerr := r.deps.Files.AdoptDir(filesDir)
-		if aerr != nil {
-			return report, fmt.Errorf("collect: 收仓 %s: %w", filesDir, aerr)
+		switch opts.Mode {
+		case ModeFull:
+			stats, aerr := r.deps.Files.AdoptDir(filesDir)
+			if aerr != nil {
+				return report, fmt.Errorf("collect: 收仓 %s: %w", filesDir, aerr)
+			}
+			report.FilesAdopted = stats.Adopted
+			report.FilesSkipped = stats.Failed + stats.Skipped + stats.Aborted
+			report.AdoptModeCounts = stats.Modes
+		case ModeSourceOnly:
+			// 仅来源端：入仓不回链——fork 的 files/ 保持普通文件、
+			// 字节不变（§0 角色模型；IngestDir 不碰 fork 侧任何文件）。
+			stats, aerr := r.deps.Files.IngestDir(filesDir)
+			if aerr != nil {
+				return report, fmt.Errorf("collect: 入仓 %s: %w", filesDir, aerr)
+			}
+			report.FilesAdopted = stats.Ingested
+			report.FilesSkipped = stats.Failed + stats.Skipped
+		case ModeSnapshotOnly:
+			// 仅目标端：不碰任何文件。
 		}
-		report.FilesAdopted = stats.Adopted
-		report.FilesSkipped = stats.Failed + stats.Skipped + stats.Aborted
-		report.AdoptModeCounts = stats.Modes
 	}
 	return report, nil
+}
+
+// filterSnapshotKinds 把未圈定 kind 的投影结果从快照中剔除（Options.Kinds
+// 非 nil 时；Kinds 如实落到 Snapshot.Kinds 由调用方完成）。
+func filterSnapshotKinds(snap *hub.Snapshot, kinds map[hub.EntityKind]bool) {
+	if kinds == nil {
+		return
+	}
+	if !kinds[hub.KindCollection] {
+		snap.Collections = nil
+	}
+	if !kinds[hub.KindBeatmapSet] && !kinds[hub.KindBeatmap] {
+		snap.BeatmapSets = nil // 难度随父集整集管理（§4.2）
+	}
+	if !kinds[hub.KindSkin] {
+		snap.Skins = nil
+	}
+	if !kinds[hub.KindScore] {
+		snap.Scores = nil
+	}
+	if !kinds[hub.KindKeyBinding] {
+		snap.KeyBindings = nil
+	}
+	if !kinds[hub.KindRulesetSetting] {
+		snap.RulesetSettings = nil
+	}
+	if !kinds[hub.KindModPreset] {
+		snap.ModPresets = nil
+	}
 }
 
 // resolveFilesDir 解析 fork 的 files/ 目录（§5.3 三级回退）：库所在目录

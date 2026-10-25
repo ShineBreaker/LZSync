@@ -168,3 +168,64 @@ func TestTouchAfterWrite(t *testing.T) {
 		t.Errorf("mtime = %v，期望 %v", st.ModTime(), want)
 	}
 }
+
+// TestRunningAmong 逐端名单过滤（§0-B1/G3）：只有名单内进程名才计数；
+// 名单外进程（测试进程自身）不误报。进程枚举不可注入（真实 /proc），
+// 本测试以测试进程自身的可执行名做最小可复现夹具。
+func TestRunningAmong(t *testing.T) {
+	self := filepath.Base(os.Args[0])
+	g := NewGuard([]string{self, "definitely-not-running-xyz"})
+	// RunningAmong 只检测给定子名单：含自身命中；不含自身恒放行。
+	if got := g.RunningAmong([]string{self}); len(got) != 1 || got[0] != self {
+		t.Fatalf("RunningAmong(self) = %v，期望 [%s]", got, self)
+	}
+	if got := g.RunningAmong([]string{"definitely-not-running-xyz"}); len(got) != 0 {
+		t.Fatalf("RunningAmong(未运行名) = %v，期望空", got)
+	}
+	if got := g.RunningAmong(nil); got != nil {
+		t.Fatalf("RunningAmong(nil) = %v，期望 nil", got)
+	}
+	// Running() 仍是全名单口径。
+	if got := g.Running(); len(got) != 1 || got[0] != self {
+		t.Fatalf("Running() = %v，期望 [%s]", got, self)
+	}
+}
+
+// TestEnsureClearFor 逐端守卫（§0-B1/G3）：名单外进程运行不拦；
+// 名单内命中包装 ErrGameRunning 并携带名单。
+func TestEnsureClearFor(t *testing.T) {
+	self := filepath.Base(os.Args[0])
+	g := NewGuard([]string{self})
+	if err := g.EnsureClearFor([]string{"definitely-not-running-xyz"}); err != nil {
+		t.Fatalf("EnsureClearFor(未运行名) = %v，期望 nil（名单外进程不拦）", err)
+	}
+	err := g.EnsureClearFor([]string{self})
+	if !errors.Is(err, ErrGameRunning) {
+		t.Fatalf("EnsureClearFor(self) = %v，期望 ErrGameRunning", err)
+	}
+	if !strings.Contains(err.Error(), self) {
+		t.Errorf("错误消息 %q 应携带命中进程名 %s", err.Error(), self)
+	}
+}
+
+// TestEnsureClearForkPerForkNames 逐端 Profile 判定（§0-B1/G3）：
+// 名单内进程 = 测试进程自身——已知 fork 各自的 ProcessNames 不含它
+// → 不拦；未注册 fork 回落全名单 → 命中拦截；delta（ProcessNames 未
+// 记录，nil 名单）恒放行。伪造已知 fork 进程名（exec -a "osu!"）会
+// 与并行跑的其他包的真实收集互相污染，不在测试里造。
+func TestEnsureClearForkPerForkNames(t *testing.T) {
+	self := filepath.Base(os.Args[0])
+	g := NewGuard([]string{self})
+	// 逐端：已知 fork 只看自己的名单——lazer 名单是 ["osu!","osu"]，
+	// 不含测试进程名 → 放行。
+	if err := g.EnsureClearFork("lazer"); err != nil {
+		t.Fatalf("EnsureClearFork(lazer) = %v，期望 nil（名单外进程不拦）", err)
+	}
+	if err := g.EnsureClearFork("delta"); err != nil {
+		t.Fatalf("EnsureClearFork(delta) = %v，期望 nil（delta 无可检测进程名）", err)
+	}
+	// 未注册 fork 回落全名单 → 测试进程自身在名单内 → 拦截。
+	if err := g.EnsureClearFork("ghost-fork"); !errors.Is(err, ErrGameRunning) {
+		t.Fatalf("EnsureClearFork(ghost) = %v，期望 ErrGameRunning（回落全名单）", err)
+	}
+}

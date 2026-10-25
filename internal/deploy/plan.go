@@ -60,7 +60,18 @@ type Plan struct {
 	TargetFork string
 	Target     forks.LibraryRef
 	Items      []PlanItem
+	// Intersection 全局交集面（§0-B3/G6）：本计划写入的数据必须满足的全部
+	// 目标端（含 TargetFork 自身，含一轮同步中因运行中被跳过的端）。执行期
+	// 对 Intersection 中每端做静态兼容性判定——任一端拒绝，所有端都不写。
+	// 空 = 仅 TargetFork（BuildPlan/手工计划的旧行为）。
+	Intersection []string
 }
+
+// IntersectionRejectPrefix 全局交集排除的 skip 原因前缀（§0-B3/G6）：
+// 目标端自身的拒绝保持原有原因文本；只有「因其他 peer 端不支持」被拒的
+// 项以本前缀开头（appsvc 据此把该项计入「不支持」待处理计数）。
+// 完整原因形态：「全局交集排除：<fork> 不支持 — <原规则原因>」。
+const IntersectionRejectPrefix = "全局交集排除："
 
 // NewPlan 构造并校验计划：targetFork 非空；skip 项必须带原因；同一
 // (Kind, ContentKey) 不得重复；Restore 项必须为 create 动作（恢复语义 =
@@ -116,8 +127,10 @@ type BuildOptions struct {
 
 // BuildPlan 从 hub 对账结果构建默认投放计划（§3.2 计划 / §6.2 默认勾选）：
 // hub diff（ReconcileAgainst，当前版本差集）− 目标 tombstone 命中（恢复组
-// 默认排除，仅 RestoreKeys 显式勾选者进入）− 需确认项。conflict → update
-//（默认 hub 覆盖目标，§5.4 方向模型）。
+// 默认排除，仅 RestoreKeys 显式勾选者进入）− 需确认项。conflict → skip
+//（§0-B4 判不准不动：各端取值不同、无三方基线裁决（G7 待办），默认保留
+// 差异不落地——用户在数据页显式勾选的冲突行仍走 appsvc planItemFrom 的
+// update 手动处置路径）。
 //
 // 施工面：收藏夹（M1，§5.1 最安全首投放路径）+ 谱面集（M2 create/update +
 // 版本更新整集原子替换，§5.4 三步）+ 皮肤（M2，§5.1）。其他实体类型返回
@@ -171,12 +184,14 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 					Restore:    ri.Restorable,
 				})
 			case hub.ReconcileConflict:
-				// 默认方向 = hub 覆盖目标（就地更新白名单列，保目标 Guid，§5.4）。
+				// §0-B4 判不准不动：冲突项默认不落地（无三方基线裁决，G7
+				// 待办）；用户在数据页显式勾选的冲突行走 appsvc 手动处置。
 				planItems = append(planItems, PlanItem{
 					Kind:       ri.Kind,
 					ContentKey: ri.ContentKey,
-					Action:     ActionUpdate,
+					Action:     ActionSkip,
 					Summary:    collectionSummary(ri.ContentKey),
+					SkipReason: skipReasonConflict,
 				})
 			case hub.ReconcileVersionUpdate:
 				// 收藏夹无版本链 / 谱面身份键，ReconcileAgainst 对 collection 不产
@@ -214,8 +229,9 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 				planItems = append(planItems, PlanItem{
 					Kind:       ri.Kind,
 					ContentKey: ri.ContentKey,
-					Action:     ActionUpdate,
+					Action:     ActionSkip,
 					Summary:    beatmapSetSummary(ri.ContentKey),
+					SkipReason: skipReasonConflict,
 				})
 			case hub.ReconcileVersionUpdate:
 				// 版本更新 = 整集原子替换（§5.4 三步）。OnlineID 强键默认
@@ -273,12 +289,12 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 				Restore:    sr.restorable,
 			})
 		case hub.ReconcileConflict:
-			// 默认方向 = hub 覆盖目标（就地更新白名单列，保目标 Guid，§5.4）。
 			planItems = append(planItems, PlanItem{
 				Kind:       hub.KindSkin,
 				ContentKey: sr.contentKey,
-				Action:     ActionUpdate,
+				Action:     ActionSkip,
 				Summary:    skinSummary(sr.name),
+				SkipReason: skipReasonConflict,
 			})
 		default:
 			return Plan{}, fmt.Errorf("deploy: 皮肤对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.category, sr.contentKey)
@@ -304,8 +320,9 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 			planItems = append(planItems, PlanItem{
 				Kind:       sr.Kind,
 				ContentKey: sr.ContentKey,
-				Action:     ActionUpdate,
+				Action:     ActionSkip,
 				Summary:    sr.Summary,
+				SkipReason: skipReasonConflict,
 			})
 		default:
 			return Plan{}, fmt.Errorf("deploy: %s 对账出现 %q 分类（键 %s），属工具缺陷请报告", sr.Kind, sr.Category, sr.ContentKey)
@@ -328,6 +345,19 @@ func BuildPlan(ctx context.Context, h *hub.Store, target forks.LibraryRef, opts 
 	}
 	plan.Target = target
 	return plan, nil
+}
+
+// skipReasonConflict 冲突项的默认跳过原因（§0-B4 判不准不动：各端取值
+// 不同、无三方基线裁决时保留差异）。
+const skipReasonConflict = "冲突：各端取值不同，保留差异（§0 B4）"
+
+// intersectionPeers 计划的全局交集端清单（§0-B3/G6）：Intersection 为空
+// 时仅 TargetFork（旧行为）。
+func intersectionPeers(plan Plan) []string {
+	if len(plan.Intersection) == 0 {
+		return []string{plan.TargetFork}
+	}
+	return plan.Intersection
 }
 
 // planHasSetAction 计划是否含谱面集动作项（gimmick 检测的触发条件）。

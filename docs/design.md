@@ -79,12 +79,12 @@ LZSync 本体是一座**收全的仓库**（hub），每个 fork 都是它的导
 
 | # | 差距 | 现状 |
 |---|------|------|
-| G1 | 设置持久化：注册表、端角色（B9）、板块开关（B8）落 `config.json`，设置页可编辑 | 注册表为内存态（appsvc `registry`），设置页只读 |
-| G2 | 一轮同步编排（§0.4）+ 顶栏同步按钮 | 只有逐端手动拉取 + 单计划投放；`plan.json` 只容一份计划，数据页对各端并发 `BuildPlan` 互相覆盖且不执行 |
-| G3 | 逐端守卫（B11） | `guardClear` 任一游戏运行即全局拒绝 |
-| G4 | 收集只增不改（B2）；仅目标端只刷快照、仅来源端不回链（B9） | hub upsert 整行覆盖并改写 `origin_fork`（HB3） |
-| G5 | 冲突默认不动（B4） | 冲突项默认勾选、动作 = hub 覆盖目标（`planItemFrom` conflict → update） |
-| G6 | 全局交集（B3） | 兼容规则按（源, 目标）逐对判定 |
+| G1 | 设置持久化：注册表、端角色（B9）、板块开关（B8）落 `config.json`，设置页可编辑 | ✅ 2026-10-26 已落地（`appsvc/config.go`）；原状：注册表为内存态（appsvc `registry`），设置页只读 |
+| G2 | 一轮同步编排（§0.4）+ 顶栏同步按钮 | ✅ 2026-10-26 已落地（`appsvc/run.go` PrepareRun/PrepareSelected/CommitRun + 顶栏按钮）；过渡：自动计划只含补缺，版本更新计入「需确认」待 G7；原状：只有逐端手动拉取 + 单计划投放；`plan.json` 只容一份计划，数据页对各端并发 `BuildPlan` 互相覆盖且不执行 |
+| G3 | 逐端守卫（B11） | ✅ 2026-10-26 已落地（`guard.EnsureClearFork`）；原状：`guardClear` 任一游戏运行即全局拒绝 |
+| G4 | 收集只增不改（B2）；仅目标端只刷快照、仅来源端不回链（B9） | ✅ 2026-10-26 已落地（insert-if-absent、`collect.Mode`、`Snapshot.Kinds/PresenceOnly`）；原状：hub upsert 整行覆盖并改写 `origin_fork`（HB3） |
+| G5 | 冲突默认不动（B4） | ✅ 2026-10-26 已落地（冲突默认不勾、`deploy.BuildPlan` 冲突→skip；数据页显式勾选 = 选定 hub 变体）；原状：冲突项默认勾选、动作 = hub 覆盖目标（`planItemFrom` conflict → update） |
+| G6 | 全局交集（B3） | ✅ 2026-10-26 已落地（`Plan.Intersection`：成绩/Mod 预设/键位枚举域/game.ini 键）；原状：兼容规则按（源, 目标）逐对判定 |
 | G7 | 基线表 + 三方判定（§0.3）；键位同步身份改三段键、值为组合集合；收藏逐成员；版本链退为历史 | 对账 = canonical vs 目标 presence；键位内容键含 KeyCombination；当前版本由收集先后决定 |
 | G8 | game.ini 逐键三方 + 交集 | 源 = 快照最新的非目标端（LastWrite 近似） |
 | G9 | S8 判据改为「同 ServerRealm 来源端的 presence 值」 | 依赖 `origin_fork`，B2 后它只代表首见来源 |

@@ -9,11 +9,14 @@ package itests
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"lzsync/internal/collect"
 	"lzsync/internal/deploy"
+	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 )
 
@@ -92,9 +95,11 @@ func TestCollectionFullChainRoundtrip(t *testing.T) {
 	assertCollectionEqual(t, lib, dstRef.RealmPath, fav1)
 	assertCollectionEqual(t, lib, dstRef.RealmPath, fav2)
 
-	// ⑤ 冲突→update 半链：收集目标库（presence 建立、canonical 幂等）→
-	// 第三方 fork 收集同名异值收藏（HB3 整行覆盖）→ 对账冲突 → update 投放
-	// → 目标 Guid 保持、成员/时间戳更新为 canonical。
+	// ⑤ 冲突→update 半链（§0-B2/B4：canonical 首见即定——第三方 fork 收
+	// 集的同名异值收藏不改 canonical 且 BuildPlan 冲突默认不落地；update
+	// 覆盖路径由显式构造的动作项承载，「canonical 为新值」场景换第二个
+	// hub 重演）：收集目标库（presence 建立）→ g0v0 收集进 hub2 → 显式
+	// update 计划投放 → 目标 Guid 保持、成员/时间戳更新为 canonical。
 	e.collectInto(dstRef)
 	fav1v2 := hub.Collection{
 		ID: "33333333-3333-3333-3333-333333333333", Name: "满配夹",
@@ -103,16 +108,28 @@ func TestCollectionFullChainRoundtrip(t *testing.T) {
 	}
 	src2 := buildFullLib(t, lib, "g0v0")
 	seedFullCollection(t, lib, src2.RealmPath, fav1v2)
-	e.collectInto(src2)
-
-	plan2, err := deploy.BuildPlan(ctx, e.hub, dstRef, deploy.BuildOptions{})
+	h2, err := hub.Open(filepath.Join(t.TempDir(), "hub2.db"))
 	if err != nil {
-		t.Fatalf("BuildPlan#2: %v", err)
+		t.Fatalf("hub.Open(h2): %v", err)
 	}
-	if len(plan2.Items) != 1 || plan2.Items[0].Action != deploy.ActionUpdate {
-		t.Fatalf("计划#2 = %+v，期望仅「满配夹」update", plan2.Items)
+	defer h2.Close()
+	if _, err := collect.NewRunner(collect.Deps{
+		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: guard.NewGuard(nil),
+	}).Collect(ctx, src2, nil); err != nil {
+		t.Fatalf("h2 收集 g0v0: %v", err)
 	}
-	report2, err := e.deployRunner().Deploy(ctx, plan2, nil)
+
+	plan2, err := deploy.NewPlan(dstRef.ForkID, []deploy.PlanItem{{
+		Kind: hub.KindCollection, ContentKey: "满配夹",
+		Action: deploy.ActionUpdate, Summary: "收藏夹「满配夹」",
+	}})
+	if err != nil {
+		t.Fatalf("NewPlan#2: %v", err)
+	}
+	plan2.Target = dstRef
+	report2, err := deploy.NewRunner(deploy.Deps{
+		Hub: h2, Backups: e.backups, Guard: guard.NewGuard(nil),
+	}).Deploy(ctx, plan2, nil)
 	if err != nil {
 		t.Fatalf("Deploy#2: %v", err)
 	}

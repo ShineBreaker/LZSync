@@ -10,8 +10,10 @@ const SchemaVersion = 3
 //     「最新」只认链尾；历史版本行永久保留、永不进入投放计划。
 //   - HB2 presence/tombstone：presence 按 fork 整段重写（快照语义，天然
 //     幂等）；重写前与上次快照差集生成 tombstone，同键重现即清除。
-//   - HB3 origin_fork：实体 upsert 整行覆盖并随行更新来源 fork；派生
-//     origin_realm（= ForkProfile.ServerRealm）供 S8 判定。
+//   - origin_fork/origin_guid：首见即定（§0-B2，insert-if-absent；HB3 的
+//     整行覆盖与随行更新已废止——后到端取值留在 presence.local_values）；
+//     派生 origin_realm（= ForkProfile.ServerRealm）供 S8 判定（B2 后它
+//     只代表首见来源，G9 待办）。
 //   - 仓清单 file：store/ 是否持有该哈希，收集/投放后更新。
 //
 // 实体行的规范字段载荷存 payload 列（中立 DTO JSON）；M2 若需字段级 SQL

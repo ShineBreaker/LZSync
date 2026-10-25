@@ -81,6 +81,33 @@ export interface ForkPresenceEntry {
   CollectedAt: number;
 }
 
+/** ForkRole 单端的同步角色（§0 来源端/目标端）。 */
+export interface ForkRole {
+  ForkID: string;
+  RealmPath: string;
+  /** 拉取：该端数据进 hub */
+  Source: boolean;
+  /** 写入：hub 数据投放到该端 */
+  Target: boolean;
+}
+
+/** ForkRunReport 单端的一轮执行摘要（收集/投放报告指针，nil = 未走到该步）。 */
+export interface ForkRunReport {
+  ForkID: string;
+  /** 本轮按角色拉取 */
+  Source: boolean;
+  /** 本轮按角色写入 */
+  Target: boolean;
+  /** 守卫/收集跳过（本轮不读不写） */
+  Skipped: boolean;
+  SkipReason: string;
+  /** 首轮收集；写入成功的目标端为投放后重收集 */
+  Collect: Report | null;
+  Deploy: DeployReport | null;
+  /** 投放/收尾失败（如实记录，不阻断其余目标端） */
+  Error: string;
+}
+
 export interface GameIniResult {
   Applied: Record<string, string>;
   Skipped: InisettingsSkipStat[];
@@ -143,10 +170,23 @@ export interface LibraryRef {
   ForkRev: number;
 }
 
+/** PendingSummary 一轮同步的待处理计数（§0-B4/B5/B6：绝不自动落地的行）。 */
+export interface PendingSummary {
+  /** 冲突：多端取值不同（B5 无歧义检查拦下的 create 也在此计） */
+  Conflicts: number;
+  /** 需确认：版本更新（P1 一律不自动执行） */
+  NeedsConfirm: number;
+  /** 恢复组（tombstone 命中的已删除项） */
+  Restore: number;
+  /** 不支持：全局交集排除等兼容跳过（CommitRun 后累加） */
+  Unsupported: number;
+}
+
 export interface Plan {
   TargetFork: string;
   Target: LibraryRef;
   Items: PlanItem[];
+  Intersection: string[];
 }
 
 export interface PlanItem {
@@ -188,6 +228,44 @@ export interface Report {
   IniKeysCollected: number;
 }
 
+/**
+ * RunPreview PrepareRun/PrepareSelected 的返回：runID + 逐目标端预览 +
+ * 跳过端 + 待处理计数。
+ */
+export interface RunPreview {
+  RunID: string;
+  Targets: RunTargetPreview[];
+  Skipped: RunSkippedFork[];
+  Pending: PendingSummary;
+}
+
+/** RunReport CommitRun 的执行摘要。 */
+export interface RunReport {
+  Forks: ForkRunReport[];
+  Pending: PendingSummary;
+}
+
+/** RunSkippedFork 本轮被跳过的端（运行中/收集失败等），携原因。 */
+export interface RunSkippedFork {
+  ForkID: string;
+  Reason: string;
+}
+
+/** RunTargetPreview 单个目标端的预览（将写入的动作项数，不含 skip）。 */
+export interface RunTargetPreview {
+  ForkID: string;
+  Items: number;
+}
+
+/** Section 同步板块（§0 设置页「同步范围」的板块开关维度）。 */
+export type Section = "beatmap_set" | "collection" | "skin" | "score" | "key_binding" | "ruleset_setting" | "mod_preset" | "game_ini";
+
+/** SectionToggle 板块开关（前端形态）。 */
+export interface SectionToggle {
+  Section: Section;
+  Enabled: boolean;
+}
+
 /** Selection 预览页勾选结果的一项（类型 + 内容键）。 */
 export interface Selection {
   Kind: EntityKind;
@@ -223,6 +301,12 @@ export interface SkipStat {
   Count: number;
 }
 
+/** SyncScope 一轮同步的范围（返回前端的形态，Forks 按 ForkID 排序）。 */
+export interface SyncScope {
+  Sections: SectionToggle[];
+  Forks: ForkRole[];
+}
+
 /** SyncStatus 长任务运行状态（执行页轮询）。 */
 export interface SyncStatus {
   Busy: boolean;
@@ -252,11 +336,18 @@ export const LibraryService = {
   register(path: string): Promise<LibraryRef> {
     return call("LibraryService.Register", path);
   },
-  /** Remove 解除管理（不碰磁盘）。 */
+  /**
+   * Remove 解除管理（不碰磁盘）：配置条目删除并把 RealmPath 记入 ignored，
+   * 自动发现不再加回（§0-G1；之后 Register 同路径会重新注册并摘除
+   * ignored 标记）。
+   */
   remove(forkID: string): Promise<void> {
     return call("LibraryService.Remove", forkID);
   },
-  /** Scan 扫描数据根（§6.1 自动发现），发现的库自动并入注册表。 */
+  /**
+   * Scan 扫描数据根（§6.1 自动发现）：不在配置且不在 ignored 的发现追加为
+   * 拉取+写入双角色并落盘；ignored 路径（用户 Remove 过的）不再加回。
+   */
   scan(): Promise<LibraryRef[]> {
     return call("LibraryService.Scan");
   },
@@ -327,9 +418,37 @@ export const SyncService = {
   collect(forkID: string): Promise<Report> {
     return call("SyncService.Collect", forkID);
   },
+  /**
+   * CommitRun 执行已准备的一轮（§0.4 步骤 6-7）：逐目标端投放（一端失败
+   * 记 Error 继续下一端）→ game.ini 按交集随后（板块开且有来源快照，源从
+   * Source 端中挑最新快照）→ 对写入成功的目标端按原 Mode 重收集刷新快照。
+   * 未知/过期 runID → 错误「请重新同步」。
+   */
+  commitRun(runID: string): Promise<RunReport> {
+    return call("SyncService.CommitRun", runID);
+  },
   /** DeployCurrentPlan 执行当前计划（§6.3 投放执行：守卫 → 备份 → 批事务）。 */
   deployCurrentPlan(): Promise<DeployReport> {
     return call("SyncService.DeployCurrentPlan");
+  },
+  /**
+   * PrepareRun 准备一轮同步（§0.4 步骤 1-4）：参与端 = 已注册且 Source||Target；
+   * 逐端守卫（运行中 → 跳过，本轮不读不写）；按角色选 Mode、按开启板块圈定
+   * Kinds 逐端收集；对每个未跳过的目标端预演 —— 只取 create 且非恢复组的项
+   * 入计划（冲突/版本更新/恢复计入 Pending，B4/B5/B6）。计划保存在内存
+   * （只保留最新一轮），CommitRun 凭 runID 执行。
+   */
+  prepareRun(): Promise<RunPreview> {
+    return call("SyncService.PrepareRun");
+  },
+  /**
+   * PrepareSelected 数据页勾选触发的一轮：计划只含 sel 中的项；sel 中的
+   * 冲突（→update）、恢复（Restore）、弱键版本（NeedsConfirm）视为用户
+   * 显式处置，允许入计划；仍受板块开关、目标角色与全局交集约束。不在任何
+   * 目标端预演中的勾选按「快照过期」记 skip 项。
+   */
+  prepareSelected(sel: Selection[]): Promise<RunPreview> {
+    return call("SyncService.PrepareSelected", sel);
   },
   /** RestoreBackup 从备份还原（guard.Backups 委托；还原前自动再备份）。 */
   restoreBackup(forkID: string, backupPath: string): Promise<void> {
@@ -359,6 +478,17 @@ export const SettingsService = {
   /** Get 组装设置页数据（§6.4 M1 骨架，只读显示）。 */
   get(): Promise<SettingsInfo> {
     return call("SettingsService.Get");
+  },
+  /** GetSyncScope 同步范围（§0-G1）。 */
+  getSyncScope(): Promise<SyncScope> {
+    return call("SettingsService.GetSyncScope");
+  },
+  /**
+   * SetSyncScope 校验并持久化同步范围：未知板块报错；未注册端报错；落盘
+   * 走配置原子写（configStore.applyScope）。
+   */
+  setSyncScope(scope: SyncScope): Promise<void> {
+    return call("SettingsService.SetSyncScope", scope);
   },
 } as const;
 

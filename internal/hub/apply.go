@@ -12,6 +12,16 @@ import (
 // Snapshot 是一次收集投影的完整入仓载荷（§3.2 收集步骤②）。
 // 「投影完整成功」是生成 tombstone 的前置条件：部分失败/中断的收集不得
 // 构造本结构落库（防误标删除，HB2）。
+//
+// Kinds 圈定本次快照覆盖的实体类（nil = 全部七类）：非 nil 时未包含的
+// kind 完全不受触碰——不插实体行、不重写 presence、不产生/清除
+// tombstone（§0 板块开关：关掉一个板块不得把该 kind 的既有 presence
+// 误标成「消失」）。注意 beatmap 无独立 presence（难度生命周期挂父集）；
+// presence 侧按七个持有 kind 判定。
+//
+// PresenceOnly = true 时跳过实体插入与身份/版本链维护（效果 1/4），只写
+// presence/tombstone/collect_log——「仅目标」端收集（§0 角色模型）：
+// 目标端的取值留在 presence.local_values，canonical 实体由来源端确立。
 type Snapshot struct {
 	ForkID      string
 	CollectedAt time.Time
@@ -25,7 +35,9 @@ type Snapshot struct {
 	KeyBindings     []KeyBinding
 	RulesetSettings []RulesetSetting
 	ModPresets      []ModPreset
-	Skips           []SkipStat // 投影期跳过（进 collect_log）
+	Kinds           map[EntityKind]bool // nil = 全部（见上）
+	PresenceOnly    bool                // 只写 presence/tombstone，不插实体
+	Skips           []SkipStat          // 投影期跳过（进 collect_log）
 }
 
 // ScoreContentKey 把成绩组合内容键 (BeatmapHash, Hash)（§4.2 第一层）
@@ -109,9 +121,11 @@ type ApplyResult struct {
 
 // ApplySnapshot 以单次 SQLite 事务应用一次收集快照（§3.3 收集方向原子性），
 // 五个效果要么完整生效要么整体不生效：
-//  1. 实体 upsert：整行覆盖并随行更新 origin_fork（HB3；origin_guid 仅
-//     首次落库固定——「首次收集时的源 fork Guid」，投放新建行时沿用）；
-//  2. presence 按 fork 整段重写（快照语义，幂等）；
+//  1. 实体 insert-if-absent：canonical payload 与 origin_guid/origin_fork
+//     首见即定（§0-B2；HB3 的整行覆盖已废止——后到端的取值留在该端
+//     presence.local_values，由对账面判定）；
+//  2. presence 按 fork 整段重写（快照语义，幂等；Snapshot.Kinds 非 nil 时
+//     只重写圈定 kind）；
 //  3. 与上次快照差集生成 tombstone——被版本链取代的消失键除外（HB2）；
 //  4. 经 beatmap_identity 配对维护版本链 superseded_by（HB1，先于差集
 //     判定执行，使「被取代的消失」可识别）；
@@ -134,63 +148,112 @@ func (s *Store) ApplySnapshot(ctx context.Context, snap Snapshot) (ApplyResult, 
 		}
 	}()
 
-	// 效果 1 + 4：实体 upsert 与身份/版本链维护（HB1/HB3）。
-	for i := range snap.Collections {
-		if err := upsertCollection(ctx, tx, &snap.Collections[i], snap.ForkID, now); err != nil {
-			return res, err
-		}
-		res.EntitiesWritten[KindCollection]++
-	}
-	for i := range snap.BeatmapSets {
-		bs := &snap.BeatmapSets[i]
-		if err := upsertBeatmapSet(ctx, tx, bs, snap.ForkID, now); err != nil {
-			return res, err
-		}
-		for j := range bs.Beatmaps {
-			if err := upsertBeatmap(ctx, tx, &bs.Beatmaps[j], bs.Hash, now); err != nil {
-				return res, err
-			}
-			res.EntitiesWritten[KindBeatmap]++
-		}
-		res.EntitiesWritten[KindBeatmapSet]++
-		links, err := maintainIdentity(ctx, tx, bs, now)
-		if err != nil {
-			return res, err
-		}
-		res.VersionLinksCreated += int(links)
-	}
-	for i := range snap.Skins {
-		if err := upsertSkin(ctx, tx, &snap.Skins[i], snap.ForkID, now); err != nil {
-			return res, err
-		}
-		res.EntitiesWritten[KindSkin]++
-	}
-	for i := range snap.Scores {
-		if err := upsertScore(ctx, tx, &snap.Scores[i], snap.ForkID, now); err != nil {
-			return res, err
-		}
-		res.EntitiesWritten[KindScore]++
-	}
-	for i := range snap.KeyBindings {
-		if err := upsertKeyBinding(ctx, tx, &snap.KeyBindings[i], snap.ForkID, now); err != nil {
-			return res, err
-		}
-		res.EntitiesWritten[KindKeyBinding]++
-	}
-	for i := range snap.RulesetSettings {
-		if err := upsertRulesetSetting(ctx, tx, &snap.RulesetSettings[i], snap.ForkID, now); err != nil {
-			return res, err
-		}
-		res.EntitiesWritten[KindRulesetSetting]++
-	}
-	for i := range snap.ModPresets {
-		if err := upsertModPreset(ctx, tx, &snap.ModPresets[i], snap.ForkID, now); err != nil {
-			return res, err
-		}
-		res.EntitiesWritten[KindModPreset]++
+	// included 圈定实体写入与 presence 重写的 kind 面（Kinds 非 nil 时）。
+	included := func(k EntityKind) bool {
+		return snap.Kinds == nil || snap.Kinds[k]
 	}
 
-	// 效果 2 + 3：presence 整段重写 + 差集 tombstone（HB2）。
+	if !snap.PresenceOnly {
+		// 效果 1 + 4：实体 insert-if-absent 与身份/版本链维护（HB1、§0-B2）。
+		// EntitiesWritten 只计实际新插入的行（ON CONFLICT DO NOTHING 的
+		// RowsAffected）——首见即定后重复收集自然计 0。
+		if included(KindCollection) {
+			for i := range snap.Collections {
+				ins, err := insertCollection(ctx, tx, &snap.Collections[i], snap.ForkID, now)
+				if err != nil {
+					return res, err
+				}
+				if ins {
+					res.EntitiesWritten[KindCollection]++
+				}
+			}
+		}
+		if included(KindBeatmapSet) {
+			for i := range snap.BeatmapSets {
+				bs := &snap.BeatmapSets[i]
+				ins, err := insertBeatmapSet(ctx, tx, bs, snap.ForkID, now)
+				if err != nil {
+					return res, err
+				}
+				if included(KindBeatmap) {
+					for j := range bs.Beatmaps {
+						bmIns, err := insertBeatmap(ctx, tx, &bs.Beatmaps[j], bs.Hash, now)
+						if err != nil {
+							return res, err
+						}
+						if bmIns {
+							res.EntitiesWritten[KindBeatmap]++
+						}
+					}
+				}
+				if ins {
+					res.EntitiesWritten[KindBeatmapSet]++
+				}
+				links, err := maintainIdentity(ctx, tx, bs, now)
+				if err != nil {
+					return res, err
+				}
+				res.VersionLinksCreated += int(links)
+			}
+		}
+		if included(KindSkin) {
+			for i := range snap.Skins {
+				ins, err := insertSkin(ctx, tx, &snap.Skins[i], snap.ForkID, now)
+				if err != nil {
+					return res, err
+				}
+				if ins {
+					res.EntitiesWritten[KindSkin]++
+				}
+			}
+		}
+		if included(KindScore) {
+			for i := range snap.Scores {
+				ins, err := insertScore(ctx, tx, &snap.Scores[i], snap.ForkID, now)
+				if err != nil {
+					return res, err
+				}
+				if ins {
+					res.EntitiesWritten[KindScore]++
+				}
+			}
+		}
+		if included(KindKeyBinding) {
+			for i := range snap.KeyBindings {
+				ins, err := insertKeyBinding(ctx, tx, &snap.KeyBindings[i], snap.ForkID, now)
+				if err != nil {
+					return res, err
+				}
+				if ins {
+					res.EntitiesWritten[KindKeyBinding]++
+				}
+			}
+		}
+		if included(KindRulesetSetting) {
+			for i := range snap.RulesetSettings {
+				ins, err := insertRulesetSetting(ctx, tx, &snap.RulesetSettings[i], snap.ForkID, now)
+				if err != nil {
+					return res, err
+				}
+				if ins {
+					res.EntitiesWritten[KindRulesetSetting]++
+				}
+			}
+		}
+		if included(KindModPreset) {
+			for i := range snap.ModPresets {
+				ins, err := insertModPreset(ctx, tx, &snap.ModPresets[i], snap.ForkID, now)
+				if err != nil {
+					return res, err
+				}
+				if ins {
+					res.EntitiesWritten[KindModPreset]++
+				}
+			}
+		}
+	}
+
+	// 效果 2 + 3：presence 整段重写 + 差集 tombstone（HB2；Kinds 圈定）。
 	added, cleared, err := rewritePresence(ctx, tx, &snap, now)
 	if err != nil {
 		return res, err
@@ -219,114 +282,140 @@ VALUES(?,?,?,?,?)`, snap.ForkID, now, string(countsJSON), string(skipsJSON), res
 	return res, nil
 }
 
-// upsertCollection 收藏夹实体行（内容键 = Name）。HB3：payload 与
-// origin_fork 整行覆盖；origin_guid 仅首次插入落库（冲突更新不含该列）。
-func upsertCollection(ctx context.Context, tx *sql.Tx, c *Collection, fork string, now int64) error {
+// insertCollection 收藏夹实体行（内容键 = Name）。§0-B2：payload 与
+// origin_guid/origin_fork 首见即定，同键已存在即不动（HB3 整行覆盖已
+// 废止——后到端的取值留在该端 presence.local_values，由对账面判定）。
+// 返回值 = 是否实际插入。
+func insertCollection(ctx context.Context, tx *sql.Tx, c *Collection, fork string, now int64) (bool, error) {
 	payload, err := json.Marshal(c)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化收藏 %q: %w", c.Name, err)
+		return false, fmt.Errorf("hub: 序列化收藏 %q: %w", c.Name, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO collection(content_key, payload, origin_guid, origin_fork, first_seen, updated_at)
 VALUES(?,?,?,?,?,?)
-ON CONFLICT(content_key) DO UPDATE SET
-  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		c.Name, string(payload), c.ID, fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 收藏 %q: %w", c.Name, err)
+ON CONFLICT(content_key) DO NOTHING`,
+		c.Name, string(payload), c.ID, fork, now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入收藏 %q: %w", c.Name, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计收藏 %q 插入: %w", c.Name, err)
+	}
+	return n > 0, nil
 }
 
-// upsertBeatmapSet 谱面集实体行（内容键 = Hash）。同 HB3 语义；
-// superseded_by 属版本链状态，upsert 不得触碰（历史行永久保留）。
-func upsertBeatmapSet(ctx context.Context, tx *sql.Tx, bs *BeatmapSet, fork string, now int64) error {
+// insertBeatmapSet 谱面集实体行（内容键 = Hash）。同 §0-B2 语义；
+// superseded_by 属版本链状态，插入恒 NULL（历史行永久保留）。
+func insertBeatmapSet(ctx context.Context, tx *sql.Tx, bs *BeatmapSet, fork string, now int64) (bool, error) {
 	payload, err := json.Marshal(bs)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化谱面集 %q: %w", bs.Hash, err)
+		return false, fmt.Errorf("hub: 序列化谱面集 %q: %w", bs.Hash, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO beatmap_set(content_hash, payload, origin_guid, origin_fork, superseded_by, first_seen, updated_at)
 VALUES(?,?,?,?,NULL,?,?)
-ON CONFLICT(content_hash) DO UPDATE SET
-  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		bs.Hash, string(payload), bs.ID, fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 谱面集 %q: %w", bs.Hash, err)
+ON CONFLICT(content_hash) DO NOTHING`,
+		bs.Hash, string(payload), bs.ID, fork, now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入谱面集 %q: %w", bs.Hash, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计谱面集 %q 插入: %w", bs.Hash, err)
+	}
+	return n > 0, nil
 }
 
-// upsertBeatmap 难度行（内容键 = Hash，随父集维护 set_hash）。难度不做
-// presence / 版本链：整集按一个版本处理（§4.2 第二层末段）。
-func upsertBeatmap(ctx context.Context, tx *sql.Tx, bm *Beatmap, setHash string, now int64) error {
+// insertBeatmap 难度行（内容键 = Hash，随父集维护 set_hash）。同 §0-B2
+// 语义；难度不做 presence / 版本链：整集按一个版本处理（§4.2 第二层末段）。
+func insertBeatmap(ctx context.Context, tx *sql.Tx, bm *Beatmap, setHash string, now int64) (bool, error) {
 	payload, err := json.Marshal(bm)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化难度 %q: %w", bm.Hash, err)
+		return false, fmt.Errorf("hub: 序列化难度 %q: %w", bm.Hash, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO beatmap(content_hash, set_hash, payload, first_seen, updated_at)
 VALUES(?,?,?,?,?)
-ON CONFLICT(content_hash) DO UPDATE SET
-  set_hash=excluded.set_hash, payload=excluded.payload, updated_at=excluded.updated_at`,
-		bm.Hash, setHash, string(payload), now, now); err != nil {
-		return fmt.Errorf("hub: upsert 难度 %q: %w", bm.Hash, err)
+ON CONFLICT(content_hash) DO NOTHING`,
+		bm.Hash, setHash, string(payload), now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入难度 %q: %w", bm.Hash, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计难度 %q 插入: %w", bm.Hash, err)
+	}
+	return n > 0, nil
 }
 
-// upsertSkin 皮肤实体行（内容键 = Hash，v2）。同 HB3 语义：payload 与
-// origin_fork 整行覆盖；origin_guid 仅首次插入落库。
-func upsertSkin(ctx context.Context, tx *sql.Tx, sk *Skin, fork string, now int64) error {
+// insertSkin 皮肤实体行（内容键 = Hash，v2）。同 §0-B2 语义。
+func insertSkin(ctx context.Context, tx *sql.Tx, sk *Skin, fork string, now int64) (bool, error) {
 	payload, err := json.Marshal(sk)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化皮肤 %q: %w", sk.Hash, err)
+		return false, fmt.Errorf("hub: 序列化皮肤 %q: %w", sk.Hash, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO skin(content_hash, payload, origin_guid, origin_fork, first_seen, updated_at)
 VALUES(?,?,?,?,?,?)
-ON CONFLICT(content_hash) DO UPDATE SET
-  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		sk.Hash, string(payload), sk.ID, fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 皮肤 %q: %w", sk.Hash, err)
+ON CONFLICT(content_hash) DO NOTHING`,
+		sk.Hash, string(payload), sk.ID, fork, now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入皮肤 %q: %w", sk.Hash, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计皮肤 %q 插入: %w", sk.Hash, err)
+	}
+	return n > 0, nil
 }
 
-// upsertScore 成绩实体行（组合内容键 = (BeatmapHash, Hash)，v2）。同 HB3
-// 语义；皮肤/成绩无版本链语义（superseded_by 是 beatmap_set 专属，HB1）。
-func upsertScore(ctx context.Context, tx *sql.Tx, sc *Score, fork string, now int64) error {
+// insertScore 成绩实体行（组合内容键 = (BeatmapHash, Hash)，v2）。同
+// §0-B2 语义；皮肤/成绩无版本链语义（superseded_by 是 beatmap_set 专属，
+// HB1）。
+func insertScore(ctx context.Context, tx *sql.Tx, sc *Score, fork string, now int64) (bool, error) {
 	payload, err := json.Marshal(sc)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化成绩 %q: %w", ScoreContentKey(sc.BeatmapHash, sc.Hash), err)
+		return false, fmt.Errorf("hub: 序列化成绩 %q: %w", ScoreContentKey(sc.BeatmapHash, sc.Hash), err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO score(beatmap_hash, content_hash, payload, origin_guid, origin_fork, first_seen, updated_at)
 VALUES(?,?,?,?,?,?,?)
-ON CONFLICT(beatmap_hash, content_hash) DO UPDATE SET
-  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		sc.BeatmapHash, sc.Hash, string(payload), sc.ID, fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 成绩 %q: %w", ScoreContentKey(sc.BeatmapHash, sc.Hash), err)
+ON CONFLICT(beatmap_hash, content_hash) DO NOTHING`,
+		sc.BeatmapHash, sc.Hash, string(payload), sc.ID, fork, now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入成绩 %q: %w", ScoreContentKey(sc.BeatmapHash, sc.Hash), err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计成绩 %q 插入: %w", ScoreContentKey(sc.BeatmapHash, sc.Hash), err)
+	}
+	return n > 0, nil
 }
 
-// upsertKeyBinding 键位实体行（v3，组合内容键 = (RulesetName, Variant,
+// insertKeyBinding 键位实体行（v3，组合内容键 = (RulesetName, Variant,
 // ActionInt, KeyCombination)；NULL 语义段归一化哨兵见 ddlV3 注释）。
-// 同 HB3 语义。
-func upsertKeyBinding(ctx context.Context, tx *sql.Tx, kb *KeyBinding, fork string, now int64) error {
+// 同 §0-B2 语义。
+func insertKeyBinding(ctx context.Context, tx *sql.Tx, kb *KeyBinding, fork string, now int64) (bool, error) {
 	payload, err := json.Marshal(kb)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), err)
+		return false, fmt.Errorf("hub: 序列化键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), err)
 	}
 	rulesetName, variant := keyBindingKeyCols(kb.RulesetName, kb.Variant)
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO key_binding(ruleset_name, variant, action_int, key_combination, payload, origin_guid, origin_fork, first_seen, updated_at)
 VALUES(?,?,?,?,?,?,?,?,?)
-ON CONFLICT(ruleset_name, variant, action_int, key_combination) DO UPDATE SET
-  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		rulesetName, variant, kb.ActionInt, kb.KeyCombination, string(payload), kb.ID, fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), err)
+ON CONFLICT(ruleset_name, variant, action_int, key_combination) DO NOTHING`,
+		rulesetName, variant, kb.ActionInt, kb.KeyCombination, string(payload), kb.ID, fork, now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入键位 %q: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计键位 %q 插入: %w", KeyBindingContentKey(kb.RulesetName, kb.Variant, kb.ActionInt, kb.KeyCombination), err)
+	}
+	return n > 0, nil
 }
 
 // keyBindingKeyCols 键位可空键段的表列归一化（nil → ”/-1 哨兵）。
@@ -342,40 +431,48 @@ func keyBindingKeyCols(rulesetName *string, variant *int) (string, int64) {
 	return name, v
 }
 
-// upsertRulesetSetting 规则集设置实体行（v3，组合内容键 = (RulesetName,
-// Variant, Key)；realm 侧无 Guid 列，origin_guid 不设）。同 HB3 语义。
-func upsertRulesetSetting(ctx context.Context, tx *sql.Tx, rs *RulesetSetting, fork string, now int64) error {
+// insertRulesetSetting 规则集设置实体行（v3，组合内容键 = (RulesetName,
+// Variant, Key)；realm 侧无 Guid 列，origin_guid 不设）。同 §0-B2 语义。
+func insertRulesetSetting(ctx context.Context, tx *sql.Tx, rs *RulesetSetting, fork string, now int64) (bool, error) {
 	payload, err := json.Marshal(rs)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化规则集设置 %q: %w", RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), err)
+		return false, fmt.Errorf("hub: 序列化规则集设置 %q: %w", RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO ruleset_setting(ruleset_name, variant, key, payload, origin_fork, first_seen, updated_at)
 VALUES(?,?,?,?,?,?,?)
-ON CONFLICT(ruleset_name, variant, key) DO UPDATE SET
-  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		rs.RulesetName, rs.Variant, rs.Key, string(payload), fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 规则集设置 %q: %w", RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), err)
+ON CONFLICT(ruleset_name, variant, key) DO NOTHING`,
+		rs.RulesetName, rs.Variant, rs.Key, string(payload), fork, now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入规则集设置 %q: %w", RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计规则集设置 %q 插入: %w", RulesetSettingContentKey(rs.RulesetName, rs.Variant, rs.Key), err)
+	}
+	return n > 0, nil
 }
 
-// upsertModPreset 模组预设实体行（v3，业务键 = (RulesetShortName, Name)，
-// §4.2 无内容哈希取业务键）。同 HB3 语义。
-func upsertModPreset(ctx context.Context, tx *sql.Tx, mp *ModPreset, fork string, now int64) error {
+// insertModPreset 模组预设实体行（v3，业务键 = (RulesetShortName, Name)，
+// §4.2 无内容哈希取业务键）。同 §0-B2 语义。
+func insertModPreset(ctx context.Context, tx *sql.Tx, mp *ModPreset, fork string, now int64) (bool, error) {
 	payload, err := json.Marshal(mp)
 	if err != nil {
-		return fmt.Errorf("hub: 序列化模组预设 %q: %w", ModPresetContentKey(mp.RulesetShortName, mp.Name), err)
+		return false, fmt.Errorf("hub: 序列化模组预设 %q: %w", ModPresetContentKey(mp.RulesetShortName, mp.Name), err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO mod_preset(ruleset_short_name, name, payload, origin_guid, origin_fork, first_seen, updated_at)
 VALUES(?,?,?,?,?,?,?)
-ON CONFLICT(ruleset_short_name, name) DO UPDATE SET
-  payload=excluded.payload, origin_fork=excluded.origin_fork, updated_at=excluded.updated_at`,
-		mp.RulesetShortName, mp.Name, string(payload), mp.ID, fork, now, now); err != nil {
-		return fmt.Errorf("hub: upsert 模组预设 %q: %w", ModPresetContentKey(mp.RulesetShortName, mp.Name), err)
+ON CONFLICT(ruleset_short_name, name) DO NOTHING`,
+		mp.RulesetShortName, mp.Name, string(payload), mp.ID, fork, now, now)
+	if err != nil {
+		return false, fmt.Errorf("hub: 插入模组预设 %q: %w", ModPresetContentKey(mp.RulesetShortName, mp.Name), err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("hub: 计模组预设 %q 插入: %w", ModPresetContentKey(mp.RulesetShortName, mp.Name), err)
+	}
+	return n > 0, nil
 }
 
 // rewritePresence 按 fork 整段重写各实体类 presence（快照语义，幂等），
@@ -457,6 +554,9 @@ func rewritePresence(ctx context.Context, tx *sql.Tx, snap *Snapshot, now int64)
 	}
 
 	for _, p := range plans {
+		if snap.Kinds != nil && !snap.Kinds[p.kind] {
+			continue // §0 板块开关：未圈定 kind 的 presence/tombstone 原封不动
+		}
 		prev := map[string]bool{}
 		rows, qErr := tx.QueryContext(ctx,
 			`SELECT content_key FROM presence WHERE fork_id=? AND kind=?`, snap.ForkID, p.kind)

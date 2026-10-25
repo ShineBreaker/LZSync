@@ -86,3 +86,79 @@ func (e *Engine) AdoptDir(filesDir string) (AdoptStats, error) {
 	}
 	return stats, nil
 }
+
+// IngestStats 入仓批量结果（collect.ModeSourceOnly 的文件侧口径，与
+// AdoptStats 同风格）。
+type IngestStats struct {
+	Ingested int // 新入仓文件数
+	Existing int // 仓内已有有效副本（跳过复制）
+	Failed   int // 单文件失败数（原文件不动）
+	Skipped  int // 符号链接跳过数（已收仓形态）
+}
+
+// IngestDir 把 filesDir（两级哈希布局）内全部非链接实体文件复制进仓，
+// 绝不改动 fork 侧文件（§0 角色模型「仅来源」端：fork 的 files/ 保持普通
+// 文件且字节不变——与 AdoptDir 的回链写原地不同，本函数只入仓）。
+// 符号链接跳过（已收仓形态）；单文件失败只计数不中止。复制走 Store 的
+// 「同目录临时名 → 读回哈希复核 → rename」纪律，仓内不留半成品。
+func (e *Engine) IngestDir(filesDir string) (IngestStats, error) {
+	var stats IngestStats
+	if e.Store == nil {
+		return stats, ErrNoStore
+	}
+	var physical []string
+	err := filepath.WalkDir(filesDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(filesDir, p)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		if len(parts) != 3 || !validHash(parts[2]) || parts[1] != parts[2][:2] || parts[0] != parts[2][:1] {
+			return nil // 非规范布局项：不属于本引擎管辖，忽略
+		}
+		info, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			stats.Skipped++
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil // 套接字/FIFO 等：不收
+		}
+		physical = append(physical, p)
+		return nil
+	})
+	if err != nil {
+		return stats, fmt.Errorf("filestore: 扫描 files/ %s: %w", filesDir, err)
+	}
+	for _, p := range physical {
+		h, err := hashFile(p)
+		if err != nil {
+			stats.Failed++
+			continue
+		}
+		// 已有有效副本 → 跳过复制；坏副本/缺副本 → 写入即校验的复制。
+		exists := false
+		if _, err := os.Stat(e.Store.Path(h)); err == nil {
+			exists = true
+		}
+		if err := e.Store.put(h, p); err != nil {
+			stats.Failed++
+			continue
+		}
+		if exists {
+			stats.Existing++
+		} else {
+			stats.Ingested++
+		}
+	}
+	return stats, nil
+}

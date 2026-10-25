@@ -133,20 +133,23 @@ func prepareScoreWriter(r *realmc.Realm) (*scoreWriter, error) {
 
 // exec 执行单个成绩计划项（§3.3 执行期现场复核 + §5.4 目标端兼容过滤）。
 // sameRealm 是 S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）；
-// targetFork 驱动 mod/HitResult 白名单（Profile 数据，D7）。restore 标记
-// 恢复项：现场同键行已软删时唯有恢复项才允许写回 DeletePending=false
-//（HB2 删除不复活，皮肤/谱面集/ModPreset 写入器同款）。
-func (w *scoreWriter) exec(sc hub.Score, sameRealm bool, targetFork string, action Action, restore bool) (applied, skipStat, string, error) {
+// targetFork 驱动 mod/HitResult 白名单（Profile 数据，D7）；peers 是全局
+// 交集端清单（§0-B3/G6：全部目标端的白名单判定，任一拒绝整条跳过，
+// StatisticsJson 键按各端名录逐端累积过滤）。restore 标记恢复项：现场
+// 同键行已软删时唯有恢复项才允许写回 DeletePending=false（HB2 删除不
+// 复活，皮肤/谱面集/ModPreset 写入器同款）。
+func (w *scoreWriter) exec(sc hub.Score, sameRealm bool, targetFork string, peers []string, action Action, restore bool) (applied, skipStat, string, error) {
 	if w.absent {
 		// §5.2-1：目标库没有 Score 表。
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
 	}
-	// §5.4-D7：目标端 mod 名录与 HitResult 键白名单。整条拒绝 → 计数
+	// §5.4-D7 + §0-B3：目标端 mod 名录与 HitResult 键白名单，且满足全部
+	// 交集端（任一端拒绝整条跳过；键级过滤逐端累积）。整条拒绝 → 计数
 	// 跳过；键级过滤 → 替换 sc 后续读写共用（重续判定天然对偶），被滤
 	// 键累计入批报告。
 	var reject string
 	var dropped int
-	sc, dropped, reject = adaptScoreForTarget(sc, targetFork)
+	sc, dropped, reject = adaptScoreForIntersection(sc, targetFork, peers)
 	if reject != "" {
 		return applied{}, skipStat{reason: reject, count: 1}, "", nil
 	}

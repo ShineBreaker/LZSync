@@ -42,8 +42,13 @@ func TestReconcileFourCategories(t *testing.T) {
 	V1C := mustSet(t, 77, "V Artist", "V Title", "version one osu", filesC)
 	W1C := mustSet(t, 0, "W Artist", "W Title", "weak one osu", filesC)
 
-	// 收集顺序（HB3 整行覆盖：后收集者成为 canonical）：目标 C 先收 →
-	// G（delta，v2 建链）→ 源 A 最后收（canonical=A 值，与 C presence 成冲突）。
+	// 收集顺序（§0-B2 首见即定：先收集者成为 canonical）：源 A 先收
+	//（canonical=A 值）→ 目标 C 后收（其 StatusInt 只留在自己的
+	// presence → 与 canonical 成冲突）→ G（delta，v2 建链）。
+	refA := buildLib(t, fixture.ForkLazer, fixture.VersionLazer, fixture.Seed{
+		BeatmapSets: []hub.BeatmapSet{SA, CXA, V1, W1, W2}, Files: filesA,
+	})
+	e.collectInto(refA)
 	refC := buildLib(t, fixture.ForkG0v0, fixture.VersionG0v0, fixture.Seed{
 		BeatmapSets: []hub.BeatmapSet{TO, CXC, V1C, W1C}, Files: filesC,
 	})
@@ -52,10 +57,6 @@ func TestReconcileFourCategories(t *testing.T) {
 		BeatmapSets: []hub.BeatmapSet{V2}, Files: filesG,
 	})
 	e.collectInto(refG)
-	refA := buildLib(t, fixture.ForkLazer, fixture.VersionLazer, fixture.Seed{
-		BeatmapSets: []hub.BeatmapSet{SA, CXA, V1, W1, W2}, Files: filesA,
-	})
-	e.collectInto(refA)
 
 	// ---- hub→g0v0 投放预演差异（§4.4 对账语义）----
 	items := e.reconcile(fixture.ForkG0v0, hub.KindBeatmapSet)

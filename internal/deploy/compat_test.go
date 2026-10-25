@@ -335,3 +335,75 @@ func TestAdaptModPresetModsForTarget(t *testing.T) {
 		t.Errorf("ModsJson 解析失败应整条拒绝")
 	}
 }
+
+// --- 全局交集（§0-B3/G6） ---
+
+// TestAdaptScoreForIntersection 成绩交集适配：目标端自身拒绝不加前缀；
+// 因其他 peer（未注册端 = 保守拒绝）被拒 → 原因带 IntersectionRejectPrefix
+// 且点名该端；键过滤按交集逐端累积（四端名录同构时与单端一致）。
+func TestAdaptScoreForIntersection(t *testing.T) {
+	sc := hub.Score{Hash: "sc-x", ModsJson: `[{"acronym":"HD"}]`,
+		StatisticsJson: `{"great":1,"nonstandard_hit":2}`}
+	out, dropped, rej := adaptScoreForIntersection(sc, "lazer", []string{"lazer", "delta"})
+	if rej != "" {
+		t.Fatalf("交集内成绩不应被拒: %q", rej)
+	}
+	if dropped != 1 {
+		t.Errorf("键过滤计数 = %d，期望 1（nonstandard_hit 被滤）", dropped)
+	}
+	if !strings.Contains(out.StatisticsJson, "great") || strings.Contains(out.StatisticsJson, "nonstandard_hit") {
+		t.Errorf("交集过滤后 StatisticsJson = %s，期望只含 great", out.StatisticsJson)
+	}
+	// 目标端自身拒绝：不带前缀（mod 名录外）。
+	scBad := hub.Score{Hash: "sc-y", ModsJson: `[{"acronym":"EZX"}]`}
+	_, _, rej = adaptScoreForIntersection(scBad, "lazer", []string{"lazer", "ghost"})
+	if strings.HasPrefix(rej, IntersectionRejectPrefix) || !strings.Contains(rej, "EZX") {
+		t.Errorf("目标端自身拒绝应不加前缀: %q", rej)
+	}
+	// peer 未注册 → 保守拒绝 + 前缀 + 点名。
+	_, _, rej = adaptScoreForIntersection(sc, "lazer", []string{"lazer", "ghost"})
+	if !strings.HasPrefix(rej, IntersectionRejectPrefix) || !strings.Contains(rej, "ghost") {
+		t.Errorf("peer 未注册拒绝 = %q，期望 %q…ghost…", rej, IntersectionRejectPrefix)
+	}
+}
+
+// TestAdaptModPresetForIntersection 模组预设交集：peer 不认识/未注册 →
+// 前缀拒绝；目标端名录外 mod → 不加前缀。
+func TestAdaptModPresetForIntersection(t *testing.T) {
+	mp := hub.ModPreset{Name: "P", RulesetShortName: "osu", ModsJson: `[{"acronym":"HD"}]`}
+	if r := adaptModPresetForIntersection(mp, "lazer", []string{"lazer", "delta", "g0v0"}); r != "" {
+		t.Fatalf("名录内 mod 交集内应放行: %q", r)
+	}
+	if r := adaptModPresetForIntersection(mp, "lazer", []string{"lazer", "ghost"}); !strings.HasPrefix(r, IntersectionRejectPrefix) {
+		t.Errorf("peer 未注册拒绝 = %q，期望带交集前缀", r)
+	}
+	mp.ModsJson = `[{"acronym":"EZX"}]`
+	if r := adaptModPresetForIntersection(mp, "lazer", []string{"lazer", "ghost"}); strings.HasPrefix(r, IntersectionRejectPrefix) {
+		t.Errorf("目标端自身名录外拒绝不应加前缀: %q", r)
+	}
+}
+
+// TestKeyBindingActionAllowedIntersection 键位交集：ActionInt 超出任一
+// 目标端枚举域即拒。delta 的 GlobalAction 值域上界 99（D20 实测）——
+// ActionInt=100 的全局键位过 lazer 目标端、被 delta peer 拒。
+func TestKeyBindingActionAllowedIntersection(t *testing.T) {
+	kb := hub.KeyBinding{ActionInt: 100, KeyCombination: "Ctrl+K"} // 全局键位
+	if ok, r := keyBindingActionAllowedIntersection("lazer", "lazer", []string{"lazer"}, kb); !ok {
+		t.Fatalf("仅 lazer 交集应放行 ActionInt=100: %q", r)
+	}
+	ok, reason := keyBindingActionAllowedIntersection("lazer", "lazer", []string{"lazer", "delta"}, kb)
+	if ok {
+		t.Fatal("ActionInt=100 越出 delta 枚举域（GlobalMax=99），应被交集拒绝")
+	}
+	if !strings.HasPrefix(reason, IntersectionRejectPrefix) || !strings.Contains(reason, "delta") {
+		t.Errorf("交集拒绝原因 = %q，期望前缀 + 点名 delta", reason)
+	}
+	// 目标端自身域内但源端域外（ActionInt=200 超 lazer GlobalMax=121）→
+	// 不加前缀（源端/目标端判定走原原因文本）。
+	kb2 := hub.KeyBinding{ActionInt: 200, KeyCombination: "Ctrl+K"}
+	if ok, r := keyBindingActionAllowedIntersection("lazer", "lazer", []string{"lazer", "delta"}, kb2); ok {
+		t.Fatal("ActionInt=200 应被源端枚举域拒绝")
+	} else if strings.HasPrefix(r, IntersectionRejectPrefix) {
+		t.Errorf("源端自身域越界拒绝不应加前缀: %q", r)
+	}
+}

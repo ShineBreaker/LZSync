@@ -819,37 +819,30 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		assertSetDeepEqual(t, got, set2, -1, true) // S8：异域新行集/难度/Author 三面 OnlineID 均 -1
 	})
 
-	// ③ 异域更新不触碰：g0v0 覆盖集 1 canonical（同 Hash、DateAdded/
-	// StatusInt 改）→ conflict → update → OnlineID 保持同域投放的 7001。
+	// ③ 异域更新不触碰（§0-B2/B4：canonical 首见即定 + 冲突默认不落地
+	// ——g0v0 的同名新值只在它自己的 presence，不改 hub canonical；更新
+	// 覆盖路径由显式构造的 update 动作项承载，新 canonical 场景换第二个
+	// hub）：g0v0 持有集 1 的同 Hash 新值（DateAdded/StatusInt 改）→
+	// update → OnlineID 保持同域投放的 7001。
 	// presence 是整段快照语义——模拟完整收集必须带上目标现存的全部集。
 	applySnap(t, h, hub.Snapshot{ForkID: refB.ForkID, CollectedAt: t0.Add(3 * time.Hour),
 		BeatmapSets: []hub.BeatmapSet{set, set2}})
 	modified := set
 	modified.DateAdded = set.DateAdded.Add(48 * time.Hour)
 	modified.StatusInt = 3 // Qualified
-	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkG0v0, CollectedAt: t0.Add(4 * time.Hour),
+	h2 := openMemHub(t)
+	applySnap(t, h2, hub.Snapshot{ForkID: fixture.ForkG0v0, CollectedAt: t0.Add(4 * time.Hour),
 		BeatmapSets: []hub.BeatmapSet{modified}})
-	plan3, err := BuildPlan(ctx, h, refB, BuildOptions{Files: store})
+	plan3, err := NewPlan(refB.ForkID, []PlanItem{{
+		Kind: hub.KindBeatmapSet, ContentKey: set.Hash,
+		Action: ActionUpdate, Summary: "谱面集 " + set.Hash,
+	}})
 	if err != nil {
-		t.Fatalf("BuildPlan(异域更新): %v", err)
+		t.Fatalf("NewPlan(异域更新): %v", err)
 	}
-	// 唯一动作项 = 集 1 的 update（集 2 已在 presence，无差异）。
-	found := false
-	for _, it := range plan3.Items {
-		if it.Kind != hub.KindBeatmapSet {
-			continue
-		}
-		if it.ContentKey == set.Hash {
-			if it.Action != ActionUpdate {
-				t.Errorf("集 1 计划动作 = %s，期望 update", it.Action)
-			}
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("计划缺集 1 update 项: %+v", plan3.Items)
-	}
-	report3, err := runner.Deploy(ctx, plan3, nil)
+	plan3.Target = refB
+	runner3 := NewRunner(Deps{Hub: h2, Files: filestore.NewEngine(store)})
+	report3, err := runner3.Deploy(ctx, plan3, nil)
 	if err != nil {
 		t.Fatalf("Deploy(异域更新): %v", err)
 	}

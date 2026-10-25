@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -158,32 +159,55 @@ func TestApplySnapshotRoundtrip(t *testing.T) {
 	}
 }
 
-// --- HB3：origin_fork 随行更新、origin_guid 首次固定 ---
+// --- §0-B2：canonical 首见即定，后到端取值留在其 presence ---
 
-func TestHB3OriginForkUpdatedGuidStable(t *testing.T) {
+func TestB2FirstSeenCanonicalStable(t *testing.T) {
 	s := openMem(t)
 	applySnap(t, s, Snapshot{
 		ForkID: "A", CollectedAt: t0,
 		Collections: []Collection{mkCollection("Fav", "g-A", "m1")},
 		BeatmapSets: []BeatmapSet{mkSet("h1", 7, "AR", "TI", "AU", "Easy")},
 	})
-	// 同内容键从 fork B 再次收集（B 侧 Guid 不同）。
+	// 同内容键从 fork B 再次收集（B 侧 Guid 与取值均不同）。
 	applySnap(t, s, Snapshot{
 		ForkID: "B", CollectedAt: t0.Add(time.Hour),
-		Collections: []Collection{mkCollection("Fav", "g-B", "m1")},
-		BeatmapSets: []BeatmapSet{mkSet("h1", 7, "AR", "TI", "AU", "Easy")},
+		Collections: []Collection{mkCollection("Fav", "g-B", "m2")},
+		BeatmapSets: []BeatmapSet{mkSet("h1", 7, "AR", "TI-B", "AU", "Easy")},
 	})
 
-	_, oc, _, _ := s.LoadCollection(context.Background(), "Fav")
-	if oc != (Origin{GUID: "g-A", Fork: "B"}) {
-		t.Errorf("收藏 Origin = %+v，期望 {g-A B}（guid 首次固定、fork 随行更新）", oc)
+	// canonical 载荷与 origin_guid/origin_fork 首见即定（A 的值不动）。
+	c, oc, _, _ := s.LoadCollection(context.Background(), "Fav")
+	if oc != (Origin{GUID: "g-A", Fork: "A"}) {
+		t.Errorf("收藏 Origin = %+v，期望 {g-A A}（§0-B2 首见即定）", oc)
+	}
+	if len(c.BeatmapMD5Hashes) != 1 || c.BeatmapMD5Hashes[0] != "m1" {
+		t.Errorf("收藏 canonical 载荷 = %+v，期望 A 的 [m1]", c.BeatmapMD5Hashes)
 	}
 	sets, err := s.CurrentBeatmapSets(context.Background())
 	if err != nil || len(sets) != 1 {
 		t.Fatalf("CurrentBeatmapSets = (%d,%v)", len(sets), err)
 	}
-	if sets[0].Origin != (Origin{GUID: "guid-h1", Fork: "B"}) {
-		t.Errorf("谱面集 Origin = %+v，期望 {guid-h1 B}", sets[0].Origin)
+	if sets[0].Origin != (Origin{GUID: "guid-h1", Fork: "A"}) {
+		t.Errorf("谱面集 Origin = %+v，期望 {guid-h1 A}", sets[0].Origin)
+	}
+	if sets[0].Set.Title != "TI" {
+		t.Errorf("谱面集 canonical Title = %q，期望 A 的 TI", sets[0].Set.Title)
+	}
+	// B 的取值留在 B 自己的 presence.local_values。
+	var lv string
+	if err := s.DB().QueryRow(
+		`SELECT local_values FROM presence WHERE fork_id='B' AND kind='collection' AND content_key='Fav'`).Scan(&lv); err != nil {
+		t.Fatalf("读 B presence: %v", err)
+	}
+	if !strings.Contains(lv, "g-B") || !strings.Contains(lv, "m2") {
+		t.Errorf("B presence.local_values = %q，期望含 g-B/m2", lv)
+	}
+	if err := s.DB().QueryRow(
+		`SELECT local_values FROM presence WHERE fork_id='B' AND kind='beatmap_set' AND content_key='h1'`).Scan(&lv); err != nil {
+		t.Fatalf("读 B presence(beatmap_set): %v", err)
+	}
+	if !strings.Contains(lv, "TI-B") {
+		t.Errorf("B presence.local_values(set) = %q，期望含 TI-B", lv)
 	}
 }
 
@@ -753,19 +777,20 @@ func TestApplySnapshotSkinScoreRoundtrip(t *testing.T) {
 		t.Errorf("score presence 组合键行数 = %d，期望 1", n)
 	}
 
-	// HB3：同键从 fork B 再收集（Guid 不同）→ fork 随行更新、guid 首次固定。
+	// §0-B2：同键从 fork B 再收集（Guid 不同）→ canonical 载荷与
+	// origin_guid/origin_fork 首见即定不动；B 的取值留 B 的 presence。
 	applySnap(t, s, Snapshot{
 		ForkID: "B", CollectedAt: t0.Add(time.Hour),
 		Skins:  []Skin{mkSkin("sk1", "MySkin", "maker", "g-skB")},
 		Scores: []Score{mkScore("bh1", "sc1", "g-scB")},
 	})
 	if _, oc, ok, err := s.LoadSkin(context.Background(), "sk1"); err != nil || !ok ||
-		oc != (Origin{GUID: "g-sk1", Fork: "B"}) {
-		t.Errorf("HB3 皮肤 Origin = (%+v,%v)", oc, err)
+		oc != (Origin{GUID: "g-sk1", Fork: "A"}) {
+		t.Errorf("B2 皮肤 Origin = (%+v,%v)，期望 {g-sk1 A}", oc, err)
 	}
 	if _, oc, ok, err := s.LoadScore(context.Background(), "bh1", "sc1"); err != nil || !ok ||
-		oc != (Origin{GUID: "g-sc1", Fork: "B"}) {
-		t.Errorf("HB3 成绩 Origin = (%+v,%v)", oc, err)
+		oc != (Origin{GUID: "g-sc1", Fork: "A"}) {
+		t.Errorf("B2 成绩 Origin = (%+v,%v)，期望 {g-sc1 A}", oc, err)
 	}
 
 	// 幂等重跑：无增量、实体行数不涨。
@@ -1023,15 +1048,16 @@ func TestApplySnapshotSettingsRoundtrip(t *testing.T) {
 		t.Errorf("mod_preset presence 编码键行数 = %d，期望 1", n)
 	}
 
-	// HB3：同键从 fork B 再收集 → origin_fork 随行更新、guid 首次固定。
+	// §0-B2：同键从 fork B 再收集 → canonical 与 origin 首见即定不动；
+	// B 的取值留 B 的 presence。
 	applySnap(t, s, mkSettingsSnapshot("B", "g-b"))
 	if _, oc, ok, err := s.LoadKeyBinding(context.Background(), KeyBindingContentKey(nil, nil, 100, "Ctrl,Shift+Z")); err != nil || !ok ||
-		oc != (Origin{GUID: "g-v3-global", Fork: "B"}) {
-		t.Errorf("HB3 键位 Origin = (%+v,%v)", oc, err)
+		oc != (Origin{GUID: "g-v3-global", Fork: "A"}) {
+		t.Errorf("B2 键位 Origin = (%+v,%v)，期望 {g-v3-global A}", oc, err)
 	}
 	if _, oc, ok, err := s.LoadModPreset(context.Background(), ModPresetContentKey("osu", "My Preset|with|pipes")); err != nil || !ok ||
-		oc != (Origin{GUID: "g-v3-preset", Fork: "B"}) {
-		t.Errorf("HB3 模组预设 Origin = (%+v,%v)", oc, err)
+		oc != (Origin{GUID: "g-v3-preset", Fork: "A"}) {
+		t.Errorf("B2 模组预设 Origin = (%+v,%v)，期望 {g-v3-preset A}", oc, err)
 	}
 
 	// 幂等重跑：无增量、行数不涨。
@@ -1165,5 +1191,80 @@ func TestMigrateV1ToV3Settings(t *testing.T) {
 	applySnap(t, s, mkSettingsSnapshot("A", "g-m"))
 	if _, _, ok, err := s.LoadModPreset(context.Background(), ModPresetContentKey("osu", "My Preset|with|pipes")); err != nil || !ok {
 		t.Fatalf("迁移后三表可写可读: (%v,%v)", ok, err)
+	}
+}
+
+// --- §0 板块圈定 / 仅目标端快照 ---
+
+// TestSnapshotKindsPartialRewritesOnlyIncluded 部分 kind 收集：未圈定 kind
+// 的 presence 与 tombstone 原封不动（关掉板块不得把既有 presence 误标
+// 删除），圈定 kind 照常重写。
+func TestSnapshotKindsPartialRewritesOnlyIncluded(t *testing.T) {
+	s := openMem(t)
+	// fork A 首轮全量：两收藏 + 一皮肤。
+	applySnap(t, s, Snapshot{
+		ForkID: "A", CollectedAt: t0,
+		Collections: []Collection{mkCollection("C1", "g1", "m1"), mkCollection("C2", "g2", "m2")},
+		Skins:       []Skin{mkSkin("sk1", "Skin", "maker", "g-sk")},
+	})
+	// 第二轮只圈定 collection：快照只带 C1（C2 在 A 侧被删），且皮肤面
+	// 完全不投影——sk1 的 presence 必须原封保留（不得误标删除）。
+	applySnap(t, s, Snapshot{
+		ForkID: "A", CollectedAt: t0.Add(time.Hour),
+		Kinds:       map[EntityKind]bool{KindCollection: true},
+		Collections: []Collection{mkCollection("C1", "g1", "m1")},
+	})
+	var n int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM presence WHERE fork_id='A' AND kind='skin'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("未圈定 skin 的 presence = %d（err %v），期望 1（原封不动）", n, err)
+	}
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM presence WHERE fork_id='A' AND kind='collection'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("圈定 collection 的 presence = %d（err %v），期望 1（C2 消失）", n, err)
+	}
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM tombstone WHERE fork_id='A' AND kind='collection'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("collection tombstone = %d（err %v），期望 1", n, err)
+	}
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM tombstone WHERE fork_id='A' AND kind='skin'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("skin tombstone = %d（err %v），期望 0（未圈定不产 tombstone）", n, err)
+	}
+	// 未圈定 kind 的实体行也不新增。
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM skin`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("skin 实体行 = %d（err %v），期望 1", n, err)
+	}
+}
+
+// TestPresenceOnlySkipsEntities PresenceOnly 快照：不插实体、不建身份/
+// 版本链，只写 presence（+ tombstone/collect_log）。
+func TestPresenceOnlySkipsEntities(t *testing.T) {
+	s := openMem(t)
+	ctx := context.Background()
+	res := applySnap(t, s, Snapshot{
+		ForkID: "B", CollectedAt: t0, PresenceOnly: true,
+		Collections: []Collection{mkCollection("BOnly", "g-b", "m9")},
+		BeatmapSets: []BeatmapSet{mkSet("hB", 9, "A", "T", "U", "Easy")},
+		Skins:       []Skin{mkSkin("skB", "S", "m", "g-skb")},
+	})
+	if res.EntitiesWritten[KindCollection] != 0 || res.EntitiesWritten[KindBeatmapSet] != 0 ||
+		res.EntitiesWritten[KindSkin] != 0 || res.VersionLinksCreated != 0 {
+		t.Fatalf("PresenceOnly 实体/版本链增量 = %+v，期望全 0", res)
+	}
+	if _, _, ok, _ := s.LoadCollection(ctx, "BOnly"); ok {
+		t.Error("PresenceOnly 不应插 canonical 实体")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM presence WHERE fork_id='B'`); n != 3 {
+		t.Errorf("presence 行数 = %d，期望 3", n)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM collect_log WHERE fork_id='B'`); n != 1 {
+		t.Errorf("collect_log 行数 = %d，期望 1", n)
+	}
+	// presence 重写照常工作：B 的「BOnly」消失后产 tombstone。
+	applySnap(t, s, Snapshot{ForkID: "B", CollectedAt: t0.Add(time.Hour), PresenceOnly: true})
+	if n := countRows(t, s,
+		`SELECT COUNT(*) FROM tombstone WHERE fork_id='B' AND kind='collection'`); n != 1 {
+		t.Errorf("B 侧 tombstone = %d，期望 1", n)
 	}
 }

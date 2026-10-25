@@ -228,8 +228,10 @@ func TestDeploySkinFullChain(t *testing.T) {
 		t.Errorf("重跑 skip 计数 = %d（期望 2）: %+v", skipTotal, report2.Skipped)
 	}
 
-	// conflict → update：目标侧收集改名（presence 与 canonical 分叉）→
-	// hub canonical 仍持原名 → 对账冲突 → update 计划保目标 Guid。
+	// update 路径（§0-B2/B4：canonical 首见即定 + 冲突默认不落地——更新
+	// 覆盖由显式构造的动作项承载；改名后的 canonical 场景换第二个 hub）：
+	// 目标侧收集（presence 照刷）→ hub2 内 canonical = 改名值 → 显式
+	// update 计划保目标 Guid。
 	withSetReader(t, lib, refB.RealmPath, func(sr *setReader) {
 		var target []hub.Skin
 		for _, want := range skins {
@@ -242,17 +244,20 @@ func TestDeploySkinFullChain(t *testing.T) {
 		applySnap(t, h, hub.Snapshot{ForkID: refB.ForkID, CollectedAt: t0.Add(2 * time.Hour), Skins: target})
 	})
 	skinsV2 := append([]hub.Skin(nil), skins...)
-	skinsV2[0].Name = "测试皮肤甲-改名版" // canonical 覆盖（HB3 整行覆盖）
-	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0.Add(3 * time.Hour), Skins: skinsV2})
+	skinsV2[0].Name = "测试皮肤甲-改名版" // canonical 首见即定（§0-B2），h2 内持有
+	h2 := openMemHub(t)
+	applySnap(t, h2, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0.Add(3 * time.Hour), Skins: skinsV2})
 
-	plan3, err := BuildPlan(ctx, h, refB, BuildOptions{})
+	plan3, err := NewPlan(refB.ForkID, []PlanItem{{
+		Kind: hub.KindSkin, ContentKey: skins[0].Hash,
+		Action: ActionUpdate, Summary: "皮肤 " + skins[0].Hash,
+	}})
 	if err != nil {
-		t.Fatalf("BuildPlan#3: %v", err)
+		t.Fatalf("NewPlan#3: %v", err)
 	}
-	if len(plan3.Items) != 1 || plan3.Items[0].Action != ActionUpdate {
-		t.Fatalf("计划#3 = %+v（期望仅改名皮肤 update）", plan3.Items)
-	}
-	report3, err := runner.Deploy(ctx, plan3, nil)
+	plan3.Target = refB
+	runner3 := NewRunner(Deps{Hub: h2, Files: filestore.NewEngine(store)})
+	report3, err := runner3.Deploy(ctx, plan3, nil)
 	if err != nil {
 		t.Fatalf("Deploy#3: %v", err)
 	}

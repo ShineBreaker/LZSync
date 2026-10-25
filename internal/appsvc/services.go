@@ -185,13 +185,23 @@ type CompareService interface {
 	CurrentPlan() (deploy.Plan, error)
 }
 
-// SyncService 同步执行（§6.3）：收集（可对多个 fork 顺序执行）与投放，
-// 进度经 ProgressSink 实时推送；取消点在批间（已提交批保留，§3.3）。
+// SyncService 同步执行（§6.3）：一轮同步编排（PrepareRun → CommitRun）
+// + 单端收集/计划投放（数据页勾选的手动处置路径）。进度经 ProgressSink
+// 实时推送；取消点在批间（已提交批保留，§3.3）。
 type SyncService interface {
 	// Collect 对单个 fork 执行收集；游戏运行中返回 guard.ErrGameRunning。
 	Collect(forkID string) (collect.Report, error)
 	// DeployCurrentPlan 执行当前计划（守卫 → 备份 → 批事务，§3.3）。
 	DeployCurrentPlan() (deploy.Report, error)
+	// PrepareRun 准备一轮同步（§0.4 步骤 1-4）：读同步范围 → 参与端收集 →
+	// 每目标端预演 → 返回 runID 与预览（含跳过端与待处理计数）。
+	PrepareRun() (RunPreview, error)
+	// PrepareSelected 数据页勾选触发的一轮：计划只含 sel 中的项；sel 中的
+	// 冲突/恢复/弱键版本视为用户显式处置，允许入计划。
+	PrepareSelected(sel []Selection) (RunPreview, error)
+	// CommitRun 执行已准备的一轮（§0.4 步骤 6-7）：逐目标端写入 → 重收集
+	// 刷新快照。未知/过期 runID 报错「请重新同步」。
+	CommitRun(runID string) (RunReport, error)
 	// Cancel 取消当前长任务（批事务进行中不可打断，批间生效）。
 	Cancel()
 	// Running 当前任务状态。
@@ -216,9 +226,14 @@ type ExportService interface {
 	ExportContainers(forkID string, kind hub.EntityKind, contentKeys []string) (ExportResult, error)
 }
 
-// SettingsService 设置（§6.4 M1 骨架：只读显示）。
+// SettingsService 设置（§6.4）。
 type SettingsService interface {
 	Get() (SettingsInfo, error)
+	// GetSyncScope 同步范围（§0-G1：板块开关 + 每端拉取/写入角色）。
+	GetSyncScope() (SyncScope, error)
+	// SetSyncScope 持久化同步范围（校验：未知 Section 报错、未注册
+	// ForkID 报错）。
+	SetSyncScope(scope SyncScope) error
 }
 
 // Backend 聚合服务（main 装配后逐字段 BindAs 暴露给前端）。
@@ -292,8 +307,9 @@ func diffEntryToRow(e diff.Entry) DiffRow {
 	for _, f := range e.ConflictFields {
 		fields = append(fields, FieldDiff{Field: f.Field, HubValue: f.HubValue, ForkValue: f.ForkValue})
 	}
-	// 默认勾选（§6.2）：新增/冲突默认全选；目标独有无动作、弱键需拍板。
-	checked := cat == CategoryCreate || cat == CategoryConflict ||
+	// 默认勾选（§6.2 + §0-B4）：新增默认勾选；冲突默认不勾（判不准不动，
+	// 显式勾选即选定 hub 变体）；目标独有无动作、弱键需拍板。
+	checked := cat == CategoryCreate ||
 		(cat == CategoryVersionUpdate && e.Evidence == EvidenceStrong)
 	return DiffRow{
 		Kind:           e.Kind,

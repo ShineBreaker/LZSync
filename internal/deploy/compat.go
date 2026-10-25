@@ -176,3 +176,68 @@ func adaptScoreForTarget(sc hub.Score, targetFork string) (adapted hub.Score, dr
 	out.MaximumStatisticsJson = maxStats
 	return out, dropped + droppedMax, ""
 }
+
+// ---- 全局交集（§0-B3/G6） ----
+//
+// 一轮同步的写入面必须满足**全部**目标端（含运行中被跳过的端）的静态
+// 兼容性：任一端拒绝，所有端都不写。以下三个 peer 版判定与单端版同构：
+// 目标端自身先判（其拒绝保持原有原因文本，不加前缀）；其余 peer 逐端
+// 判定，拒绝时原因加 IntersectionRejectPrefix 前缀并点名拒绝端。
+
+// adaptScoreForIntersection 成绩的交集适配：先按目标端适配，再逐 peer
+// 适配（键过滤在已过滤形态上累积 = 各端白名单的键级交集，所有目标写同一
+// 形态）；任一端拒绝（mod 名录外 / JSON 解析失败）→ 整条跳过。
+func adaptScoreForIntersection(sc hub.Score, targetFork string, peers []string) (adapted hub.Score, droppedKeys int, rejectReason string) {
+	out, dropped, reject := adaptScoreForTarget(sc, targetFork)
+	if reject != "" {
+		return sc, 0, reject
+	}
+	total := dropped
+	for _, f := range peers {
+		if f == targetFork {
+			continue
+		}
+		a, d, r := adaptScoreForTarget(out, f)
+		if r != "" {
+			return sc, 0, IntersectionRejectPrefix + f + " 不支持 — " + r
+		}
+		out = a
+		total += d
+	}
+	return out, total, ""
+}
+
+// adaptModPresetForIntersection 模组预设的交集判定：任一端 mod 名录外 →
+// 整条拒绝（peer 拒绝加前缀）。
+func adaptModPresetForIntersection(mp hub.ModPreset, targetFork string, peers []string) (rejectReason string) {
+	if r := adaptModPresetModsForTarget(mp, targetFork); r != "" {
+		return r
+	}
+	for _, f := range peers {
+		if f == targetFork {
+			continue
+		}
+		if r := adaptModPresetModsForTarget(mp, f); r != "" {
+			return IntersectionRejectPrefix + f + " 不支持 — " + r
+		}
+	}
+	return ""
+}
+
+// keyBindingActionAllowedIntersection 键位的交集判定：源端×目标端枚举域
+// 交集之外，再逐 peer 检查其枚举域（D20 域数据的交集面）；任一端越域 →
+// 跳过（peer 拒绝加前缀）。
+func keyBindingActionAllowedIntersection(originFork, targetFork string, peers []string, kb hub.KeyBinding) (bool, string) {
+	if ok, reject := keyBindingActionAllowed(originFork, targetFork, kb); !ok {
+		return false, reject
+	}
+	for _, f := range peers {
+		if f == targetFork {
+			continue
+		}
+		if ok, reject := keyBindingActionAllowed(originFork, f, kb); !ok {
+			return false, IntersectionRejectPrefix + f + " 不支持 — " + reject
+		}
+	}
+	return true, ""
+}

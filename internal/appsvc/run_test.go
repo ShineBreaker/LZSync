@@ -1,0 +1,496 @@
+package appsvc
+
+// 一轮同步编排（§0.4 / G1-G6）端到端测试：两端 fixture（真实 realm 文件，
+// native 库不可用时 SKIP）、配置角色、冲突/板块/仅目标端语义。
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"lzsync/internal/deploy"
+	"lzsync/internal/fixture"
+	"lzsync/internal/filestore"
+	"lzsync/internal/forks"
+	"lzsync/internal/guard"
+	"lzsync/internal/hub"
+	"lzsync/internal/inisettings"
+	"lzsync/internal/realmc"
+)
+
+// newRunBackend 装配带 Files/Snapshots 的真实后端并注册两端 fixture。
+// aSeed/bSeed 各自播入 lazer / delta 库；角色随后由调用方调整。
+func newRunBackend(t *testing.T, aSeed, bSeed fixture.Seed) (*Backend, *hub.Store, forks.LibraryRef, forks.LibraryRef) {
+	t.Helper()
+	if _, err := realmc.Load(); err != nil {
+		t.Skipf("native 库不可用，跳过编排集成测试: %v", err)
+	}
+	ctx := context.Background()
+	dataRoot := t.TempDir()
+	refA, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkLazer, SchemaVersion: fixture.VersionLazer,
+		DataDir: t.TempDir(), Seed: aSeed,
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build(A): %v", err)
+	}
+	refB, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkDelta, SchemaVersion: fixture.VersionDelta,
+		DataDir: t.TempDir(), Seed: bSeed,
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build(B): %v", err)
+	}
+	dir := t.TempDir()
+	h, err := hub.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatalf("hub.Open: %v", err)
+	}
+	t.Cleanup(func() { h.Close() })
+	store, err := filestore.Open(filepath.Join(dir, "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	snaps, err := forks.OpenSnapshotStore(filepath.Join(dir, "snapshots"))
+	if err != nil {
+		t.Fatalf("OpenSnapshotStore: %v", err)
+	}
+	iniStore, err := inisettings.OpenStore(filepath.Join(dir, "gameini"))
+	if err != nil {
+		t.Fatalf("inisettings.OpenStore: %v", err)
+	}
+	b, err := NewRealBackend(Deps{
+		Hub: h, Files: filestore.NewEngine(store), Snapshots: snaps,
+		Backups:  mustBackups(t, filepath.Join(dir, "backups")),
+		Guard:    guard.NewGuard(nil), GameIni: iniStore,
+		DataRoot: dataRoot, DataDir: dir,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewRealBackend: %v", err)
+	}
+	// fixture 库无 fork 指纹结构差异（版本 51/52 与指纹不能唯一指认
+	// delta/lazer）→ 走用户指认路径 AssignFork。
+	if _, err := b.Library.AssignFork(refA.RealmPath, "lazer"); err != nil {
+		t.Fatalf("AssignFork(A): %v", err)
+	}
+	if _, err := b.Library.AssignFork(refB.RealmPath, "delta"); err != nil {
+		t.Fatalf("AssignFork(B): %v", err)
+	}
+	return b, h, refA, refB
+}
+
+// setForkRole 调整 sync scope 中一端的 Source/Target 角色。
+func setForkRole(t *testing.T, b *Backend, forkID string, source, target bool) {
+	t.Helper()
+	scope, err := b.Settings.GetSyncScope()
+	if err != nil {
+		t.Fatalf("GetSyncScope: %v", err)
+	}
+	found := false
+	for i := range scope.Forks {
+		if scope.Forks[i].ForkID == forkID {
+			scope.Forks[i].Source, scope.Forks[i].Target = source, target
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("scope 缺端 %s", forkID)
+	}
+	if err := b.Settings.SetSyncScope(scope); err != nil {
+		t.Fatalf("SetSyncScope: %v", err)
+	}
+}
+
+// TestRunAOnlyCollectionDeploysToB A 独有收藏（A=来源+目标、B=仅目标）：
+// PrepareRun 给 B 计划 create；CommitRun 后 B 的 realm 中可读回（重收集
+// presence 佐证），A 不落项。
+func TestRunAOnlyCollectionDeploysToB(t *testing.T) {
+	aSeed := fixture.Seed{Collections: []hub.Collection{
+		{Name: "夹A", BeatmapMD5Hashes: []string{"md5-1"}},
+	}}
+	b, h, _, _ := newRunBackend(t, aSeed, fixture.Seed{})
+	setForkRole(t, b, "delta", false, true) // B 仅目标
+
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	var bItems, aItems int
+	for _, tp := range preview.Targets {
+		if tp.ForkID == "delta" {
+			bItems = tp.Items
+		}
+		if tp.ForkID == "lazer" {
+			aItems = tp.Items
+		}
+	}
+	if bItems != 1 {
+		t.Fatalf("B 计划项 = %d，期望 1（夹A create），preview=%+v", bItems, preview)
+	}
+	if aItems != 0 {
+		t.Errorf("A 计划项 = %d，期望 0（A 已有夹A）", aItems)
+	}
+	if len(preview.Skipped) != 0 {
+		t.Errorf("Skipped = %+v，期望无", preview.Skipped)
+	}
+
+	report, err := b.Sync.CommitRun(preview.RunID)
+	if err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	var bRep *ForkRunReport
+	for i := range report.Forks {
+		if report.Forks[i].ForkID == "delta" {
+			bRep = &report.Forks[i]
+		}
+	}
+	if bRep == nil || bRep.Deploy == nil || len(bRep.Deploy.Applied) != 1 {
+		t.Fatalf("B 端投放报告 = %+v，期望 1 项 applied", bRep)
+	}
+	if bRep.Deploy.Applied[0].Action != deploy.ActionCreate {
+		t.Errorf("B 投放动作 = %s，期望 create", bRep.Deploy.Applied[0].Action)
+	}
+	// CommitRun 重收集 B → presence 含夹A（读回佐证 realm 已写入）。
+	var n int
+	if err := h.DB().QueryRow(
+		`SELECT COUNT(*) FROM presence WHERE fork_id='delta' AND kind='collection' AND content_key='夹A'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("B presence(夹A) = %d（err %v），期望 1", n, err)
+	}
+}
+
+// TestRunSameHashSetConflictStaysPending 同 Hash 谱面集两端 StatusInt
+// 不同 → 两端都不写、冲突入 Pending（§0-B4）。收藏夹成员列不随镜像播种
+//（M1 已知边界：BeatmapMD5Hashes 不进 fixture realm），故用谱面集承载。
+func TestRunSameHashSetConflictStaysPending(t *testing.T) {
+	aSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 1},
+	}}
+	bSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 3},
+	}}
+	b, _, _, _ := newRunBackend(t, aSeed, bSeed)
+	setForkRole(t, b, "delta", false, true)
+
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	if preview.Pending.Conflicts < 1 {
+		t.Errorf("Pending.Conflicts = %d，期望 ≥1", preview.Pending.Conflicts)
+	}
+	for _, tp := range preview.Targets {
+		if tp.Items != 0 {
+			t.Errorf("目标端 %s 计划项 = %d，期望 0（冲突不写）", tp.ForkID, tp.Items)
+		}
+	}
+	report, err := b.Sync.CommitRun(preview.RunID)
+	if err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	for _, fr := range report.Forks {
+		if fr.Deploy != nil && len(fr.Deploy.Applied) != 0 {
+			t.Errorf("端 %s 冲突仍落 write: %+v", fr.ForkID, fr.Deploy.Applied)
+		}
+	}
+}
+
+// TestRunCollectionsSectionOff 收藏板块关闭 → 不收集也不投放收藏数据。
+func TestRunCollectionsSectionOff(t *testing.T) {
+	aSeed := fixture.Seed{Collections: []hub.Collection{
+		{Name: "夹A", BeatmapMD5Hashes: []string{"md5-1"}},
+	}}
+	bSeed := fixture.Seed{Collections: []hub.Collection{
+		{Name: "B独有夹", BeatmapMD5Hashes: []string{"md5-b"}},
+	}}
+	b, h, _, _ := newRunBackend(t, aSeed, bSeed)
+	setForkRole(t, b, "delta", false, true)
+	scope, err := b.Settings.GetSyncScope()
+	if err != nil {
+		t.Fatalf("GetSyncScope: %v", err)
+	}
+	for i := range scope.Sections {
+		if scope.Sections[i].Section == SectionCollections {
+			scope.Sections[i].Enabled = false
+		}
+	}
+	if err := b.Settings.SetSyncScope(scope); err != nil {
+		t.Fatalf("SetSyncScope: %v", err)
+	}
+
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	for _, tp := range preview.Targets {
+		if tp.Items != 0 {
+			t.Errorf("目标端 %s 计划项 = %d，期望 0（板块关）", tp.ForkID, tp.Items)
+		}
+	}
+	if preview.Pending.Conflicts != 0 {
+		t.Errorf("Pending.Conflicts = %d，期望 0（板块关不参与冲突判）", preview.Pending.Conflicts)
+	}
+	// 不收：B 的收藏 presence 不存在。
+	var n int
+	if err := h.DB().QueryRow(
+		`SELECT COUNT(*) FROM presence WHERE fork_id='delta' AND kind='collection'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("B collection presence = %d（err %v），期望 0（板块关不收集）", n, err)
+	}
+	if report, err := b.Sync.CommitRun(preview.RunID); err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	} else {
+		for _, fr := range report.Forks {
+			if fr.Deploy != nil && len(fr.Deploy.Applied) != 0 {
+				t.Errorf("板块关闭仍写端 %s: %+v", fr.ForkID, fr.Deploy.Applied)
+			}
+		}
+	}
+}
+
+// TestRunTargetOnlyForkNeverBecomesCanonical B 仅目标：B 独有的收藏不
+// 进 hub 实体、也不会投给 A（首见即定 + 仅目标端不做 canonical 来源）。
+func TestRunTargetOnlyForkNeverBecomesCanonical(t *testing.T) {
+	bSeed := fixture.Seed{Collections: []hub.Collection{
+		{Name: "B独有夹", BeatmapMD5Hashes: []string{"md5-b"}},
+	}}
+	b, h, _, _ := newRunBackend(t, fixture.Seed{}, bSeed)
+	setForkRole(t, b, "delta", false, true)
+
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	for _, tp := range preview.Targets {
+		if tp.Items != 0 {
+			t.Errorf("目标端 %s 计划项 = %d，期望 0（B 独有数据不回投）", tp.ForkID, tp.Items)
+		}
+	}
+	var n int
+	if err := h.DB().QueryRow(
+		`SELECT COUNT(*) FROM collection WHERE content_key='B独有夹'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("canonical 收藏 B独有夹 = %d（err %v），期望 0（仅目标端不入实体）", n, err)
+	}
+	if err := h.DB().QueryRow(
+		`SELECT COUNT(*) FROM presence WHERE fork_id='delta' AND kind='collection' AND content_key='B独有夹'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("B presence(B独有夹) = %d（err %v），期望 1（快照照写）", n, err)
+	}
+}
+
+// TestCommitRunUnknownRunID 未知/过期 runID → 「请重新同步」错误。
+func TestCommitRunUnknownRunID(t *testing.T) {
+	b, _, _, _ := newRunBackend(t, fixture.Seed{}, fixture.Seed{})
+	if _, err := b.Sync.CommitRun("nonexistent"); err == nil ||
+		!errors.Is(err, ErrNoPlan) && !strings.Contains(err.Error(), "重新同步") {
+		t.Fatalf("未知 runID CommitRun = %v，期望「请重新同步」类错误", err)
+	}
+}
+
+// TestPrepareSelectedExplicitDisposition 数据页显式勾选：冲突项以 update
+// 入计划（手动处置路径）。
+func TestPrepareSelectedExplicitDisposition(t *testing.T) {
+	aSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 1},
+	}}
+	bSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 3},
+	}}
+	b, _, _, _ := newRunBackend(t, aSeed, bSeed)
+	setForkRole(t, b, "delta", false, true)
+	preview, err := b.Sync.PrepareSelected([]Selection{
+		{Kind: hub.KindBeatmapSet, ContentKey: "conflict-hash"},
+	})
+	if err != nil {
+		t.Fatalf("PrepareSelected: %v", err)
+	}
+	var bItems int
+	for _, tp := range preview.Targets {
+		if tp.ForkID == "delta" {
+			bItems = tp.Items
+		}
+	}
+	if bItems != 1 {
+		t.Fatalf("B 计划项 = %d，期望 1（显式勾选的冲突→update）", bItems)
+	}
+	report, err := b.Sync.CommitRun(preview.RunID)
+	if err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	var sawUpdate bool
+	for _, fr := range report.Forks {
+		if fr.Deploy == nil {
+			continue
+		}
+		for _, a := range fr.Deploy.Applied {
+			if a.Action == deploy.ActionUpdate {
+				sawUpdate = true
+			}
+		}
+	}
+	if !sawUpdate {
+		t.Error("显式勾选的冲突项应以 update 落 B")
+	}
+}
+
+func mustBackups(t *testing.T, dir string) *guard.Backups {
+	t.Helper()
+	b, err := guard.OpenBackups(dir)
+	if err != nil {
+		t.Fatalf("OpenBackups: %v", err)
+	}
+	return b
+}
+
+// TestMockRunFlow mock 一轮同步冒烟（§0.4 + M-4 前端演示面）：
+// scope 读写、PrepareRun 计数与 g0v0 守卫跳过、CommitRun 逐端报告、
+// 未知 runID 报错。
+func TestMockRunFlow(t *testing.T) {
+	b := NewMockBackend("mock", "测试", nil)
+	scope, err := b.Settings.GetSyncScope()
+	if err != nil || len(scope.Forks) == 0 || len(scope.Sections) != len(AllSections) {
+		t.Fatalf("GetSyncScope = (%+v,%v)", scope, err)
+	}
+	if err := b.Settings.SetSyncScope(scope); err != nil {
+		t.Fatalf("SetSyncScope(不变更): %v", err)
+	}
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	if preview.RunID == "" || len(preview.Targets) == 0 {
+		t.Fatalf("预览 = %+v，期望有 runID 与目标端", preview)
+	}
+	var sawSkip bool
+	for _, sk := range preview.Skipped {
+		if sk.ForkID == "g0v0" {
+			sawSkip = true
+		}
+	}
+	if !sawSkip {
+		t.Errorf("mock 应演示 g0v0 守卫跳过: %+v", preview.Skipped)
+	}
+	report, err := b.Sync.CommitRun(preview.RunID)
+	if err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	var applied, sawSkipped int
+	for _, fr := range report.Forks {
+		if fr.Skipped {
+			sawSkipped++
+		}
+		if fr.Deploy != nil {
+			applied += len(fr.Deploy.Applied)
+		}
+	}
+	if sawSkipped == 0 {
+		t.Error("报告缺跳过端")
+	}
+	if applied == 0 {
+		t.Error("报告缺投放项")
+	}
+	// runID 单次消费：二次提交报错。
+	if _, err := b.Sync.CommitRun(preview.RunID); err == nil {
+		t.Fatal("重复 CommitRun 应报错（计划单次性）")
+	}
+	// PrepareSelected：预览计数 = 勾选数。
+	preview2, err := b.Sync.PrepareSelected([]Selection{{Kind: hub.KindCollection, ContentKey: "x"}})
+	if err != nil {
+		t.Fatalf("PrepareSelected: %v", err)
+	}
+	for _, tp := range preview2.Targets {
+		if tp.Items != 1 {
+			t.Errorf("PrepareSelected 目标 %s 项数 = %d，期望 1", tp.ForkID, tp.Items)
+		}
+	}
+}
+
+// TestCommitRunGameIniOnlyWrites realm 无差异、仅 game.ini 不同时
+// CommitRun 仍写入目标端 ini（§0.4 步骤 7 独立于 realm 计划）。
+func TestCommitRunGameIniOnlyWrites(t *testing.T) {
+	b, _, refA, refB := newRunBackend(t, fixture.Seed{}, fixture.Seed{})
+	// A(lazer, 源+目标) 写白名单键真值；B(delta, 仅目标) 用默认（false 面）。
+	if _, err := fixture.WriteGameIni(refA.DataDir, map[string]string{"ShowFpsDisplay": "true"}); err != nil {
+		t.Fatalf("WriteGameIni(A): %v", err)
+	}
+	if _, err := fixture.WriteGameIni(refB.DataDir, map[string]string{"ShowFpsDisplay": "false"}); err != nil {
+		t.Fatalf("WriteGameIni(B): %v", err)
+	}
+
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	for _, tg := range preview.Targets {
+		if tg.ForkID == "delta" && tg.Items != 0 {
+			t.Fatalf("delta 计划项 = %d，期望 0（仅 ini 差异）", tg.Items)
+		}
+	}
+	report, err := b.Sync.CommitRun(preview.RunID)
+	if err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	var got string
+	var ok bool
+	for _, fr := range report.Forks {
+		if fr.ForkID != "delta" {
+			continue
+		}
+		if fr.Error != "" {
+			t.Fatalf("delta 报告错误: %s", fr.Error)
+		}
+		if fr.Deploy == nil || fr.Deploy.GameIni == nil {
+			t.Fatalf("delta 报告缺 game.ini 结果: %+v", fr)
+		}
+		if fr.Deploy.GameIni.Applied["ShowFpsDisplay"] != "true" {
+			t.Fatalf("game.ini applied = %+v，期望 ShowFpsDisplay=true", fr.Deploy.GameIni.Applied)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(refB.DataDir, "game.ini"))
+	if err != nil {
+		t.Fatalf("读 delta game.ini: %v", err)
+	}
+	if got, ok = inisettings.Parse(after).Value("ShowFpsDisplay"); !ok || got != "true" {
+		t.Errorf("delta game.ini ShowFpsDisplay = %q，期望 true", got)
+	}
+}
+
+// TestPrepareRunAmbiguityQueryErrorSkipsTarget B5 歧义检查 fail-closed：
+// 取值集查询出错 → 该目标端进 Skipped 且原因携带歧义检查失败，不写该
+// 端计划。注入方式：把歧义检查用的 Hub 换成已关闭的 store——collect
+// 与 reconcile 分别走缓存的 runner 与 cmp 内各自持有的原 hub 指针，
+// 只有歧义检查读坏库。
+func TestPrepareRunAmbiguityQueryErrorSkipsTarget(t *testing.T) {
+	aSeed, err := fixture.StandardSeed()
+	if err != nil {
+		t.Fatalf("StandardSeed: %v", err)
+	}
+	b, _, _, _ := newRunBackend(t, aSeed, fixture.Seed{})
+	rs := b.Sync.(*realSync)
+	rs.cRunner() // 预热缓存：收集器持原 hub
+	bad, err := hub.Open(filepath.Join(t.TempDir(), "bad.db"))
+	if err != nil {
+		t.Fatalf("hub.Open(bad): %v", err)
+	}
+	bad.Close()
+	rs.deps.Hub = bad
+
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	var deltaSkipped string
+	for _, sk := range preview.Skipped {
+		if sk.ForkID == "delta" {
+			deltaSkipped = sk.Reason
+		}
+	}
+	if !strings.Contains(deltaSkipped, "歧义检查失败") {
+		t.Fatalf("delta 未以歧义检查失败跳过（Skipped=%+v）", preview.Skipped)
+	}
+	for _, tg := range preview.Targets {
+		if tg.ForkID == "delta" {
+			t.Errorf("歧义检查失败的端不应出目标计划: %+v", tg)
+		}
+	}
+}

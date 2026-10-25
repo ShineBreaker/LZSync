@@ -204,3 +204,14 @@ export function popoverAt(trigger: HTMLElement, build: (pop: HTMLElement) => voi
   return close;
 }
 
+
+/** 页面导航钩子（main.ts 注入实现；数据页/同步页经它跨页跳转）。 */
+let navigatorFn: ((page: string, filter?: string) => void) | null = null;
+
+export function setNavigator(fn: (page: string, filter?: string) => void): void {
+  navigatorFn = fn;
+}
+
+export function navigate(page: string, filter?: string): void {
+  navigatorFn?.(page, filter);
+}
