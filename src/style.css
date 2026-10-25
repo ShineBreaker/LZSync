@@ -383,6 +383,11 @@ select.input option { background: var(--bg-card); color: var(--text-hi); }
   border-radius: 5px;
   cursor: pointer;
   background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  /* 隐藏原生 checkbox 标记，用 ::after 自绘 */
+  display: grid;
+  place-content: center;
 }
 
 .data-row.checked .row-check {
@@ -390,15 +395,16 @@ select.input option { background: var(--bg-card); color: var(--text-hi); }
   border-color: var(--brand);
 }
 
+/* 未选不绘制 ::after（修复伪元素在非勾选下也出现的 bug） */
+.data-row:not(.checked) .row-check::after { content: none; }
+
 .data-row.checked .row-check::after {
   content: "";
-  display: block;
-  margin: 4px 3px;
   width: 10px;
   height: 5px;
   border-left: 2px solid #fff;
   border-bottom: 2px solid #fff;
-  transform: rotate(-45deg);
+  transform: rotate(-45deg) translateY(-1px);
 }
 
 .row-main { min-width: 0; }

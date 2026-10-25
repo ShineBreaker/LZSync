@@ -116,6 +116,7 @@ const DICT = {
     "browse.conflictFields": "差异字段",
     "browse.conflictHub": "中枢",
     "browse.conflictFork": "目标端",
+    "browse.deletedOn": "删除于 {0}",
     "browse.showDiff": "查看差异",
 
     // ===== 同步页 =====
@@ -250,6 +251,7 @@ const DICT = {
     "browse.confirmTitle": "Replace older version on target?",
     "browse.conflictHub": "Hub",
     "browse.conflictFork": "Target",
+    "browse.deletedOn": "Deleted {0}",
     "browse.conflictFields": "Differences",
     "browse.showDiff": "Diff",
 

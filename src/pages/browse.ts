@@ -4,7 +4,7 @@
 
 import { t, trBackend } from "../i18n";
 import { CompareService, ExportService, LibraryService } from "../mygo";
-import { clear, el, errText, fmtBytes, fmtMillis, message, popoverAt, popoverForkRow, syncStateClass, syncStateLabel, text, type SyncState } from "../ui";
+import { clear, el, errText, message, popoverAt, popoverForkRow, syncStateClass, syncStateLabel, text, type SyncState } from "../ui";
 
 type DiffRow = Awaited<ReturnType<typeof CompareService.previewDeploy>>[number];
 type LibCard = Awaited<ReturnType<typeof LibraryService.list>>[number];
@@ -155,7 +155,7 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
     else if (cat === "version-update" && evidence === "weak") state = "needsConfirm";
     else if (cat === "version-update") state = "update";
     else if (cat === "target-only") state = "targetOnly";
-    else if (cat === "restore") state = "synced"; // 恢复组另算
+    else if (cat === "restore") state = "targetOnly"; // 恢复组：目标已删但 hub 有副本（DeletedAt 在 meta 显示）
     else if (cat === "create") state = "update";
 
     const summary = trBackend(r.Summary);
@@ -196,6 +196,11 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
         parts.push(`#${idv}`);
       }
     }
+    if (r.DeletedAt) {
+      const d = new Date(r.DeletedAt);
+      const stamp = `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}`;
+      parts.push(t("browse.deletedOn", stamp));
+    }
     if (r.SkipReason) {
       parts.push(trBackend(r.SkipReason));
     }
@@ -204,8 +209,10 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
 
   function rowHeight(r: RowView): string {
     // has-cover 只在真的有封面 URL 时才加（异步赋值后补），初始一律无 has-cover
-    if (r.kind === "beatmap_set") return "data-row";
-    return "data-row compact";
+    let cls = r.kind === "beatmap_set" ? "data-row" : "data-row compact";
+    if (r.state === "conflict") cls += " err-row";
+    else if (r.state === "needsConfirm") cls += " warn-row";
+    return cls;
   }
 
   // 懒渲染：首屏只渲 PAGE_SIZE 行，滚动到底再追加。coverImage 只对
@@ -266,9 +273,10 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
   function renderRow(r: RowView): HTMLElement {
     const rowEl = el("div", { class: rowHeight(r) });
 
-    // 勾选框
+    // 勾选框（cb.checked 变化必须同步 rowEl.checked class，否则 CSS ::after 不绘）
     const cb = el("input", { type: "checkbox", class: "row-check" }) as HTMLInputElement;
     cb.checked = checked.has(r.key);
+    rowEl.classList.toggle("checked", cb.checked);
     cb.addEventListener("change", () => {
       if (cb.checked) checked.add(r.key);
       else checked.delete(r.key);
@@ -282,7 +290,6 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
       ...(r.sub ? [el("div", { class: "row-sub" }, [text(r.sub)])] : []),
       el("div", { class: "row-meta" }, [
         ...(r.meta ? [el("span", {}, [text(r.meta)])] : []),
-        ...(r.deletedAt > 0 ? [el("span", {}, [text(fmtMillis(r.deletedAt))])] : []),
       ]),
     ]);
 
