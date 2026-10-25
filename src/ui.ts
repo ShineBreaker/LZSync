@@ -179,14 +179,16 @@ export function popoverAt(trigger: HTMLElement, build: (pop: HTMLElement) => voi
     if (pop) return;
     pop = el("div", { class: "popover" });
     build(pop);
+    // popover 挂到 body + fixed 定位，避免 .data-row 的 overflow:hidden 裁切（DESIGN.md §悬浮明细）。
+    // 先插入再测量宽度。
+    document.body.append(pop);
     const rect = trigger.getBoundingClientRect();
-    const parent = trigger.offsetParent;
-    if (parent instanceof HTMLElement) {
-      const prect = parent.getBoundingClientRect();
-      pop.style.top = `${rect.bottom - prect.top + 6}px`;
-      pop.style.right = `${prect.right - rect.right}px`;
-      parent.append(pop);
-    }
+    const pw = pop.offsetWidth;
+    pop.style.top = `${rect.bottom + 6}px`;
+    let left = rect.right - pw;
+    if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+    if (left < 8) left = 8;
+    pop.style.left = `${left}px`;
   }
 
   function close(): void {

@@ -507,7 +507,7 @@ select.input option { background: var(--bg-card); color: var(--text-hi); }
 
 /* ---------- 悬浮层 ---------- */
 .popover {
-  position: absolute;
+  position: fixed;
   z-index: 50;
   min-width: 240px;
   background: var(--bg-hover);
