@@ -176,8 +176,10 @@ func (r *Runner) CollectWith(ctx context.Context, target forks.LibraryRef, opts 
 
 	// ③b game.ini 白名单键入快照仓（文件级、投影事务之后：投影失败则
 	// ini 快照同样不落）。源端无 game.ini 是从未启动过客户端的正常态，
-	// 计数不静默（§1.5-4）。仅目标端（ModeSnapshotOnly）不收 ini。
-	if r.deps.GameIni != nil && opts.GameIni && opts.Mode != ModeSnapshotOnly {
+	// 计数不静默（§1.5-4）。仅目标端也收——§0.3 逐键三方判定需要
+	// 目标端 ini 的当前值作 v(t) 与基线输入（快照是 hub 侧文件，读
+	// game.ini 不修改目标端任何东西，与「仅目标不改文件」不冲突）。
+	if r.deps.GameIni != nil && opts.GameIni {
 		n, gerr := collectGameIni(target, r.deps.GameIni)
 		if gerr != nil {
 			return report, fmt.Errorf("collect: 收 game.ini 白名单键: %w", gerr)

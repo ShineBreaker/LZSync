@@ -913,16 +913,22 @@ func (s *realSync) DeployCurrentPlan() (deploy.Report, error) {
 	})
 	if err == nil {
 		// game.ini 白名单键同步（§5.1-M3/S12，deploy/gameini.go 的设计
-		// 意图：与 Deploy 组合完成一次投放）。源 = 快照最新的非目标 fork；
-		// 未配置 ini 面或无源快照时不做 ini 段（如实无键可投）。
+		// 意图：与 Deploy 组合完成一次投放）。单目标投放兼容路径：无三方
+		// 判定上下文，取快照最新端的全部可同步键逐键写入（源记为该端）。
 		if s.deps.GameIni != nil {
 			if src := s.gameIniSourceFork(plan.TargetFork); src != "" {
-				// 单目标投放的兼容路径：peers 仅目标端（交集面空）。
-				gi, giErr := deploy.SyncGameIni(plan.Target, src, nil, s.deps.GameIni, s.deps.Backups, s.deps.Guard)
-				if giErr != nil {
-					return report, giErr
+				if vals, _, ok, lvErr := s.deps.GameIni.Load(src); lvErr == nil && ok {
+					dec := map[string]deploy.IniValue{}
+					for k, v := range vals {
+						dec[k] = deploy.IniValue{Value: v, SourceFork: src}
+					}
+					// peers 仅目标端（单投路径无全局交集上下文）。
+					gi, giErr := deploy.SyncGameIniValues(plan.Target, dec, nil, s.deps.Backups, s.deps.Guard)
+					if giErr != nil {
+						return report, giErr
+					}
+					report.GameIni = &gi
 				}
-				report.GameIni = &gi
 			}
 		}
 	}

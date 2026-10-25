@@ -161,15 +161,15 @@ func TestRunAOnlyCollectionDeploysToB(t *testing.T) {
 	}
 }
 
-// TestRunSameHashSetConflictStaysPending 同 Hash 谱面集两端 StatusInt
-// 不同 → 两端都不写、冲突入 Pending（§0-B4）。收藏夹成员列不随镜像播种
-//（M1 已知边界：BeatmapMD5Hashes 不进 fixture realm），故用谱面集承载。
+// TestRunSameHashSetConflictStaysPending 同一谱面身份（OnlineID 相同）
+// 两端各持不同版本且无基线 → 候选多值 = 冲突：两端都不写、冲突入
+// Pending（§0.3 规则 5/B4）。StatusInt 等端本地字段不参与取值指纹。
 func TestRunSameHashSetConflictStaysPending(t *testing.T) {
 	aSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
-		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 1},
+		{Hash: "hash-v1", OnlineID: 9001, StatusInt: 1},
 	}}
 	bSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
-		{Hash: "conflict-hash", OnlineID: 9001, StatusInt: 3},
+		{Hash: "hash-v2", OnlineID: 9001, StatusInt: 3},
 	}}
 	b, _, _, _ := newRunBackend(t, aSeed, bSeed)
 	setForkRole(t, b, "delta", false, true)
@@ -405,16 +405,19 @@ func TestMockRunFlow(t *testing.T) {
 	}
 }
 
-// TestCommitRunGameIniOnlyWrites realm 无差异、仅 game.ini 不同时
-// CommitRun 仍写入目标端 ini（§0.4 步骤 7 独立于 realm 计划）。
+// TestCommitRunGameIniOnlyWrites realm 无差异、目标端 game.ini 缺白名单
+// 键行时 CommitRun 仍把决定值补缺写入（§0.4 步骤 7 独立于 realm 计划；
+// 键缺席 = 无基线缺席 → 可补缺，非冲突）。
 func TestCommitRunGameIniOnlyWrites(t *testing.T) {
 	b, _, refA, refB := newRunBackend(t, fixture.Seed{}, fixture.Seed{})
-	// A(lazer, 源+目标) 写白名单键真值；B(delta, 仅目标) 用默认（false 面）。
+	// A(lazer, 源+目标) 写白名单键真值；B(delta, 仅目标) 只留一行红灯键——
+	// 白名单键在 B 文件里缺席 → 逐键判定为「可补缺」而非异值冲突。
 	if _, err := fixture.WriteGameIni(refA.DataDir, map[string]string{"ShowFpsDisplay": "true"}); err != nil {
 		t.Fatalf("WriteGameIni(A): %v", err)
 	}
-	if _, err := fixture.WriteGameIni(refB.DataDir, map[string]string{"ShowFpsDisplay": "false"}); err != nil {
-		t.Fatalf("WriteGameIni(B): %v", err)
+	if err := os.WriteFile(filepath.Join(refB.DataDir, "game.ini"),
+		[]byte("Token = delta-own-token\n"), 0o644); err != nil {
+		t.Fatalf("写 delta 极简 game.ini: %v", err)
 	}
 
 	preview, err := b.Sync.PrepareRun()
@@ -453,14 +456,52 @@ func TestCommitRunGameIniOnlyWrites(t *testing.T) {
 	if got, ok = inisettings.Parse(after).Value("ShowFpsDisplay"); !ok || got != "true" {
 		t.Errorf("delta game.ini ShowFpsDisplay = %q，期望 true", got)
 	}
+	if got, _ := inisettings.Parse(after).Value("Token"); got != "delta-own-token" {
+		t.Errorf("delta 红灯键 Token 被触碰: %q", got)
+	}
 }
 
-// TestPrepareRunAmbiguityQueryErrorSkipsTarget B5 歧义检查 fail-closed：
-// 取值集查询出错 → 该目标端进 Skipped 且原因携带歧义检查失败，不写该
-// 端计划。注入方式：把歧义检查用的 Hub 换成已关闭的 store——collect
-// 与 reconcile 分别走缓存的 runner 与 cmp 内各自持有的原 hub 指针，
-// 只有歧义检查读坏库。
-func TestPrepareRunAmbiguityQueryErrorSkipsTarget(t *testing.T) {
+// TestRunGameIniDivergenceStaysPending 两端同一白名单键取值不同且无
+// 基线 → 逐键冲突（§0.3 规则 5：无基线异值 = 冲突，保留差异不写）。
+func TestRunGameIniDivergenceStaysPending(t *testing.T) {
+	b, _, refA, refB := newRunBackend(t, fixture.Seed{}, fixture.Seed{})
+	if _, err := fixture.WriteGameIni(refA.DataDir, map[string]string{"ShowFpsDisplay": "true"}); err != nil {
+		t.Fatalf("WriteGameIni(A): %v", err)
+	}
+	if _, err := fixture.WriteGameIni(refB.DataDir, map[string]string{"ShowFpsDisplay": "false"}); err != nil {
+		t.Fatalf("WriteGameIni(B): %v", err)
+	}
+	preview, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	if preview.Pending.Conflicts < 1 {
+		t.Errorf("Pending.Conflicts = %d，期望 ≥1（ini 异值冲突）", preview.Pending.Conflicts)
+	}
+	report, err := b.Sync.CommitRun(preview.RunID)
+	if err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	for _, fr := range report.Forks {
+		if fr.Deploy != nil && fr.Deploy.GameIni != nil &&
+			len(fr.Deploy.GameIni.Applied) != 0 {
+			t.Errorf("ini 冲突端 %s 仍落写: %+v", fr.ForkID, fr.Deploy.GameIni.Applied)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(refB.DataDir, "game.ini"))
+	if err != nil {
+		t.Fatalf("读 delta game.ini: %v", err)
+	}
+	if got, _ := inisettings.Parse(after).Value("ShowFpsDisplay"); got != "false" {
+		t.Errorf("冲突键 delta ShowFpsDisplay = %q，期望保持 false", got)
+	}
+}
+
+// TestPrepareRunDecideInputErrorFails 判定输入装载 fail-closed：presence
+// 读不出 → PrepareRun 整体报错（判不准不动升级为不跑——半个判定面产出
+// 的计划比没有计划更危险）。注入方式：收集用缓存 runner 的原 hub 指针，
+// 判定面读的是 deps.Hub——换成已关闭的 store。
+func TestPrepareRunDecideInputErrorFails(t *testing.T) {
 	aSeed, err := fixture.StandardSeed()
 	if err != nil {
 		t.Fatalf("StandardSeed: %v", err)
@@ -475,22 +516,8 @@ func TestPrepareRunAmbiguityQueryErrorSkipsTarget(t *testing.T) {
 	bad.Close()
 	rs.deps.Hub = bad
 
-	preview, err := b.Sync.PrepareRun()
-	if err != nil {
-		t.Fatalf("PrepareRun: %v", err)
-	}
-	var deltaSkipped string
-	for _, sk := range preview.Skipped {
-		if sk.ForkID == "delta" {
-			deltaSkipped = sk.Reason
-		}
-	}
-	if !strings.Contains(deltaSkipped, "歧义检查失败") {
-		t.Fatalf("delta 未以歧义检查失败跳过（Skipped=%+v）", preview.Skipped)
-	}
-	for _, tg := range preview.Targets {
-		if tg.ForkID == "delta" {
-			t.Errorf("歧义检查失败的端不应出目标计划: %+v", tg)
-		}
+	if _, err := b.Sync.PrepareRun(); err == nil ||
+		!strings.Contains(err.Error(), "三方判定") {
+		t.Fatalf("PrepareRun = %v，期望判定面报错", err)
 	}
 }

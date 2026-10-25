@@ -199,6 +199,8 @@ export interface PlanItem {
   Restore: boolean;
   OldContentKey: string;
   Warning: string;
+  PayloadJSON: string;
+  SourceFork: string;
 }
 
 /** ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。 */
@@ -243,6 +245,11 @@ export interface RunPreview {
 export interface RunReport {
   Forks: ForkRunReport[];
   Pending: PendingSummary;
+  /**
+   * BaselineError 基线推进失败（§0.3：推进失败下一轮会重判——写入本身
+   * 幂等，如实呈现不阻断）。
+   */
+  BaselineError: string;
 }
 
 /** RunSkippedFork 本轮被跳过的端（运行中/收集失败等），携原因。 */

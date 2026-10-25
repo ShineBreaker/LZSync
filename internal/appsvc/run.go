@@ -7,7 +7,6 @@ package appsvc
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -66,22 +65,33 @@ type ForkRunReport struct {
 type RunReport struct {
 	Forks   []ForkRunReport
 	Pending PendingSummary
+	// BaselineError 基线推进失败（§0.3：推进失败下一轮会重判——写入本身
+	// 幂等，如实呈现不阻断）。
+	BaselineError string
 }
 
 // preparedRun 是 Prepare 与 Commit 之间的计划快照（只保留最新一轮）。
 type preparedRun struct {
 	plans          map[string]*deploy.Plan
+	ini            map[string]map[string]deploy.IniValue // 逐端 ini 决定值（§0.3 逐键）
 	skipped        map[string]string
 	modes          map[string]collect.Mode // 各端本轮收集模式（写后重收集复用）
 	roles          map[string]ForkRole
 	refs           map[string]forks.LibraryRef
 	kinds          map[hub.EntityKind]bool
 	gameIni        bool
-	sources        []string // 成功收集的来源端
+	sources        []string // 全部 Source 端（含被跳过——最后已知值参与判定）
 	intersection   []string // 全局交集端清单（全部 Target=true 端）
 	collectReports map[string]*collect.Report
 	pending        PendingSummary
 	order          []string // 参与端排序（ForkID 序）
+	fresh          map[string]bool // 本轮收集成功的端（presence 快照可信）
+	freshIni       map[string]bool // 本轮 ini 快照成功的端
+	// 基线推进面（§0.3）：全量轮 = 全部评估单位；勾选轮 = selUnits 子集。
+	units    map[unitKey]*unitRow
+	decs     map[unitKey]*unitDecision
+	sel      []Selection
+	selUnits map[unitKey]bool
 }
 
 var runSeq atomic.Int64
@@ -172,6 +182,7 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 
 	run := &preparedRun{
 		plans:          map[string]*deploy.Plan{},
+		ini:            map[string]map[string]deploy.IniValue{},
 		skipped:        map[string]string{},
 		modes:          map[string]collect.Mode{},
 		roles:          map[string]ForkRole{},
@@ -180,6 +191,9 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 		gameIni:        wantGameIni,
 		intersection:   intersection,
 		collectReports: map[string]*collect.Report{},
+		fresh:          map[string]bool{},
+		freshIni:       map[string]bool{},
+		sel:            sel,
 	}
 
 	// §0.4 步骤 2：逐端守卫 + 按角色收集。
@@ -195,7 +209,7 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 		opts := collect.Options{
 			Mode:    run.modes[p.ref.ForkID],
 			Kinds:   kinds,
-			GameIni: wantGameIni && p.role.Source,
+			GameIni: wantGameIni, // 仅目标端也收 ini 快照（v(t) 与基线输入，读侧不改文件）
 		}
 		s.prog(ProgressEvent{Service: "run", Stage: string(collect.StageProject), At: time.Now(),
 			Message: fmt.Sprintf("开始收集 %s", p.ref.ForkID)})
@@ -208,100 +222,73 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 			continue
 		}
 		run.collectReports[p.ref.ForkID] = &cr
-		if p.role.Source {
-			run.sources = append(run.sources, p.ref.ForkID)
+		run.fresh[p.ref.ForkID] = true
+		if s.deps.GameIni != nil && wantGameIni {
+			run.freshIni[p.ref.ForkID] = true
 		}
 	}
 	sort.Strings(run.order)
-	sort.Strings(run.sources)
 
-	// sel 过滤集（PrepareSelected）。
-	var selSet map[string]bool
-	if sel != nil {
-		selSet = make(map[string]bool, len(sel))
+	// §0.3 三方判定：候选来源 = 全部 Source 端（含被跳过——presence 是
+	// 最后已知取值）；目标 = 全部 Target 端（含被跳过——它们仍参与全局
+	// 交集与保护判定，只是不出计划）。
+	sourceIDs := s.cfg.sourceForkIDs()
+	sort.Strings(sourceIDs)
+	run.sources = sourceIDs
+	live := map[string]bool{}
+	for _, p := range parts {
+		if p.role.Target && run.skipped[p.ref.ForkID] == "" {
+			live[p.ref.ForkID] = true
+		}
+	}
+	outcome, err := s.runDecisions(ctx, sourceIDs, intersection, live, kinds, wantGameIni, run.freshIni)
+	if err != nil {
+		return RunPreview{}, fmt.Errorf("三方判定: %w", err)
+	}
+	run.units, run.decs, run.pending = outcome.units, outcome.decs, outcome.pending
+
+	if sel == nil {
+		// §0.4 步骤 3-4（全量轮）：计划与 ini 决定值由三方判定产出，
+		// 逐 live 目标端装计划。
+		for _, p := range parts {
+			if !p.role.Target || !live[p.ref.ForkID] {
+				continue
+			}
+			plan, err := deploy.NewPlan(p.ref.ForkID, outcome.plans[p.ref.ForkID])
+			if err != nil {
+				run.skipped[p.ref.ForkID] = err.Error()
+				continue
+			}
+			plan.Target = p.ref
+			plan.Intersection = intersection
+			run.plans[p.ref.ForkID] = &plan
+		}
+		run.ini = outcome.ini
+	} else {
+		// 勾选轮（§0.4 手动处置）：勾选项即用户对冲突/恢复/弱键的显式
+		// 拍板，按 canonical 变体生成计划（planItemFrom）；判定产物只用于
+		// 待处理计数与基线推进面（selUnits 在 CommitRun 计算）。
+		selSet := make(map[string]bool, len(sel))
 		for _, sl := range sel {
 			selSet[string(sl.Kind)+"\x00"+sl.ContentKey] = true
 		}
-	}
-	sum := newSummarizer(s.deps.Hub)
-	conflictSeen := map[string]bool{}
-	confirmSeen := map[string]bool{}
-	restoreSeen := map[string]bool{}
-
-	// §0.4 步骤 3-4：逐目标端预演（create 非恢复 + B5 无歧义检查）。
-	// 歧义检查的来源集合 = config 中全部 Source 角色端（含本轮被跳过者——
-	// 其 presence 是最后已知取值，纳入更保守）；run.sources 只用于 ini 源。
-	sourceIDs := s.cfg.sourceForkIDs()
-targetLoop:
-	for _, p := range parts {
-		if !p.role.Target {
-			continue
-		}
-		if _, dead := run.skipped[p.ref.ForkID]; dead {
-			continue
-		}
-		items, err := s.cmp.allReconcileItems(ctx, p.ref.ForkID)
-		if err != nil {
-			run.skipped[p.ref.ForkID] = err.Error()
-			continue
-		}
-		var planItems []deploy.PlanItem
-		for _, it := range items {
-			if !kinds[it.Kind] {
-				continue // 板块关闭
-			}
-			if selSet != nil && !selSet[string(it.Kind)+"\x00"+it.ContentKey] {
+		sum := newSummarizer(s.deps.Hub)
+		for _, p := range parts {
+			if !p.role.Target || !live[p.ref.ForkID] {
 				continue
 			}
-			key := string(it.Kind) + "\x00" + it.ContentKey
-			switch it.Category {
-			case hub.ReconcileCreate:
-				if it.Restorable {
-					if selSet != nil {
-						planItems = append(planItems, planItemFrom(it, sum))
-						continue
-					}
-					if !restoreSeen[key] {
-						restoreSeen[key] = true
-						run.pending.Restore++
-					}
+			items, err := s.cmp.allReconcileItems(ctx, p.ref.ForkID)
+			if err != nil {
+				run.skipped[p.ref.ForkID] = err.Error()
+				continue
+			}
+			var planItems []deploy.PlanItem
+			for _, it := range items {
+				if !kinds[it.Kind] || !selSet[string(it.Kind)+"\x00"+it.ContentKey] {
 					continue
-				}
-				amb, aerr := s.ambiguousValue(ctx, it, p.ref.ForkID, sourceIDs)
-				if aerr != nil {
-					// fail-closed：取值集读不全 = 无法判歧义，本端不写。
-					run.skipped[p.ref.ForkID] = fmt.Sprintf("歧义检查失败：%v", aerr)
-					continue targetLoop
-				}
-				if amb {
-					if !conflictSeen[key] {
-						conflictSeen[key] = true
-						run.pending.Conflicts++
-					}
-					continue // §0-B5：取值无歧义才可自动写
 				}
 				planItems = append(planItems, planItemFrom(it, sum))
-			case hub.ReconcileConflict:
-				if selSet != nil {
-					planItems = append(planItems, planItemFrom(it, sum)) // 显式勾选 = 推 hub 变体
-					continue
-				}
-				if !conflictSeen[key] {
-					conflictSeen[key] = true
-					run.pending.Conflicts++
-				}
-			case hub.ReconcileVersionUpdate:
-				if selSet != nil {
-					planItems = append(planItems, planItemFrom(it, sum))
-					continue
-				}
-				if !confirmSeen[key] {
-					confirmSeen[key] = true
-					run.pending.NeedsConfirm++
-				}
 			}
-		}
-		if selSet != nil {
 			// 勾选但不在本端预演中的项：逐端如实记 skip（快照可能已过期）。
 			inPlan := map[string]bool{}
 			for _, it := range items {
@@ -318,15 +305,15 @@ targetLoop:
 					SkipReason: "预演数据中不存在该键（快照可能已过期，请刷新预览）",
 				})
 			}
+			plan, err := deploy.NewPlan(p.ref.ForkID, planItems)
+			if err != nil {
+				run.skipped[p.ref.ForkID] = err.Error()
+				continue
+			}
+			plan.Target = p.ref
+			plan.Intersection = intersection
+			run.plans[p.ref.ForkID] = &plan
 		}
-		plan, err := deploy.NewPlan(p.ref.ForkID, planItems)
-		if err != nil {
-			run.skipped[p.ref.ForkID] = err.Error()
-			continue
-		}
-		plan.Target = p.ref
-		plan.Intersection = intersection
-		run.plans[p.ref.ForkID] = &plan
 	}
 
 	// 预览：将写入的动作项数（不含 skip）。
@@ -381,6 +368,18 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 	defer cancel()
 
 	report := RunReport{Pending: run.pending, Forks: []ForkRunReport{}}
+	// 基线推进的新鲜度面（§0.3「成功快照/写后重读」）：presence 基线要求
+	// 本轮收集成功且（有写入 → 投放+重收集成功）；ini 基线要求本轮 ini
+	// 快照成功且（有写入 → 写后重读成功）。任一环节失败的端基线整体
+	// 不动——陈旧快照推进成基线会吞掉真实改动。
+	fresh := map[string]bool{}
+	for fid := range run.fresh {
+		fresh[fid] = true
+	}
+	freshIni := map[string]bool{}
+	for fid := range run.freshIni {
+		freshIni[fid] = true
+	}
 	for _, fid := range run.order {
 		role := run.roles[fid]
 		fr := ForkRunReport{ForkID: fid, Source: role.Source, Target: role.Target}
@@ -406,6 +405,7 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 		if role.Target && hasPlan && actionable {
 			if ctx.Err() != nil {
 				fr.Error = ctx.Err().Error()
+				fresh[fid] = false
 				report.Forks = append(report.Forks, fr)
 				continue
 			}
@@ -417,29 +417,35 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 			})
 			fr.Deploy = &rep
 			if derr != nil {
-				// realm 投放失败 → 本端不做 ini、不重收集。
+				// realm 投放失败 → 本端不做 ini、不重收集、基线不动。
 				fr.Error = derr.Error()
+				fresh[fid] = false
 				report.Forks = append(report.Forks, fr)
 				continue
 			}
 			realmOK = true
 			report.Pending.Unsupported += intersectionSkipCount(rep)
 		}
-		// game.ini 白名单键同步（板块开 + 未跳过 Target 即跑——即使本轮
-		// 该端 realm 无可执行项；「只有 ini 不同」必须能同步）。源只从
-		// Source 端中挑快照最新者，peers=全部 Target 端交集。
-		if role.Target && run.gameIni && s.deps.GameIni != nil {
-			if src := s.gameIniSourceForkFrom(run.sources, fid); src != "" {
-				if gi, gerr := deploy.SyncGameIni(run.refs[fid], src, run.intersection,
-					s.deps.GameIni, s.deps.Backups, s.deps.Guard); gerr == nil {
-					if fr.Deploy != nil {
-						fr.Deploy.GameIni = &gi
-					} else {
-						fr.Deploy = &deploy.Report{GameIni: &gi}
-					}
+		// game.ini 逐键决定值写入（§0.3/G8：板块开 + 未跳过 Target 且
+		// 有决定键值即跑——「只有 ini 不同」必须能同步）。
+		if role.Target && run.gameIni && len(run.ini[fid]) > 0 {
+			if gi, gerr := deploy.SyncGameIniValues(run.refs[fid], run.ini[fid], run.intersection,
+				s.deps.Backups, s.deps.Guard); gerr == nil {
+				if fr.Deploy != nil {
+					fr.Deploy.GameIni = &gi
 				} else {
-					fr.Error = gerr.Error()
+					fr.Deploy = &deploy.Report{GameIni: &gi}
 				}
+				// 写后重读快照（基线推进的最终值输入）。
+				if rerr := s.refreshIniSnapshot(run.refs[fid]); rerr != nil {
+					freshIni[fid] = false
+					if fr.Error == "" {
+						fr.Error = fmt.Sprintf("ini 写入成功但快照重读失败：%s", rerr.Error())
+					}
+				}
+			} else {
+				fr.Error = gerr.Error()
+				freshIni[fid] = false // ini 写入失败 → 该端 ini 基线不动
 			}
 		}
 		if realmOK {
@@ -447,17 +453,54 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 			opts := collect.Options{
 				Mode:    run.modes[fid],
 				Kinds:   run.kinds,
-				GameIni: run.gameIni && role.Source,
+				GameIni: run.gameIni,
 			}
 			if cr, cerr := s.cRunner().CollectWith(ctx, run.refs[fid], opts, nil); cerr == nil {
 				fr.Collect = &cr
-			} else if fr.Error == "" {
-				fr.Error = fmt.Sprintf("投放成功但重收集失败：%s", cerr.Error())
+			} else {
+				fresh[fid] = false // 重收集失败 → 最终值不可信，基线不动
+				if fr.Error == "" {
+					fr.Error = fmt.Sprintf("投放成功但重收集失败：%s", cerr.Error())
+				}
 			}
 		}
 		report.Forks = append(report.Forks, fr)
 	}
+
+	// §0.3 基线推进：全量轮 = 全部评估单位（冲突/保护冻结）；勾选轮 =
+	// 勾选处置覆盖的单位子集（用户拍板即解析，解冻推进）。
+	scope := run.units
+	var only map[unitKey]bool
+	if run.sel != nil {
+		su, serr := s.selUnits(ctx, run.sel, run.units)
+		if serr != nil {
+			report.BaselineError = serr.Error()
+			return report, nil
+		}
+		only = su
+		scope = suRows(run.units, su)
+	}
+	rows := baselineRows(scope, run.decs, func(kind string) map[string]bool {
+		if kind == hub.BaselineKindGameIni {
+			return freshIni
+		}
+		return fresh
+	}, only != nil, time.Now().UnixMilli())
+	if err := s.deps.Hub.AdvanceBaselines(ctx, rows); err != nil {
+		report.BaselineError = err.Error()
+	}
 	return report, nil
+}
+
+// suRows 勾选轮的基线推进面：只含勾选单位（未勾选的冲突保持冻结）。
+func suRows(units map[unitKey]*unitRow, only map[unitKey]bool) map[unitKey]*unitRow {
+	out := map[unitKey]*unitRow{}
+	for uk := range only {
+		if row, ok := units[uk]; ok {
+			out[uk] = row
+		}
+	}
+	return out
 }
 
 // intersectionSkipCount 全局交集排除的 skip 计数（Pending.Unsupported 的
@@ -472,238 +515,3 @@ func intersectionSkipCount(rep deploy.Report) int {
 	return n
 }
 
-// gameIniSourceForkFrom 在候选来源端中选 game.ini 快照最新者（快照时间
-// LastWrite-wins 保守近似；无快照返回空串——调用方跳过 ini 段）。
-func (s *realSync) gameIniSourceForkFrom(candidates []string, target string) string {
-	best, bestAt := "", time.Time{}
-	for _, fid := range candidates {
-		if fid == target {
-			continue
-		}
-		_, at, ok, err := s.deps.GameIni.Load(fid)
-		if err != nil || !ok {
-			continue
-		}
-		if best == "" || at.After(bestAt) {
-			best, bestAt = fid, at
-		}
-	}
-	return best
-}
-
-// --- §0-B5 取值无歧义检查（create 前，fail-closed） ---
-
-// ambiguousValue 报告 create 项在各来源端间取值是否有歧义（有歧义 = 不
-// 入计划、计 Conflicts；hub 首见即定的 canonical 只是先到的端值，自动
-// 写出去等于替用户拍板）。查询/扫描错误一律上抛——取值集合读不全时
-// 按「无法判歧义」放行等于把不确定当确定，fail-closed 才对。
-//
-//   - collection / ruleset_setting / mod_preset：多个来源端 presence
-//     对同一内容键的同步值字段不一致 → 歧义；
-//   - key_binding：目标端 presence 已有同 (ruleset, variant, action) 但
-//     不同 key_combination 的行 → 歧义（同动作多键位布局冲突）；
-//   - beatmap_set：同一谱面身份键下来源端 presence 持有 ≥2 个不同版本
-//     （identity_version 配对键）→ 歧义；
-//   - skin / score：内容键即文件哈希，无取值歧义可能。
-func (s *realSync) ambiguousValue(ctx context.Context, it hub.ReconcileItem, targetFork string, sources []string) (bool, error) {
-	switch it.Kind {
-	case hub.KindCollection, hub.KindRulesetSetting, hub.KindModPreset:
-		vals, err := s.presenceValues(ctx, it.Kind, it.ContentKey, sources)
-		if err != nil {
-			return false, err
-		}
-		return len(vals) >= 2, nil
-	case hub.KindKeyBinding:
-		return s.keyBindingAmbiguous(ctx, it.ContentKey, targetFork)
-	case hub.KindBeatmapSet:
-		return s.beatmapSetAmbiguous(ctx, it.ContentKey, sources)
-	default:
-		return false, nil
-	}
-}
-
-// presenceValues 取给定 (kind, key) 在各来源端 presence 中的同步值指纹
-// 去重集合（local_values 是 fork 侧投影 DTO JSON——按同步值比较，不比
-// 端本地字段）。
-func (s *realSync) presenceValues(ctx context.Context, kind hub.EntityKind, contentKey string, sources []string) (map[string]bool, error) {
-	vals := map[string]bool{}
-	if len(sources) == 0 {
-		return vals, nil
-	}
-	rows, err := s.deps.Hub.DB().QueryContext(ctx,
-		`SELECT fork_id, local_values FROM presence WHERE kind=? AND content_key=? AND fork_id IN (`+
-			placeholders(len(sources))+`)`, presenceArgs(kind, contentKey, sources)...)
-	if err != nil {
-		return nil, fmt.Errorf("读 presence 取值集: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var fid, lv string
-		if err := rows.Scan(&fid, &lv); err != nil {
-			return nil, fmt.Errorf("扫 presence 行: %w", err)
-		}
-		if v := syncValueFingerprint(kind, lv); v != "" {
-			vals[v] = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("遍历 presence 行: %w", err)
-	}
-	return vals, nil
-}
-
-func placeholders(n int) string {
-	var b strings.Builder
-	for i := 0; i < n; i++ {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteByte('?')
-	}
-	return b.String()
-}
-
-func presenceArgs(kind hub.EntityKind, contentKey string, sources []string) []any {
-	args := make([]any, 0, len(sources)+2)
-	args = append(args, string(kind), contentKey)
-	for _, f := range sources {
-		args = append(args, f)
-	}
-	return args
-}
-
-// syncValueFingerprint 从 presence.local_values（投影 DTO JSON）提取
-// 「同步值」指纹——只比要同步的字段，端本地字段不参与比较。
-func syncValueFingerprint(kind hub.EntityKind, localValues string) string {
-	switch kind {
-	case hub.KindCollection:
-		var c hub.Collection
-		if err := json.Unmarshal([]byte(localValues), &c); err != nil {
-			return ""
-		}
-		hashes := append([]string(nil), c.BeatmapMD5Hashes...)
-		sort.Strings(hashes)
-		return strings.Join(hashes, "|")
-	case hub.KindRulesetSetting:
-		var rs hub.RulesetSetting
-		if err := json.Unmarshal([]byte(localValues), &rs); err != nil {
-			return ""
-		}
-		return rs.Value
-	case hub.KindModPreset:
-		var mp hub.ModPreset
-		if err := json.Unmarshal([]byte(localValues), &mp); err != nil {
-			return ""
-		}
-		return mp.Description + "\x00" + mp.ModsJson
-	default:
-		return ""
-	}
-}
-
-// keyBindingAmbiguous 目标端 presence 已有同 (ruleset, variant, action)
-// 但不同 key_combination 的行 → 歧义（一条 action 多行多键的布局差异，
-// 自动写入会替用户拍板）。
-func (s *realSync) keyBindingAmbiguous(ctx context.Context, contentKey, targetFork string) (bool, error) {
-	rn, v, ai, kc, err := decodeKeyBindingKey(contentKey)
-	if err != nil {
-		return false, fmt.Errorf("键位内容键解码 %q: %w", contentKey, err)
-	}
-	rows, err := s.deps.Hub.DB().QueryContext(ctx,
-		`SELECT local_values FROM presence WHERE fork_id=? AND kind=?`,
-		targetFork, string(hub.KindKeyBinding))
-	if err != nil {
-		return false, fmt.Errorf("读目标键位 presence: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var lv string
-		if err := rows.Scan(&lv); err != nil {
-			return false, fmt.Errorf("扫目标键位 presence 行: %w", err)
-		}
-		var kb hub.KeyBinding
-		if err := json.Unmarshal([]byte(lv), &kb); err != nil {
-			continue // local_values 单条解析失败不挡路（同键匹配已在外层查全）
-		}
-		sameRuleset := (kb.RulesetName == nil && rn == nil) ||
-			(kb.RulesetName != nil && rn != nil && *kb.RulesetName == *rn)
-		sameVariant := (kb.Variant == nil && v == nil) ||
-			(kb.Variant != nil && v != nil && *kb.Variant == *v)
-		if sameRuleset && sameVariant && kb.ActionInt == ai && kb.KeyCombination != kc {
-			return true, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("遍历目标键位 presence: %w", err)
-	}
-	return false, nil
-}
-
-// decodeKeyBindingKey 键位组合内容键的解析（hub 编码 JSON 数组四段）。
-func decodeKeyBindingKey(key string) (rulesetName *string, variant *int, actionInt int, keyCombination string, err error) {
-	var parts [4]json.RawMessage
-	if err = json.Unmarshal([]byte(key), &parts); err != nil {
-		return nil, nil, 0, "", err
-	}
-	err = json.Unmarshal(parts[0], &rulesetName)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-	err = json.Unmarshal(parts[1], &variant)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-	err = json.Unmarshal(parts[2], &actionInt)
-	if err != nil {
-		return nil, nil, 0, "", err
-	}
-	err = json.Unmarshal(parts[3], &keyCombination)
-	return
-}
-
-// beatmapSetAmbiguous 同一谱面身份键下来源端 presence 持有 ≥2 个不同
-// 版本 → 歧义（hub 链尾只是先到的值，没有基线裁决不该自动写）。一个
-// content_hash 可配多个 identity_key（online: 与 meta: 共存），逐个查。
-func (s *realSync) beatmapSetAmbiguous(ctx context.Context, contentKey string, sources []string) (bool, error) {
-	if len(sources) == 0 {
-		return false, nil
-	}
-	idRows, err := s.deps.Hub.DB().QueryContext(ctx,
-		`SELECT DISTINCT identity_key FROM identity_version WHERE content_hash=?`, contentKey)
-	if err != nil {
-		return false, fmt.Errorf("读谱面集 %s 的身份键: %w", contentKey, err)
-	}
-	var identityKeys []string
-	for idRows.Next() {
-		var ik string
-		if err := idRows.Scan(&ik); err != nil {
-			idRows.Close()
-			return false, fmt.Errorf("扫身份键行: %w", err)
-		}
-		identityKeys = append(identityKeys, ik)
-	}
-	if err := idRows.Err(); err != nil {
-		idRows.Close()
-		return false, fmt.Errorf("遍历身份键: %w", err)
-	}
-	idRows.Close()
-	for _, identityKey := range identityKeys {
-		args := make([]any, 0, len(sources)+2)
-		args = append(args, identityKey, string(hub.KindBeatmapSet))
-		for _, f := range sources {
-			args = append(args, f)
-		}
-		var n int
-		if err := s.deps.Hub.DB().QueryRowContext(ctx,
-			`SELECT COUNT(DISTINCT p.content_key) FROM presence p
-JOIN identity_version iv ON iv.content_hash = p.content_key
-WHERE iv.identity_key=? AND p.kind=? AND p.fork_id IN (`+placeholders(len(sources))+`)`,
-			args...).Scan(&n); err != nil {
-			return false, fmt.Errorf("数身份键 %s 的来源端版本: %w", identityKey, err)
-		}
-		if n >= 2 {
-			return true, nil
-		}
-	}
-	return false, nil
-}
