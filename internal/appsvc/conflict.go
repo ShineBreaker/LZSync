@@ -25,6 +25,7 @@ func (s *realCompare) UnitConflict(kind hub.EntityKind, contentKey string) (Conf
 	sum := newSummarizer(s.deps.Hub)
 	parts := s.participants()
 
+	d.CanPickHub = true
 	switch kind {
 	case hub.KindBeatmapSet:
 		return s.unitConflictSet(ctx, contentKey, parts, sum, d)
@@ -35,6 +36,8 @@ func (s *realCompare) UnitConflict(kind hub.EntityKind, contentKey string) (Conf
 		return s.unitConflictScalar(ctx, kind, contentKey, parts, sum, d)
 	case hub.KindKeyBinding:
 		return s.unitConflictKeyBinding(ctx, contentKey, parts, d)
+	case hub.EntityKind(hub.BaselineKindGameIni):
+		return s.unitConflictIni(ctx, contentKey, parts, d)
 	default:
 		return d, fmt.Errorf("appsvc: 冲突详情不支持实体类型 %q", kind)
 	}
@@ -338,30 +341,83 @@ func (s *realCompare) unitConflictScalar(ctx context.Context, kind hub.EntityKin
 }
 
 // canonicalPayload 各类 canonical 载荷查询（内容键→payload）。
+// 注意键编码：score 是 "|" 拼接可直接 SQL 拼列；设置类是 JSON 数组编
+// 码（encodeContentKey），必须解码后按列查询，拼接会撞不出行。
 func (s *realCompare) canonicalPayload(ctx context.Context, kind hub.EntityKind, key string) (string, error) {
 	var q string
+	var args []any
 	switch kind {
 	case hub.KindCollection:
 		q = `SELECT payload FROM collection WHERE content_key=?`
+		args = []any{key}
 	case hub.KindSkin:
 		q = `SELECT payload FROM skin WHERE content_hash=?`
+		args = []any{key}
 	case hub.KindScore:
 		q = `SELECT payload FROM score WHERE beatmap_hash || '|' || content_hash=?`
+		args = []any{key}
 	case hub.KindRulesetSetting:
-		q = `SELECT payload FROM ruleset_setting WHERE ruleset_name || '|' || variant || '|' || key=?`
+		rn, v, k, err := decodeSettingKey(key)
+		if err != nil {
+			return "", err
+		}
+		q = `SELECT payload FROM ruleset_setting WHERE ruleset_name=? AND variant=? AND key=?`
+		args = []any{rn, v, k}
 	case hub.KindModPreset:
-		q = `SELECT payload FROM mod_preset WHERE ruleset_short_name || '|' || name=?`
+		rsn, name, err := decodePresetKey(key)
+		if err != nil {
+			return "", err
+		}
+		q = `SELECT payload FROM mod_preset WHERE ruleset_short_name=? AND name=?`
+		args = []any{rsn, name}
 	case hub.KindKeyBinding:
 		q = `SELECT payload FROM key_binding` // 调用侧按键位身份过滤
+		args = []any{key}
 	default:
 		return "", fmt.Errorf("appsvc: 无 canonical 查询的实体类型 %q", kind)
 	}
 	var p string
-	err := s.deps.Hub.DB().QueryRowContext(ctx, q, key).Scan(&p)
+	err := s.deps.Hub.DB().QueryRowContext(ctx, q, args...).Scan(&p)
 	if err != nil {
 		return "", nil // 无 canonical 行（异域内容等）——上层决定话术
 	}
 	return p, nil
+}
+
+// decodeSettingKey 规则集设置 JSON 内容键 → (RulesetName, Variant, Key)。
+func decodeSettingKey(key string) (string, int, string, error) {
+	var parts [3]json.RawMessage
+	if err := json.Unmarshal([]byte(key), &parts); err != nil {
+		return "", 0, "", fmt.Errorf("appsvc: 非法的规则集设置内容键 %q: %w", key, err)
+	}
+	var rn, k string
+	var v int
+	if err := json.Unmarshal(parts[0], &rn); err != nil {
+		return "", 0, "", err
+	}
+	if err := json.Unmarshal(parts[1], &v); err != nil {
+		return "", 0, "", err
+	}
+	if err := json.Unmarshal(parts[2], &k); err != nil {
+		return "", 0, "", err
+	}
+	return rn, v, k, nil
+}
+
+// decodePresetKey Mod 预设 JSON 内容键 → (RulesetShortName, Name)。
+func decodePresetKey(key string) (string, string, error) {
+	var parts [2]json.RawMessage
+	if err := json.Unmarshal([]byte(key), &parts); err != nil {
+		return "", "", fmt.Errorf("appsvc: 非法的 Mod 预设内容键 %q: %w", key, err)
+	}
+	var rsn, name string
+	if err := json.Unmarshal(parts[0], &rsn); err != nil {
+		return "", "", err
+	}
+	if err := json.Unmarshal(parts[1], &name); err != nil {
+		return "", "", err
+	}
+	return rsn, name, nil
 }
 
 // scalarSummary 标量类载荷 → 人话摘要（面板「值」列）。
@@ -509,4 +565,255 @@ func comboSummary(set map[string]bool) string {
 	}
 	sort.Strings(out)
 	return strings.Join(out, ", ")
+}
+
+// ---------------------------------------------------------------------------
+// 冲突清单（ListConflicts）与 game.ini 冲突明细
+// ---------------------------------------------------------------------------
+
+// ListConflicts 全类冲突枚举（CompareService 实现）：快照态跑三方判定
+// （不跑收集——与 UnitConflict 同口径的「最近一轮同步后」数据），冲突/
+// 保护/异值单位 → 可处置行。收藏成员级冲突按收藏名归并为一行（处置
+// 粒度 = 整夹拍板）。
+func (s *realCompare) ListConflicts() ([]ConflictRow, error) {
+	ctx := context.Background()
+	live := map[string]bool{}
+	freshIni := map[string]bool{}
+	for _, f := range s.participants() {
+		live[f] = true
+		freshIni[f] = true
+	}
+	out, err := runDecisions(ctx, &s.deps, s.cfg.sourceForkIDs(), s.cfg.targetForkIDs(),
+		live, scopeKinds(s.cfg), s.cfg.sectionEnabled(SectionGameIni), freshIni)
+	if err != nil {
+		return nil, err
+	}
+	sum := newSummarizer(s.deps.Hub)
+	var rows []ConflictRow
+	seen := map[string]int{} // 归并键 → rows 下标
+	for uk, dec := range out.decs {
+		if !(dec.conflict || len(dec.protected) > 0 || len(dec.divergent) > 0) {
+			continue
+		}
+		row := out.units[uk]
+		if row == nil {
+			continue // 纯基线残留单位（无 presence）——面板无可展示值
+		}
+		cr := conflictRowFor(uk, row, out.in, sum)
+		if cr.ContentKey == "" {
+			continue
+		}
+		gk := cr.Kind + "\x00" + cr.ContentKey
+		if i, ok := seen[gk]; ok {
+			// 成员单位并入收藏行：歧成员数累加、持有端并集。
+			rows[i].Values++
+			rows[i].Forks = unionStrings(rows[i].Forks, cr.Forks)
+			continue
+		}
+		seen[gk] = len(rows)
+		rows = append(rows, cr)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Kind != rows[j].Kind {
+			return rows[i].Kind < rows[j].Kind
+		}
+		return rows[i].ContentKey < rows[j].ContentKey
+	})
+	return rows, nil
+}
+
+// conflictRowFor 判定单位 → 清单行（ContentKey 保证回填 Selection/
+// UnitConflict 归并到同一单位）。
+func conflictRowFor(uk unitKey, row *unitRow, in *decideInput, sum *summarizer) ConflictRow {
+	cr := ConflictRow{Kind: uk.kind, CanPickHub: true}
+	fps := map[string]bool{}
+	for f, v := range row.cur {
+		cr.Forks = append(cr.Forks, f)
+		fps[v.fp] = true
+	}
+	sort.Strings(cr.Forks)
+	cr.Values = len(fps)
+
+	switch uk.kind {
+	case string(hub.KindCollection):
+		cr.ContentKey = uk.identity
+		cr.Label = sum.summary(hub.KindCollection, uk.identity)
+		cr.Values = 1 // 成员级行归并：本行即一个歧成员，后续单位在 ListConflicts 累加
+	case string(hub.KindBeatmapSet):
+		cr.ContentKey = pickHeldHash(row, in)
+		cr.Label = sum.summary(hub.KindBeatmapSet, cr.ContentKey)
+	case string(hub.KindKeyBinding):
+		// 勾选/详情键要求四段内容键——三段身份 + 持有者首个组合拼回。
+		ck, ok := kbContentKeyFor(uk.identity, row)
+		if !ok {
+			return ConflictRow{}
+		}
+		cr.ContentKey = ck
+		cr.Label = kbLabel(uk.identity)
+	case hub.BaselineKindGameIni:
+		cr.ContentKey = uk.identity
+		cr.Label = "game.ini · " + uk.identity
+		cr.CanPickHub = false
+	case string(hub.KindRulesetSetting):
+		cr.ContentKey = uk.identity
+		if rn, v, k, err := decodeSettingKey(uk.identity); err == nil {
+			cr.Label = fmt.Sprintf("%s · 变体 %d · %s", rn, v, k)
+		} else {
+			cr.Label = uk.identity
+		}
+	case string(hub.KindModPreset):
+		cr.ContentKey = uk.identity
+		if rsn, name, err := decodePresetKey(uk.identity); err == nil {
+			cr.Label = fmt.Sprintf("%s · %s", rsn, name)
+		} else {
+			cr.Label = uk.identity
+		}
+	default:
+		cr.ContentKey = uk.identity
+		cr.Label = sum.summary(hub.EntityKind(uk.kind), uk.identity)
+	}
+	return cr
+}
+
+// pickHeldHash 谱面集冲突行键：canonical 有行的版本优先（摘要可读），
+// 否则最小哈希——确定性锚回同一单位。
+func pickHeldHash(row *unitRow, in *decideInput) string {
+	var held []string
+	for _, v := range row.cur {
+		held = append(held, decodeSetFP(v.fp)...)
+	}
+	sort.Strings(held)
+	for _, h := range held {
+		if in.canon.sets[h] {
+			return h
+		}
+	}
+	if len(held) > 0 {
+		return held[0]
+	}
+	return ""
+}
+
+// kbContentKeyFor 三段身份 + 首个持有组合 → 四段内容键。
+func kbContentKeyFor(identity string, row *unitRow) (string, bool) {
+	rn, v, ai, err := decodeKbIdentity(identity)
+	if err != nil {
+		return "", false
+	}
+	var combos []string
+	for _, uv := range row.cur {
+		combos = append(combos, decodeSetFP(uv.fp)...)
+	}
+	if len(combos) == 0 {
+		return "", false
+	}
+	sort.Strings(combos)
+	return hub.KeyBindingContentKey(rn, v, ai, combos[0]), true
+}
+
+// decodeKbIdentity 三段键位身份键解码（与 DecodeKeyBindingContentKey 同
+// 编码域、少 KeyCombination 段）。
+func decodeKbIdentity(id string) (*string, *int, int, error) {
+	var parts [3]json.RawMessage
+	if err := json.Unmarshal([]byte(id), &parts); err != nil {
+		return nil, nil, 0, fmt.Errorf("hub: 非法的键位身份键 %q: %w", id, err)
+	}
+	var rn *string
+	var v *int
+	var ai int
+	if err := json.Unmarshal(parts[0], &rn); err != nil {
+		return nil, nil, 0, err
+	}
+	if err := json.Unmarshal(parts[1], &v); err != nil {
+		return nil, nil, 0, err
+	}
+	if err := json.Unmarshal(parts[2], &ai); err != nil {
+		return nil, nil, 0, err
+	}
+	return rn, v, ai, nil
+}
+
+// kbLabel 键位冲突行标签（规则集 · 变体 · 动作号）。
+func kbLabel(identity string) string {
+	rn, v, ai, err := decodeKbIdentity(identity)
+	if err != nil {
+		return identity
+	}
+	name := "默认"
+	if rn != nil {
+		name = *rn
+	}
+	variant := 0
+	if v != nil {
+		variant = *v
+	}
+	return fmt.Sprintf("%s · 变体 %d · 动作 %d", name, variant, ai)
+}
+
+// unionStrings 有序并集。
+func unionStrings(a, b []string) []string {
+	set := map[string]bool{}
+	for _, x := range a {
+		set[x] = true
+	}
+	for _, x := range b {
+		set[x] = true
+	}
+	out := make([]string, 0, len(set))
+	for x := range set {
+		out = append(out, x)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// unitConflictIni game.ini 键的冲突面：无 canonical 表（ini 只存端侧
+// 快照）——「中枢」列显示基线一致值（上次同步值），不可选「以中枢为准」。
+func (s *realCompare) unitConflictIni(ctx context.Context, key string,
+	parts []string, d ConflictDetail) (ConflictDetail, error) {
+	d.CanPickHub = false // ini 无 canonical——中枢无可选值，只能选端
+	base, err := s.deps.Hub.Baselines(ctx)
+	if err != nil {
+		return d, err
+	}
+	vals := map[string]bool{}
+	seen := false
+	for _, r := range base {
+		if r.Kind == hub.BaselineKindGameIni && r.Identity == key && r.Member == "" {
+			seen = true
+			vals[r.Value] = true
+		}
+	}
+	baseVal := ""
+	switch {
+	case !seen:
+		d.Canonical = "（无同步基线）"
+	case len(vals) == 1:
+		for v := range vals {
+			baseVal = v
+		}
+		d.Canonical = "上次同步值：" + baseVal
+	default:
+		d.Canonical = "（基线分歧）"
+	}
+	if s.deps.GameIni == nil {
+		return d, fmt.Errorf("appsvc: ini 快照仓不可用")
+	}
+	for _, f := range parts {
+		v := ConflictVariant{ForkID: f}
+		m, _, ok, err := s.deps.GameIni.Load(f)
+		if err != nil {
+			return d, fmt.Errorf("appsvc: 读 %s 的 ini 快照: %w", f, err)
+		}
+		if val, has := m[key]; ok && has {
+			v.Has, v.Key, v.Value = true, key, val
+			if baseVal != "" && val != baseVal {
+				v.Fields = []FieldDiff{{Field: "Value", HubValue: baseVal, ForkValue: val}}
+			}
+		} else {
+			v.Value = "缺席"
+		}
+		d.Variants = append(d.Variants, v)
+	}
+	return d, nil
 }

@@ -442,7 +442,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 		ini:     map[string]map[string]deploy.IniValue{},
 		units:   units,
 		decs:    decs,
-		pending: PendingSummary{},
+		pending: PendingSummary{ByKind: map[string]int{}},
 	}
 	emitted := map[string]map[string]bool{} // target → kind\x00key 去重（谱面集同 hash 可挂多身份键）
 	addItem := func(target string, it deploy.PlanItem) {
@@ -523,6 +523,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 		row := units[uk]
 		if dec.conflict || len(dec.protected) > 0 || len(dec.divergent) > 0 {
 			out.pending.Conflicts++
+			out.pending.ByKind[uk.kind]++
 		}
 		if !dec.decided {
 			continue // 无候选 → 保留差异
@@ -535,6 +536,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 			if len(hashes) != 1 {
 				// 多版本持有端当候选 → 无法决定单版本投放 → 冲突。
 				out.pending.Conflicts++
+				out.pending.ByKind[uk.kind]++
 				dec.conflict = true
 				continue
 			}
@@ -550,6 +552,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 				if len(cur) > 1 {
 					// 目标端自身持多版本 → 判不准，保护计冲突。
 					out.pending.Conflicts++
+					out.pending.ByKind[uk.kind]++
 					dec.protected[t] = true
 					continue
 				}
@@ -1156,11 +1159,12 @@ ORDER BY CASE WHEN identity_key LIKE 'online:%' THEN 0 ELSE 1 END, identity_key`
 	return in, nil
 }
 
-// runDecisions 引擎入口：装载 → 提值 → 判定 → 装配。
-func (s *realSync) runDecisions(ctx context.Context, sources, targets []string,
+// runDecisions 引擎入口：装载 → 提值 → 判定 → 装配。包级函数以便
+// Compare 面（冲突枚举）复用——只依赖 Deps。
+func runDecisions(ctx context.Context, deps *Deps, sources, targets []string,
 	live map[string]bool, kinds map[hub.EntityKind]bool, wantGameIni bool,
 	freshIni map[string]bool) (*decideOutcome, error) {
-	in, err := loadDecideInput(ctx, &s.deps, sources, targets, live, kinds, wantGameIni, freshIni)
+	in, err := loadDecideInput(ctx, deps, sources, targets, live, kinds, wantGameIni, freshIni)
 	if err != nil {
 		return nil, err
 	}
@@ -1178,8 +1182,11 @@ func (s *realSync) runDecisions(ctx context.Context, sources, targets []string,
 //   - 无新鲜快照的端（跳过/收集失败/投放或重收集失败）整体不推进。
 //
 // freshFor 按 kind 给新鲜端集（game_ini 用 ini 快照面）。resolveOnly =
-// 勾选处置轮（用户拍板即解析，解冻——只看端的新鲜度）。
+// 勾选处置轮（用户拍板即解析，解冻——只看端的新鲜度）。forced = 拍板轮
+// 的胜者判定：可写端基线直接记决定值（cur 是写前快照，拍板后该端持
+// 有的一定是决定值——不记决定值会留假「已改动」态）。
 func baselineRows(units map[unitKey]*unitRow, decs map[unitKey]*unitDecision,
+	forced map[unitKey]*unitDecision,
 	freshFor func(kind string) map[string]bool, resolveOnly bool, at int64) []hub.BaselineRow {
 	var out []hub.BaselineRow
 	for uk, row := range units {
@@ -1198,6 +1205,9 @@ func baselineRows(units map[unitKey]*unitRow, decs map[unitKey]*unitDecision,
 			v := hub.BaselineAbsent
 			if uv, ok := row.cur[f]; ok {
 				v = uv.fp
+			}
+			if fd := forced[uk]; fd != nil && fd.decided && fd.writable[f] {
+				v = fd.fp // 拍板：已写端基线记决定值
 			}
 			out = append(out, hub.BaselineRow{
 				ForkID: f, Kind: uk.kind, Identity: uk.identity,

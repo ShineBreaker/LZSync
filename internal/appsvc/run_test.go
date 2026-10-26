@@ -479,6 +479,97 @@ func TestPrepareSelectedWinnerBeatmapVersion(t *testing.T) {
 	}
 }
 
+// TestListConflictsEnumeratesAllKinds 全类冲突枚举：数据页未展示的设置
+// 类（ruleset_setting）与 game.ini 冲突也入清单，ContentKey 可直接回填
+// PrepareSelected+Winner 处置。
+func TestListConflictsEnumeratesAllKinds(t *testing.T) {
+	aSeed := fixture.Seed{RulesetSettings: []fixture.SeedRulesetSetting{
+		{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"topright"`},
+	}}
+	bSeed := fixture.Seed{RulesetSettings: []fixture.SeedRulesetSetting{
+		{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
+	}}
+	b, _, refA, refB := newRunBackend(t, aSeed, bSeed)
+	// ini 分歧：两端同一白名单键异值（无基线 → 冲突）。
+	if _, err := fixture.WriteGameIni(refA.DataDir, map[string]string{"ShowFpsDisplay": "true"}); err != nil {
+		t.Fatalf("WriteGameIni(A): %v", err)
+	}
+	if _, err := fixture.WriteGameIni(refB.DataDir, map[string]string{"ShowFpsDisplay": "false"}); err != nil {
+		t.Fatalf("WriteGameIni(B): %v", err)
+	}
+	// 先跑一轮收集把 presence/ini 快照落 hub（ListConflicts 读快照态）。
+	if _, err := b.Sync.PrepareRun(); err != nil {
+		t.Fatalf("PrepareRun(收集): %v", err)
+	}
+
+	rows, err := b.Compare.ListConflicts()
+	if err != nil {
+		t.Fatalf("ListConflicts: %v", err)
+	}
+	byKey := map[string]ConflictRow{}
+	for _, r := range rows {
+		byKey[r.Kind+"\x00"+r.ContentKey] = r
+	}
+	rsKey := hub.RulesetSettingContentKey("osu", 0, "hud_position")
+	if r, ok := byKey[string(hub.KindRulesetSetting)+"\x00"+rsKey]; !ok {
+		t.Errorf("ruleset_setting 冲突未枚举（keys=%v）", keysOf(byKey))
+	} else {
+		if !r.CanPickHub || r.Values < 2 || len(r.Forks) != 2 {
+			t.Errorf("ruleset_setting 行面 = %+v", r)
+		}
+	}
+	if r, ok := byKey["game_ini\x00ShowFpsDisplay"]; !ok {
+		t.Errorf("game_ini 冲突未枚举（keys=%v）", keysOf(byKey))
+	} else if r.CanPickHub {
+		t.Errorf("game_ini 行不应允许「以中枢为准」: %+v", r)
+	}
+}
+
+func keysOf(m map[string]ConflictRow) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestPrepareSelectedWinnerGameIni ini 键拍板：两端白名单键异值冲突 →
+// Winner=delta → 两端 ini 决定值=delta 值；CommitRun 后 lazer 的
+// game.ini 实写为 delta 取值，下一轮该键不再冲突。
+func TestPrepareSelectedWinnerGameIni(t *testing.T) {
+	b, _, refA, refB := newRunBackend(t, fixture.Seed{}, fixture.Seed{})
+	if _, err := fixture.WriteGameIni(refA.DataDir, map[string]string{"ShowFpsDisplay": "true"}); err != nil {
+		t.Fatalf("WriteGameIni(A): %v", err)
+	}
+	if _, err := fixture.WriteGameIni(refB.DataDir, map[string]string{"ShowFpsDisplay": "false"}); err != nil {
+		t.Fatalf("WriteGameIni(B): %v", err)
+	}
+	preview, err := b.Sync.PrepareSelected([]Selection{
+		{Kind: hub.EntityKind(hub.BaselineKindGameIni), ContentKey: "ShowFpsDisplay", Winner: "delta"},
+	})
+	if err != nil {
+		t.Fatalf("PrepareSelected: %v", err)
+	}
+	if _, err := b.Sync.CommitRun(preview.RunID); err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(refA.DataDir, "game.ini"))
+	if err != nil {
+		t.Fatalf("读 lazer game.ini: %v", err)
+	}
+	if got, _ := inisettings.Parse(after).Value("ShowFpsDisplay"); got != "false" {
+		t.Errorf("lazer game.ini ShowFpsDisplay = %q，期望 false（以 delta 为准）", got)
+	}
+	// 收敛：下一轮该键不再报冲突。
+	p2, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun(2): %v", err)
+	}
+	if p2.Pending.ByKind["game_ini"] != 0 {
+		t.Errorf("收敛后 game_ini 冲突 = %d，期望 0（pending=%+v）", p2.Pending.ByKind["game_ini"], p2.Pending)
+	}
+}
+
 func mustBackups(t *testing.T, dir string) *guard.Backups {
 	t.Helper()
 	b, err := guard.OpenBackups(dir)

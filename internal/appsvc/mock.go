@@ -326,10 +326,18 @@ func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
 	}, nil
 }
 
+// ListConflicts mock：演示冲突清单（两条固定行，无真实 hub）。
+func (m *mockCompare) ListConflicts() ([]ConflictRow, error) {
+	return []ConflictRow{
+		{Kind: string(hub.KindBeatmapSet), ContentKey: "demo-set-hash", Label: "演示谱面集", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
+		{Kind: string(hub.KindRulesetSetting), ContentKey: hub.RulesetSettingContentKey("osu", 0, "hud_position"), Label: "hud_position", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
+	}, nil
+}
+
 // UnitConflict mock：演示冲突明细面板形态（固定两端取值，无真实 hub）。
 func (m *mockCompare) UnitConflict(kind hub.EntityKind, contentKey string) (ConflictDetail, error) {
 	return ConflictDetail{
-		Kind: string(kind), ContentKey: contentKey,
+		Kind: string(kind), ContentKey: contentKey, CanPickHub: true,
 		Canonical: "中枢值（演示）",
 		Variants: []ConflictVariant{
 			{ForkID: "lazer", Has: true, Key: contentKey, Value: "lazer 端取值（演示）",

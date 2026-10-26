@@ -28,7 +28,7 @@ func main() {
 	var (
 		dataDir  = flag.String("data-dir", filepath.Join(home, ".local/share/lzsync-realdbtest"), "LZSync 自有数据目录（hub/store/snapshots/backups）")
 		dataRoot = flag.String("data-root", filepath.Join(home, ".local/share"), "fork 数据根")
-		phase    = flag.String("phase", "full", "scan|collect|compare|deploy|run|verify|full")
+		phase    = flag.String("phase", "full", "scan|collect|compare|deploy|run|conflicts|verify|full")
 		forkList = flag.String("forks", "lazer,delta,g0v0", "收集顺序（逗号分隔）")
 		deployTo = flag.String("deploy-to", "delta", "投放目标 fork")
 		maxSets  = flag.Int("max-sets", 3, "计划中谱面集上限")
@@ -59,6 +59,9 @@ func main() {
 		must(doRestore(b, *deployTo, flag.Arg(0)))
 	case "verify":
 		doVerify(b, *deployTo)
+	case "conflicts":
+		// 冲突清单：快照态全类枚举 + 抽样展开两行明细验证 UnitConflict。
+		doConflicts(b)
 	case "run":
 		// §0.4 一轮同步编排真链路：PrepareRun（读范围→收集→三方判定→
 		// 逐端计划）→ -confirm-write 才 CommitRun（逐目标端写入+基线推进）。
@@ -273,7 +276,61 @@ func doPrepareRun(b *appsvc.Backend) appsvc.RunPreview {
 	}
 	fmt.Printf("[pending] 冲突=%d 需确认=%d 恢复=%d 不支持=%d\n",
 		pv.Pending.Conflicts, pv.Pending.NeedsConfirm, pv.Pending.Restore, pv.Pending.Unsupported)
+	if len(pv.Pending.ByKind) > 0 {
+		kinds := make([]string, 0, len(pv.Pending.ByKind))
+		for k := range pv.Pending.ByKind {
+			kinds = append(kinds, k)
+		}
+		sort.Strings(kinds)
+		for _, k := range kinds {
+			fmt.Printf("    冲突 %-18s %d\n", k, pv.Pending.ByKind[k])
+		}
+	}
 	return pv
+}
+
+// doConflicts 冲突清单面：ListConflicts 全类枚举（按 kind 汇总 + 全量
+// 行明细计数），并对每个 kind 抽样一行展开 UnitConflict 验证取值面。
+func doConflicts(b *appsvc.Backend) {
+	rows, err := b.Compare.ListConflicts()
+	if err != nil {
+		must(fmt.Errorf("ListConflicts: %w", err))
+	}
+	byKind := map[string]int{}
+	for _, r := range rows {
+		byKind[r.Kind]++
+	}
+	fmt.Printf("[conflicts] 共 %d 行\n", len(rows))
+	kinds := make([]string, 0, len(byKind))
+	for k := range byKind {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	for _, k := range kinds {
+		fmt.Printf("    %-18s %d\n", k, byKind[k])
+	}
+	// 抽样：每 kind 第一行展开明细。
+	sampled := map[string]bool{}
+	for _, r := range rows {
+		if sampled[r.Kind] {
+			continue
+		}
+		sampled[r.Kind] = true
+		d, err := b.Compare.UnitConflict(hub.EntityKind(r.Kind), r.ContentKey)
+		if err != nil {
+			fmt.Printf("  [sample] %s %q 明细失败: %v\n", r.Kind, r.Label, err)
+			continue
+		}
+		fmt.Printf("  [sample] %s %q（中枢可选=%v）\n", r.Kind, r.Label, d.CanPickHub)
+		fmt.Printf("      中枢: %s\n", d.Canonical)
+		for _, v := range d.Variants {
+			mark := "缺席"
+			if v.Has {
+				mark = v.Value
+			}
+			fmt.Printf("      %-10s %s\n", v.ForkID, mark)
+		}
+	}
 }
 
 // doCommitRun 一轮执行段（§0.4 步骤 6-7）：逐端报告收集/投放/跳过面。

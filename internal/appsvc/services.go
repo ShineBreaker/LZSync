@@ -127,7 +127,22 @@ type ConflictDetail struct {
 	Kind       string
 	ContentKey string // 传入的行键
 	Canonical  string // 中枢值摘要（「以中枢为准」推向全部目标端）
+	// CanPickHub 是否允许「以中枢为准」：无 canonical 值的类（game.ini
+	// 只存端侧快照，中枢无独立取值）只能选端。
+	CanPickHub bool
 	Variants   []ConflictVariant
+}
+
+// ConflictRow 冲突清单的一行（全类冲突的统一枚举面——数据页只展示四
+// 类，键位/规则集设置/mod 预设/game.ini 的冲突也经此枚举可处置）。
+// ContentKey 可直接回填 Selection/UnitConflict。
+type ConflictRow struct {
+	Kind       string   // EntityKind 或 "game_ini"
+	ContentKey string   // 勾选/详情键（谱面集=持有版本哈希、键位=一条四段内容键、ini=键名）
+	Label      string   // 人话摘要
+	Forks      []string // 持有该单位的端
+	Values     int      // 异值种数（>1 即分歧）
+	CanPickHub bool     // 同 ConflictDetail.CanPickHub
 }
 
 // ForkPresenceEntry 单行 presence 投影（数据浏览 x/y 聚合数据源）。
@@ -200,6 +215,9 @@ type CompareService interface {
 	// UnitConflict 单个冲突单位的取值面：逐端当前值 + 与中枢的字段
 	// 差异（数据页冲突明细二级面板；行键按身份锚归并到判定单位）。
 	UnitConflict(kind hub.EntityKind, contentKey string) (ConflictDetail, error)
+	// ListConflicts 枚举当前三方判定下的全部冲突单位（含数据页未展
+	// 示的设置类与 game.ini——快照态，不跑收集；处置仍走 PrepareSelected）。
+	ListConflicts() ([]ConflictRow, error)
 	// BuildPlan 把勾选结果组装为投放计划（覆盖全部启用 kind：收藏夹/
 	// 谱面集/皮肤/成绩）。NeedsConfirm 项（元数据弱键疑似）必须已经用户
 	// 拍板——勾选即视为拍板（NeedsConfirm 置位留痕）；「恢复（已删除）」

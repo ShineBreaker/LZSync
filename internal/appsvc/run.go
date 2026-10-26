@@ -22,10 +22,11 @@ import (
 
 // PendingSummary 一轮同步的待处理计数（§0-B4/B5/B6：绝不自动落地的行）。
 type PendingSummary struct {
-	Conflicts    int // 冲突：多端取值不同（B5 无歧义检查拦下的 create 也在此计）
-	NeedsConfirm int // 需确认：版本更新（P1 一律不自动执行）
-	Restore      int // 恢复组（tombstone 命中的已删除项）
-	Unsupported  int // 不支持：全局交集排除等兼容跳过（CommitRun 后累加）
+	Conflicts    int            // 冲突：多端取值不同（B5 无歧义检查拦下的 create 也在此计）
+	NeedsConfirm int            // 需确认：版本更新（P1 一律不自动执行）
+	Restore      int            // 恢复组（tombstone 命中的已删除项）
+	Unsupported  int            // 不支持：全局交集排除等兼容跳过（CommitRun 后累加）
+	ByKind       map[string]int // 冲突按 kind 分解（数据页未展示的类仍可处置——经服务面 Selection 拍板）
 }
 
 // RunTargetPreview 单个目标端的预览（将写入的动作项数，不含 skip）。
@@ -77,6 +78,7 @@ type RunReport struct {
 type preparedRun struct {
 	plans          map[string]*deploy.Plan
 	ini            map[string]map[string]deploy.IniValue // 逐端 ini 决定值（§0.3 逐键）
+	forced         map[unitKey]*unitDecision             // 勾选拍板的 forced 判定（基线推进写决定值）
 	skipped        map[string]string
 	modes          map[string]collect.Mode // 各端本轮收集模式（写后重收集复用）
 	roles          map[string]ForkRole
@@ -164,8 +166,10 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 	defer cancel()
 
 	kinds := scopeKinds(s.cfg)
-	wantGameIni := sel == nil && s.cfg.sectionEnabled(SectionGameIni) // 同步所选只处理勾选项，不带 game.ini
-	intersection := s.cfg.targetForkIDs()                             // 全部 Target 端（含将被跳过的）
+	// ini：板块开即收快照 + 建判定单位（勾选轮的 ini 处置项需要单位
+	// 在场且值为当前值——快照仓可能从未填充，不能只靠存量）。
+	wantGameIni := s.cfg.sectionEnabled(SectionGameIni)
+	intersection := s.cfg.targetForkIDs() // 全部 Target 端（含将被跳过的）
 
 	// 参与端：已注册且 Source||Target。
 	var parts []struct {
@@ -244,7 +248,7 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 			live[p.ref.ForkID] = true
 		}
 	}
-	outcome, err := s.runDecisions(ctx, sourceIDs, intersection, live, kinds, wantGameIni, run.freshIni)
+	outcome, err := runDecisions(ctx, &s.deps, sourceIDs, intersection, live, kinds, wantGameIni, run.freshIni)
 	if err != nil {
 		return RunPreview{}, fmt.Errorf("三方判定: %w", err)
 	}
@@ -282,10 +286,19 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 				selSet[string(sl.Kind)+"\x00"+sl.ContentKey] = true
 			}
 		}
-		resolvedPlans, rejects, err := s.resolveSel(ctx, resolved, outcome)
+		resolvedPlans, resolvedIni, forced, rejects, err := s.resolveSel(ctx, resolved, outcome)
 		if err != nil {
 			return RunPreview{}, fmt.Errorf("处置装配: %w", err)
 		}
+		for t, m := range resolvedIni {
+			if run.ini[t] == nil {
+				run.ini[t] = map[string]deploy.IniValue{}
+			}
+			for k, v := range m {
+				run.ini[t][k] = v
+			}
+		}
+		run.forced = forced
 		sum := newSummarizer(s.deps.Hub)
 		for _, p := range parts {
 			if !p.role.Target || !live[p.ref.ForkID] {
@@ -464,12 +477,15 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 				} else {
 					fr.Deploy = &deploy.Report{GameIni: &gi}
 				}
-				// 写后重读快照（基线推进的最终值输入）。
+				// 写后重读快照（基线推进的最终值输入；勾选轮未重拍
+				// ini 快照，写成功的端补记新鲜度好让处置单位基线推进）。
 				if rerr := s.refreshIniSnapshot(run.refs[fid]); rerr != nil {
 					freshIni[fid] = false
 					if fr.Error == "" {
 						fr.Error = fmt.Sprintf("ini 写入成功但快照重读失败：%s", rerr.Error())
 					}
+				} else {
+					freshIni[fid] = true
 				}
 			} else {
 				fr.Error = gerr.Error()
@@ -508,7 +524,7 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 		only = su
 		scope = suRows(run.units, su)
 	}
-	rows := baselineRows(scope, run.decs, func(kind string) map[string]bool {
+	rows := baselineRows(scope, run.decs, run.forced, func(kind string) map[string]bool {
 		if kind == hub.BaselineKindGameIni {
 			return freshIni
 		}
@@ -548,13 +564,16 @@ func intersectionSkipCount(rep deploy.Report) int {
 // = 全部目标端——显式覆盖保护/差异态）→ 子集装配复用全套兼容预检与
 // 谱面集版本替换语义。tombstone/弱键门由 forced 降级为 Restore/
 // NeedsConfirm 项。胜者端不持有（或持多版本）的勾选记拒绝原因。
-// 返回 (目标端→计划项, 勾选键 kind\x00key → 拒绝原因)。
+// 返回 (目标端→计划项, 目标端→ini 决定值, 单位→forced 判定, 勾选键→拒绝原因)。
 func (s *realSync) resolveSel(ctx context.Context, sel []Selection,
-	outcome *decideOutcome) (map[string][]deploy.PlanItem, map[string]string, error) {
+	outcome *decideOutcome) (map[string][]deploy.PlanItem, map[string]map[string]deploy.IniValue,
+	map[unitKey]*unitDecision, map[string]string, error) {
 	plans := map[string][]deploy.PlanItem{}
+	ini := map[string]map[string]deploy.IniValue{}
+	forced := map[unitKey]*unitDecision{}
 	rejects := map[string]string{}
 	if len(sel) == 0 {
-		return plans, rejects, nil
+		return plans, ini, forced, rejects, nil
 	}
 	in := outcome.in
 	done := map[unitKey]bool{}
@@ -562,7 +581,7 @@ func (s *realSync) resolveSel(ctx context.Context, sel []Selection,
 		key := string(sl.Kind) + "\x00" + sl.ContentKey
 		uks, err := s.unitsForSelection(ctx, sl, outcome.units)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		// 单位按 member 排序：哨兵（member=""）先评估——收藏的「胜者
 		// 端持有」校验在哨兵处定，成员缺席降级为移除语义而非拒绝。
@@ -618,6 +637,17 @@ func (s *realSync) resolveSel(ctx context.Context, sel []Selection,
 		for t, items := range sub.plans {
 			plans[t] = append(plans[t], items...)
 		}
+		for t, m := range sub.ini {
+			if ini[t] == nil {
+				ini[t] = map[string]deploy.IniValue{}
+			}
+			for k, v := range m {
+				ini[t][k] = v
+			}
+		}
+		for uk, d := range subDecs {
+			forced[uk] = d
+		}
 	}
-	return plans, rejects, nil
+	return plans, ini, forced, rejects, nil
 }

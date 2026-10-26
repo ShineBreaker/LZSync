@@ -338,7 +338,7 @@ func TestBaselineRowsFreeze(t *testing.T) {
 		{"ruleset_setting", "prot", ""}: {decided: true, fp: "v1", writable: map[string]bool{}, protected: map[string]bool{"B": true}, divergent: map[string]bool{}},
 	}
 	fresh := map[string]bool{"A": true, "B": true}
-	rows := baselineRows(units, decs, func(string) map[string]bool { return fresh }, false, 7)
+	rows := baselineRows(units, decs, nil, func(string) map[string]bool { return fresh }, false, 7)
 	got := map[string]string{}
 	for _, r := range rows {
 		got[r.ForkID+"/"+r.Identity] = r.Value
@@ -362,7 +362,7 @@ func TestBaselineRowsFreeze(t *testing.T) {
 	decs2 := map[unitKey]*unitDecision{
 		{"ruleset_setting", "gone", ""}: {writable: map[string]bool{}, protected: map[string]bool{}, divergent: map[string]bool{}},
 	}
-	rows2 := baselineRows(units2, decs2, func(string) map[string]bool { return fresh }, false, 7)
+	rows2 := baselineRows(units2, decs2, nil, func(string) map[string]bool { return fresh }, false, 7)
 	if len(rows2) != 2 || rows2[0].Value != hub.BaselineAbsent {
 		t.Fatalf("缺席端基线行 = %+v，期望 BaselineAbsent", rows2)
 	}
