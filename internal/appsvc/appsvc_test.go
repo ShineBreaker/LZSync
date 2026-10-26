@@ -330,6 +330,70 @@ func TestRealLibraryScanAndRegister(t *testing.T) {
 	}
 }
 
+// TestExpandHome 手动注册输入框的 ~ 展开（GUI 不经 shell）。
+func TestExpandHome(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	cases := map[string]string{
+		"~":           "/home/u",
+		"~/a/b":       "/home/u/a/b",
+		"/abs/path":   "/abs/path",
+		"relative/x":  "relative/x",
+		"~otheruser":  "~otheruser",
+	}
+	for in, want := range cases {
+		if got := expandHome(in); got != want {
+			t.Errorf("expandHome(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// TestRealLibraryRegisterDataDir 手动注册接受数据目录：目录内库文件被定位，
+// 注册结果的 RealmPath 指向库文件（DataDir 才是目录），不会把目录误当库文件。
+func TestRealLibraryRegisterDataDir(t *testing.T) {
+	root := t.TempDir()
+	b, _, _ := newRealForTest(t, root)
+
+	dir := filepath.Join(root, "osu-Ez2Lazer")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 非法 realm 内容：开库段失败后走文件名推断（client_<v>.realm 即 Ez 编码）。
+	realmPath := filepath.Join(dir, "client_52011.realm")
+	if err := os.WriteFile(realmPath, []byte("not-a-realm"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ref, err := b.Library.Register(dir)
+	if err != nil {
+		t.Fatalf("Register(数据目录): %v", err)
+	}
+	if ref.RealmPath != realmPath || ref.DataDir != dir {
+		t.Fatalf("ref = %+v，期望 RealmPath=%s DataDir=%s", ref, realmPath, dir)
+	}
+	if ref.ForkID != "ez2lazer" {
+		t.Fatalf("文件名推断身份 = %q，期望 ez2lazer", ref.ForkID)
+	}
+	cards := b.Library.List()
+	if len(cards) != 1 || cards[0].ForkID != "ez2lazer" || cards[0].RealmPath != realmPath {
+		t.Fatalf("注册后卡片 = %+v", cards)
+	}
+
+	// 无库文件的目录与不存在的路径都如实报错，不注册半成品。
+	empty := filepath.Join(root, "osu")
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Library.Register(empty); err == nil {
+		t.Fatalf("目录内无库文件应报错")
+	}
+	if _, err := b.Library.Register(filepath.Join(root, "missing")); err == nil {
+		t.Fatalf("不存在的路径应报错")
+	}
+	if cards := b.Library.List(); len(cards) != 1 {
+		t.Fatalf("报错后注册表不应变化 = %+v", cards)
+	}
+}
+
 func TestRealComparePreviewFromHub(t *testing.T) {
 	b, h, _ := newRealForTest(t, t.TempDir())
 	ctx := context.Background()

@@ -405,3 +405,51 @@ func TestIdentifyRealRealm(t *testing.T) {
 		}
 	})
 }
+
+// TestLocateRealmFile 手动注册输入数据目录时的库文件定位：目录名命中
+// Profile 走其规则（Ez 版本化名取最大版本、其余 client.realm），目录名
+// 不命中时按通用规则（v>=1000 的版本化名优先，否则 client.realm）。
+func TestLocateRealmFile(t *testing.T) {
+	write := func(t *testing.T, dir, name string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("非Ez目录认client.realm", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "osu")
+		write(t, dir, "client.realm")
+		got, ok := LocateRealmFile(dir)
+		if !ok || got != filepath.Join(dir, "client.realm") {
+			t.Fatalf("got (%q, %v)", got, ok)
+		}
+	})
+	t.Run("Ez目录取最大版本化库", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "osu-Ez2Lazer")
+		write(t, dir, "client.realm")
+		write(t, dir, "client_52010.realm")
+		write(t, dir, "client_52011.realm")
+		got, ok := LocateRealmFile(dir)
+		if !ok || got != filepath.Join(dir, "client_52011.realm") {
+			t.Fatalf("got (%q, %v)", got, ok)
+		}
+	})
+	t.Run("陌生目录名按通用规则取版本化库", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "custom")
+		write(t, dir, "client_52011.realm")
+		got, ok := LocateRealmFile(dir)
+		if !ok || got != filepath.Join(dir, "client_52011.realm") {
+			t.Fatalf("got (%q, %v)", got, ok)
+		}
+	})
+	t.Run("目录内无库文件定位失败", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "osu")
+		write(t, dir, "collection.db")
+		if got, ok := LocateRealmFile(dir); ok {
+			t.Fatalf("期望定位失败, got %q", got)
+		}
+	})
+}

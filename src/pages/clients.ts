@@ -69,6 +69,8 @@ export async function renderClients(root: HTMLElement): Promise<void> {
       ]),
     );
 
+    row.append(main);
+
     // 右侧操作
     if (isUnidentified) {
       const sel = el("select", { class: "input", style: "width:120px" }) as HTMLSelectElement;
@@ -152,7 +154,9 @@ export async function renderClients(root: HTMLElement): Promise<void> {
     try {
       const ref = await LibraryService.register(path);
       if (ref.ForkID === "") {
-        pending = { path, diskVersion: ref.DiskVersion };
+        // 用后端解析后的库文件路径指认：输入若是数据目录，Register 已定位到
+        // 其内库文件，不能把目录当库文件再交给 AssignFork。
+        pending = { path: ref.RealmPath, diskVersion: ref.DiskVersion };
         renderAssign();
       } else {
         pending = null;

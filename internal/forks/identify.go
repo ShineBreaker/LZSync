@@ -85,6 +85,38 @@ func Discover(dataRoot string) ([]LibraryRef, error) {
 	return refs, nil
 }
 
+// LocateRealmFile 在数据目录内定位库文件（手动注册允许用户给出数据目录
+// 而不是库文件本身）：目录名命中 Profile 时按其规则定位（Ez 版本化名优先、
+// 其余 client.realm）；目录名不命中（用户自定义改名）时按通用规则——
+// client_<v>.realm（v>=1000 即 Ez 版本编码）取最大者，否则 client.realm。
+func LocateRealmFile(dir string) (string, bool) {
+	if p, ok := profileByDirName(filepath.Base(filepath.Clean(dir))); ok {
+		return locateRealm(dir, p)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	var best uint64
+	var bestPath string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if v, ok := parseVersionedRealmName(e.Name()); ok && v >= 1000 && v > best {
+			best, bestPath = v, filepath.Join(dir, e.Name())
+		}
+	}
+	if bestPath != "" {
+		return bestPath, true
+	}
+	path := filepath.Join(dir, "client.realm")
+	if _, err := os.Stat(path); err != nil {
+		return "", false
+	}
+	return path, true
+}
+
 // Identify 对单个库文件做身份识别（手动注册路径，appsvc.Register 的底层）：
 // 版本探测（降级链见 VersionSource 常量）+ fork 指纹判定（fork 身份 = 版本
 // 编码 + 结构指纹）。识别失败返回 ErrUnidentified，此时返回的 LibraryRef

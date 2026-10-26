@@ -221,13 +221,47 @@ func (s *realLibrary) Scan() ([]forks.LibraryRef, error) {
 	return visible, nil
 }
 
-// Register 手动注册：识别失败返回 ForkID 为空串的 ref（携带原始版本供
-// UI 指认，§6.1）；只有路径不可访问等硬错误走 error。
+// resolveRealmPath 把手动注册/指认的输入归一为库文件路径：展开 ~（GUI
+// 输入框不经 shell），目录则定位其中的库文件（Ez 版本化名优先，否则
+// client.realm）。不校验库文件是否存在——Register 另行把关，AssignFork
+// 按路径登记（运行中锁库等场景允许先登记后探测）。
+func resolveRealmPath(path string) (string, error) {
+	path = expandHome(strings.TrimSpace(path))
+	st, err := os.Stat(path)
+	if err != nil || !st.IsDir() {
+		return path, nil
+	}
+	realmPath, ok := forks.LocateRealmFile(path)
+	if !ok {
+		return "", fmt.Errorf("appsvc: 目录内没有找到库文件（client.realm）: %s", path)
+	}
+	return realmPath, nil
+}
+
+// expandHome 展开 ~ / ~/ 前缀；其余路径原样返回。
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~"))
+}
+
+// Register 手动注册：path 可给数据目录或库文件本身；识别失败返回 ForkID
+// 为空串的 ref（携带解析后的 RealmPath 与原始版本供 UI 指认，§6.1）；
+// 只有路径不可访问等硬错误走 error。
 func (s *realLibrary) Register(path string) (forks.LibraryRef, error) {
-	if _, err := os.Stat(path); err != nil {
+	realmPath, err := resolveRealmPath(path)
+	if err != nil {
+		return forks.LibraryRef{}, err
+	}
+	if _, err := os.Stat(realmPath); err != nil {
 		return forks.LibraryRef{}, fmt.Errorf("appsvc: 库文件不可访问: %w", err)
 	}
-	ref, _ := safeIdentify(path, s.deps.Snapshots)
+	ref, _ := safeIdentify(realmPath, s.deps.Snapshots)
 	if ref.ForkID != "" {
 		s.reg.put(ref)
 		if err := s.cfg.registerFork(ref); err != nil {
@@ -250,14 +284,19 @@ func safeIdentify(path string, snaps *forks.SnapshotStore) (ref forks.LibraryRef
 }
 
 // AssignFork 用户指认 fork 身份（绝不猜，§6.1）；指认后按 Profile 解码版本。
+// path 与 Register 同样接受数据目录或库文件。
 func (s *realLibrary) AssignFork(path, forkID string) (forks.LibraryRef, error) {
 	p, ok := forks.Profile(forkID)
 	if !ok {
 		return forks.LibraryRef{}, fmt.Errorf("appsvc: 未知 fork %q（可选：%s）", forkID, forkIDs())
 	}
-	dir := filepath.Dir(path)
+	realmPath, err := resolveRealmPath(path)
+	if err != nil {
+		return forks.LibraryRef{}, err
+	}
+	dir := filepath.Dir(realmPath)
 	var ver uint64
-	if ref, err := safeIdentify(path, s.deps.Snapshots); err == nil || ref.DiskVersion > 0 {
+	if ref, err := safeIdentify(realmPath, s.deps.Snapshots); err == nil || ref.DiskVersion > 0 {
 		ver = ref.DiskVersion
 		if ref.VersionSource != "" && ref.DiskVersion > 0 {
 			// 保留探测链已拿到的版本来源；仅身份采用用户指认。
@@ -273,7 +312,7 @@ func (s *realLibrary) AssignFork(path, forkID string) (forks.LibraryRef, error) 
 	ref := forks.LibraryRef{
 		ForkID:        forkID,
 		DataDir:       dir,
-		RealmPath:     path,
+		RealmPath:     realmPath,
 		DiskVersion:   ver,
 		VersionSource: forks.VersionUnknownRunning,
 	}
