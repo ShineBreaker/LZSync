@@ -43,10 +43,10 @@ func newMockBackend(mode, reason string, prog ProgressSink) *Backend {
 	}
 	cmp := &mockCompare{createdAt: time.Now()}
 	b := &mockBackend{
-		lib:   &mockLibrary{},
-		cmp:   cmp,
-		exp:   &mockExport{},
-		mode:  mode, reasn: reason,
+		lib:  &mockLibrary{},
+		cmp:  cmp,
+		exp:  &mockExport{},
+		mode: mode, reasn: reason,
 	}
 	sync := &mockSync{prog: prog, b: b, runs: map[string]*mockRun{}}
 	sync.cmp = cmp
@@ -326,6 +326,20 @@ func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
 	}, nil
 }
 
+// UnitConflict mock：演示冲突明细面板形态（固定两端取值，无真实 hub）。
+func (m *mockCompare) UnitConflict(kind hub.EntityKind, contentKey string) (ConflictDetail, error) {
+	return ConflictDetail{
+		Kind: string(kind), ContentKey: contentKey,
+		Canonical: "中枢值（演示）",
+		Variants: []ConflictVariant{
+			{ForkID: "lazer", Has: true, Key: contentKey, Value: "lazer 端取值（演示）",
+				Fields: []FieldDiff{{Field: "Value", HubValue: "中枢值", ForkValue: "lazer 值"}}},
+			{ForkID: "delta", Has: true, Key: contentKey, Value: "delta 端取值（演示）",
+				Fields: []FieldDiff{{Field: "Value", HubValue: "中枢值", ForkValue: "delta 值"}}},
+		},
+	}, nil
+}
+
 // CoverImage mock：演示模式返回空串（行退化为纯色块），不编造图片。
 // 真实封面只在已有收集过的 hub+filestore 上有意义。
 func (m *mockCompare) CoverImage(contentKey string) (string, error) {
@@ -506,9 +520,9 @@ func (m *mockSync) Collect(forkID string) (collect.Report, error) {
 	m.setCancel(cancel)
 	defer cancel()
 	steps := []struct {
-		stage   collect.Stage
-		label   string
-		total   int
+		stage collect.Stage
+		label string
+		total int
 	}{
 		{collect.StageProject, "只读投影", 12},
 		{collect.StageApply, "入 hub", 12},
@@ -594,7 +608,7 @@ func (m *mockSync) DeployCurrentPlan() (deploy.Report, error) {
 	if len(applied) > 0 {
 		first := applied[0]
 		report.Repointed = []deploy.RepointedItem{{
-			Item: deploy.PlanItem{Kind: first.Kind, ContentKey: first.ContentKey, Action: first.Action},
+			Item:   deploy.PlanItem{Kind: first.Kind, ContentKey: first.ContentKey, Action: first.Action},
 			Reason: "目标已出现同键行：新建 → 就地更新",
 		}}
 	}
@@ -831,13 +845,13 @@ func (m *mockSync) setCancel(cancel context.CancelFunc) {
 
 func (b *mockBackend) Get() (SettingsInfo, error) {
 	return SettingsInfo{
-		Mode:       b.mode,
-		Reason:     b.reasn,
-		DataDir:    "/mock/data",
-		HubDBPath:  "/mock/data/hub.db",
-		BackupsDir: "/mock/data/backups",
+		Mode:         b.mode,
+		Reason:       b.reasn,
+		DataDir:      "/mock/data",
+		HubDBPath:    "/mock/data/hub.db",
+		BackupsDir:   "/mock/data/backups",
 		BackupsCount: 3,
-		GuardNames: []string{"Ez2Lazer", "g0v0!", "osu", "osu!"},
+		GuardNames:   []string{"Ez2Lazer", "g0v0!", "osu", "osu!"},
 		LinkSymlink:  true,
 		LinkHardlink: true,
 		LinkNote:     "Mock 探测结果（真实后端按 §5.3 现场探测）",

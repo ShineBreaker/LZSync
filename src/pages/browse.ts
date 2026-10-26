@@ -9,6 +9,7 @@ import { clear, el, errText, message, navigate, popoverAt, popoverForkRow, syncS
 
 type DiffRow = Awaited<ReturnType<typeof CompareService.previewDeploy>>[number];
 type LibCard = Awaited<ReturnType<typeof LibraryService.list>>[number];
+type ConflictDetail = Awaited<ReturnType<typeof CompareService.unitConflict>>;
 
 type BrowseFilter = "all" | "diff" | "conflict" | "needsConfirm";
 
@@ -47,6 +48,9 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
   root.append(toolbar, statusLine, listBox);
 
   const checked = new Set<string>();
+  // 冲突处置：行键 → 胜者端（"" = 以中枢为准的显式选择，与未选同语义
+  // 但会在行上留徽标提示用户已拍板）。
+  const resolutions = new Map<string, string>();
   let rows: RowView[] = [];
   let allCards: LibCard[] = [];
 
@@ -85,7 +89,9 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
     syncBtn.disabled = true;
     clear(statusLine);
     try {
-      const sel = rows.filter((r) => checked.has(r.key)).map((r) => ({ Kind: r.kind, ContentKey: r.contentKey }));
+      const sel = rows.filter((r) => checked.has(r.key)).map((r) => ({
+        Kind: r.kind, ContentKey: r.contentKey, Winner: resolutions.get(r.key) ?? "",
+      }));
       // 一轮编排：勾选经 prepareSelected 预演，预览交同步页确认执行。
       const preview = await SyncService.prepareSelected(sel);
       setPendingPreview(preview);
@@ -142,6 +148,7 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
       for (const dl of deleteds) for (const r of dl) consider(r);
       rows = [...byKey.values()].map(toRowView).filter((r) => r.kind === kind);
       checked.clear();
+      resolutions.clear();
       for (const r of rows) {
         if (r.evidence !== "weak" && r.state !== "synced") checked.add(r.key);
       }
@@ -335,31 +342,96 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
       }
     });
 
-    // 冲突行：可点击展开差异表
-    if (r.conflictFields && r.conflictFields.length > 0) {
+    // 冲突行：可点击展开冲突明细——逐端取值 + 「以 X 为准」处置按钮。
+    // unitConflict 取不到时回落到单端字段差异表（老行为）。
+    if (r.state === "conflict" || (r.conflictFields && r.conflictFields.length > 0)) {
+      const resolveBadge = el("span", { class: "resolve-badge" });
+      if (resolutions.has(r.key)) {
+        const w = resolutions.get(r.key)!;
+        resolveBadge.textContent = w ? `→ ${w}` : t("browse.pickedHub");
+      }
+      main.querySelector(".row-meta")?.append(resolveBadge);
+
       const detail = el("div", { class: "row-detail hidden" });
-      const table = el("table", { class: "row-detail-table" });
-      const head = el("tr", {}, [
-        el("th", {}, [text("")]),
-        el("th", {}, [text(t("browse.conflictHub"))]),
-        el("th", {}, [text(t("browse.conflictFork"))]),
-      ]);
-      table.append(head);
-      for (const f of r.conflictFields) {
-        table.append(
-          el("tr", {}, [
+      const buildFallback = () => {
+        if (!r.conflictFields || r.conflictFields.length === 0) {
+          return el("div", { class: "page-meta" }, [text(t("browse.conflictNoData"))]);
+        }
+        const table = el("table", { class: "row-detail-table" });
+        table.append(el("tr", {}, [
+          el("th", {}, [text("")]),
+          el("th", {}, [text(t("browse.conflictHub"))]),
+          el("th", {}, [text(t("browse.conflictFork"))]),
+        ]));
+        for (const f of r.conflictFields) {
+          table.append(el("tr", {}, [
             el("td", { class: "k" }, [text(f.Field)]),
             el("td", {}, [text(f.HubValue)]),
             el("td", {}, [text(f.ForkValue)]),
-          ]),
-        );
-      }
-      detail.append(table);
+          ]));
+        }
+        return table;
+      };
+      const pick = (winner: string) => {
+        resolutions.set(r.key, winner);
+        checked.add(r.key);
+        cb.checked = true;
+        rowEl.classList.add("checked");
+        resolveBadge.textContent = winner ? `→ ${winner}` : t("browse.pickedHub");
+        updateToolbar();
+      };
+      const renderConflictDetail = (cd: ConflictDetail): HTMLElement => {
+        const table = el("table", { class: "row-detail-table" });
+        table.append(el("tr", {}, [
+          el("th", {}, [text("")]),
+          el("th", {}, [text(t("browse.conflictValue"))]),
+          el("th", {}, [text(t("browse.conflictDiff"))]),
+          el("th", {}, [text("")]),
+        ]));
+        const btn = (winner: string, label: string) => {
+          const b = el("button", { class: "btn small" }, [text(label)]) as HTMLButtonElement;
+          b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            pick(winner);
+          });
+          return b;
+        };
+        // 中枢行：未选胜者时的默认行为（勾选项按中枢值推送）。
+        table.append(el("tr", {}, [
+          el("td", { class: "k" }, [text(t("browse.conflictHub"))]),
+          el("td", {}, [text(cd.Canonical || "—")]),
+          el("td", {}, [text("")]),
+          el("td", {}, [btn("", t("browse.useHub"))]),
+        ]));
+        for (const v of cd.Variants) {
+          const diffs = (v.Fields ?? []).map((f) => `${f.Field}: ${f.HubValue} → ${f.ForkValue}`).join("；");
+          table.append(el("tr", {}, [
+            el("td", { class: "k" }, [text(v.ForkID)]),
+            el("td", {}, [text(v.Value || t("browse.variantMissing"))]),
+            el("td", { class: "k" }, [text(diffs)]),
+            el("td", {}, v.Has ? [btn(v.ForkID, t("browse.useFork"))] : []),
+          ]));
+        }
+        const box = el("div");
+        box.append(table, el("div", { class: "page-meta" }, [text(t("browse.hintResolve"))]));
+        return box;
+      };
+      detail.append(el("div", { class: "page-meta" }, [text(t("browse.conflictLoading"))]));
       rowEl.append(detail);
       rowEl.style.cursor = "pointer";
+      let loaded = false;
       rowEl.addEventListener("click", (e) => {
         if ((e.target as HTMLElement).closest(".sync-block, input[type=checkbox]")) return;
         detail.classList.toggle("hidden");
+        if (loaded || detail.classList.contains("hidden")) return;
+        loaded = true;
+        CompareService.unitConflict(r.kind as never, r.contentKey).then((cd) => {
+          clear(detail);
+          detail.append(renderConflictDetail(cd));
+        }).catch(() => {
+          clear(detail);
+          detail.append(buildFallback());
+        });
       });
     }
 

@@ -70,6 +70,7 @@ type unitDecision struct {
 	writable  map[string]bool // 目标端可写 v*（未改动/缺席/已收敛）
 	protected map[string]bool // 目标端自行改动且 ≠v* → 保护跳过
 	divergent map[string]bool // 无基线不同取值（新端异值）→ 冲突
+	forced    bool            // 用户拍板构造（勾选处置以某端为准）：弱键/tombstone 门降级为 NeedsConfirm/Restore 项而非搁置
 }
 
 // decideOutcome 引擎产物。
@@ -79,6 +80,7 @@ type decideOutcome struct {
 	pending PendingSummary                        // 待处理计数（全局去重）
 	units   map[unitKey]*unitRow                  // 评估过的全部单位（基线推进面）
 	decs    map[unitKey]*unitDecision             // 单位 → 判定
+	in      *decideInput                          // 引擎输入面（勾选处置的胜者装配复用）
 }
 
 // decideInput 引擎输入（run.go 装载）。
@@ -505,6 +507,11 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 			if dec.decided && dec.writable[t] && dec.fp == "1" {
 				want = true
 			}
+			// 拍板成员（forced）：胜者端不持有 → 决定值「无」显式移除
+			// （正常轮无「决定缺席」——删除不传播，保留差异）。
+			if dec.decided && dec.writable[t] && dec.forced {
+				want = dec.fp == "1"
+			}
 			a.final[uk.member] = want
 			if want != curHas {
 				a.changed = true
@@ -547,10 +554,26 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 					continue
 				}
 				if len(cur) == 0 {
-					// 补缺：身份级 tombstone（任一版本被删过）→ 恢复组。
+					// 补缺：身份级 tombstone（任一版本被删过）→ 恢复组；
+					// 拍板项（forced）显式恢复——Restore 置位交投放清标记。
 					if tombstoneHit(in.tombs[t], hub.KindBeatmapSet, want) ||
 						identityTombstoned(in.tombs[t], hub.KindBeatmapSet, row) {
-						out.pending.Restore++
+						if !dec.forced {
+							out.pending.Restore++
+							continue
+						}
+						if !in.live[t] {
+							continue
+						}
+						if !in.canon.sets[want] {
+							continue // canonical 无该版本行（不该发生，宁缺）
+						}
+						addItem(t, deploy.PlanItem{
+							Kind: hub.KindBeatmapSet, ContentKey: want,
+							Action: deploy.ActionCreate, SourceFork: dec.winner,
+							Restore: true,
+							Summary: in.sum.summary(hub.KindBeatmapSet, want),
+						})
 						continue
 					}
 					if !in.live[t] {
@@ -566,8 +589,9 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 					})
 					continue
 				}
-				// 版本替换：弱键身份未确认 → 需确认（§5.4 三选一前置）。
-				if !in.evidence[uk.identity] {
+				// 版本替换：弱键身份未确认 → 需确认（§5.4 三选一前置）；
+				// 拍板项勾选即确认——NeedsConfirm 置位留痕照常入计划。
+				if !in.evidence[uk.identity] && !dec.forced {
 					out.pending.NeedsConfirm++
 					continue
 				}
@@ -580,8 +604,9 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 				addItem(t, deploy.PlanItem{
 					Kind: hub.KindBeatmapSet, ContentKey: want,
 					OldContentKey: cur[0], Action: deploy.ActionVersionReplace,
-					SourceFork: dec.winner,
-					Summary:    in.sum.summary(hub.KindBeatmapSet, want),
+					SourceFork:   dec.winner,
+					NeedsConfirm: !in.evidence[uk.identity],
+					Summary:      in.sum.summary(hub.KindBeatmapSet, want),
 				})
 			}
 		case string(hub.KindRulesetSetting):
@@ -599,6 +624,12 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 				if !dec.writable[t] || !in.live[t] {
 					continue
 				}
+				// 拍板：值已等于决定值的端（胜者自身/已收敛）不出空转项。
+				if dec.forced {
+					if v, ok := row.cur[t]; ok && v.fp == dec.fp {
+						continue
+					}
+				}
 				if _, held := row.cur[t]; held {
 					addItem(t, deploy.PlanItem{
 						Kind: hub.KindRulesetSetting, ContentKey: uk.identity,
@@ -607,7 +638,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 						Summary:    in.sum.summary(hub.KindRulesetSetting, uk.identity),
 					})
 				} else {
-					if tombstoneHit(in.tombs[t], hub.KindRulesetSetting, uk.identity) {
+					if tombstoneHit(in.tombs[t], hub.KindRulesetSetting, uk.identity) && !dec.forced {
 						out.pending.Restore++
 						continue
 					}
@@ -615,6 +646,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 						Kind: hub.KindRulesetSetting, ContentKey: uk.identity,
 						Action: deploy.ActionCreate, PayloadJSON: row.cur[dec.winner].payload,
 						SourceFork: dec.winner,
+						Restore:    tombstoneHit(in.tombs[t], hub.KindRulesetSetting, uk.identity),
 						Summary:    in.sum.summary(hub.KindRulesetSetting, uk.identity),
 					})
 				}
@@ -637,6 +669,11 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 				if !dec.writable[t] || !in.live[t] {
 					continue
 				}
+				if dec.forced {
+					if v, ok := row.cur[t]; ok && v.fp == dec.fp {
+						continue
+					}
+				}
 				if _, held := row.cur[t]; held {
 					addItem(t, deploy.PlanItem{
 						Kind: hub.KindModPreset, ContentKey: uk.identity,
@@ -645,7 +682,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 						Summary:    in.sum.summary(hub.KindModPreset, uk.identity),
 					})
 				} else {
-					if tombstoneHit(in.tombs[t], hub.KindModPreset, uk.identity) {
+					if tombstoneHit(in.tombs[t], hub.KindModPreset, uk.identity) && !dec.forced {
 						out.pending.Restore++
 						continue
 					}
@@ -653,6 +690,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 						Kind: hub.KindModPreset, ContentKey: uk.identity,
 						Action: deploy.ActionCreate, PayloadJSON: row.cur[dec.winner].payload,
 						SourceFork: dec.winner,
+						Restore:    tombstoneHit(in.tombs[t], hub.KindModPreset, uk.identity),
 						Summary:    in.sum.summary(hub.KindModPreset, uk.identity),
 					})
 				}
@@ -762,9 +800,25 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 					continue
 				}
 				if _, held := row.cur[t]; held {
-					continue // 内容键即值：持有 = 一致
+					// 内容键即值：正常轮持有 = 一致。拍板轮（forced）按
+					// 字段级覆盖——目标端字段可能与胜者端不同（Date/
+					// TotalScore 等），以胜者端投影载荷就地更新。
+					if dec.forced && t != dec.winner && in.live[t] {
+						payload := in.presence[dec.winner][hub.EntityKind(uk.kind)][uk.identity]
+						if payload == "" {
+							continue
+						}
+						addItem(t, deploy.PlanItem{
+							Kind: hub.EntityKind(uk.kind), ContentKey: uk.identity,
+							Action: deploy.ActionUpdate, PayloadJSON: payload,
+							SourceFork: dec.winner,
+							Summary:    in.sum.summary(hub.EntityKind(uk.kind), uk.identity),
+						})
+					}
+					continue
 				}
-				if tombstoneHit(in.tombs[t], hub.EntityKind(uk.kind), uk.identity) {
+				dead := tombstoneHit(in.tombs[t], hub.EntityKind(uk.kind), uk.identity)
+				if dead && !dec.forced {
 					out.pending.Restore++
 					continue
 				}
@@ -775,12 +829,14 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 					addItem(t, deploy.PlanItem{
 						Kind: hub.KindSkin, ContentKey: uk.identity,
 						Action: deploy.ActionCreate, SourceFork: dec.winner,
+						Restore: dead,
 						Summary: in.sum.summary(hub.KindSkin, uk.identity),
 					})
 				} else {
 					addItem(t, deploy.PlanItem{
 						Kind: hub.KindScore, ContentKey: uk.identity,
 						Action: deploy.ActionCreate, SourceFork: dec.winner,
+						Restore: dead,
 						Summary: in.sum.summary(hub.KindScore, uk.identity),
 					})
 				}
@@ -800,7 +856,14 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 		}
 	}
 
-	// 收藏聚合项落计划：持有态或应有成员集与现状不同才出项。
+	// 收藏聚合项落计划：持有态或应有成员集与现状不同才出项。forced 取
+	// 哨兵判定（拍板轮对该身份的全部单位都置位）。
+	colForced := map[string]bool{}
+	for uk, dec := range decs {
+		if uk.kind == string(hub.KindCollection) && uk.member == "" && dec != nil && dec.forced {
+			colForced[uk.identity] = true
+		}
+	}
 	for t, perIdentity := range colAccs {
 		if !in.live[t] {
 			continue
@@ -815,9 +878,11 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 				continue // canonical 无收藏行 → 无法造载荷（宁缺）
 			}
 			action := deploy.ActionUpdate
+			dead := false
 			if !a.heldNow {
 				action = deploy.ActionCreate
-				if tombstoneHit(in.tombs[t], hub.KindCollection, identity) {
+				dead = tombstoneHit(in.tombs[t], hub.KindCollection, identity)
+				if dead && !colForced[identity] {
 					out.pending.Restore++
 					continue
 				}
@@ -825,6 +890,7 @@ func assemblePlans(in *decideInput, units map[unitKey]*unitRow,
 			addItem(t, deploy.PlanItem{
 				Kind: hub.KindCollection, ContentKey: identity,
 				Action: action, PayloadJSON: payload,
+				Restore: dead,
 				Summary: in.sum.summary(hub.KindCollection, identity),
 			})
 		}
@@ -1100,7 +1166,9 @@ func (s *realSync) runDecisions(ctx context.Context, sources, targets []string,
 	}
 	units, _ := buildUnits(in)
 	decs := decideAll(units, in.sources, in.targets)
-	return assemblePlans(in, units, decs), nil
+	out := assemblePlans(in, units, decs)
+	out.in = in
+	return out, nil
 }
 
 // baselineRows 一轮结束后应推进的基线行（§0.3）：对评估过的每个单位、
@@ -1150,41 +1218,57 @@ func (s *realSync) selUnits(ctx context.Context, sel []Selection,
 	units map[unitKey]*unitRow) (map[unitKey]bool, error) {
 	out := map[unitKey]bool{}
 	for _, sl := range sel {
-		switch sl.Kind {
-		case hub.KindCollection:
-			for uk := range units {
-				if uk.kind == string(hub.KindCollection) && uk.identity == sl.ContentKey {
-					out[uk] = true
-				}
-			}
-		case hub.KindBeatmapSet:
-			rows, err := s.deps.Hub.DB().QueryContext(ctx,
-				`SELECT DISTINCT identity_key FROM identity_version WHERE content_hash=?`, sl.ContentKey)
-			if err != nil {
-				return nil, fmt.Errorf("读谱面集 %s 的身份键: %w", sl.ContentKey, err)
-			}
-			for rows.Next() {
-				var ik string
-				if err := rows.Scan(&ik); err != nil {
-					rows.Close()
-					return nil, fmt.Errorf("扫身份键: %w", err)
-				}
-				out[unitKey{string(hub.KindBeatmapSet), ik, ""}] = true
-			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("遍历身份键: %w", err)
-			}
-			rows.Close()
-		case hub.KindKeyBinding:
-			rn, v, ai, _, err := hub.DecodeKeyBindingContentKey(sl.ContentKey)
-			if err != nil {
-				return nil, fmt.Errorf("键位内容键解码 %q: %w", sl.ContentKey, err)
-			}
-			out[unitKey{string(hub.KindKeyBinding), hub.KeyBindingIdentityKey(rn, v, ai), ""}] = true
-		default:
-			out[unitKey{string(sl.Kind), sl.ContentKey, ""}] = true
+		uks, err := s.unitsForSelection(ctx, sl, units)
+		if err != nil {
+			return nil, err
 		}
+		for uk := range uks {
+			out[uk] = true
+		}
+	}
+	return out, nil
+}
+
+// unitsForSelection 单条勾选 → 覆盖的判定单位（处置装配与基线推进共用）。
+// collection 勾名 = 哨兵+全成员单位；beatmap_set 勾内容键 = 注册的全部
+// 身份键；key_binding 四段键 → 三段身份；其余键即身份。
+func (s *realSync) unitsForSelection(ctx context.Context, sl Selection,
+	units map[unitKey]*unitRow) (map[unitKey]bool, error) {
+	out := map[unitKey]bool{}
+	switch sl.Kind {
+	case hub.KindCollection:
+		for uk := range units {
+			if uk.kind == string(hub.KindCollection) && uk.identity == sl.ContentKey {
+				out[uk] = true
+			}
+		}
+	case hub.KindBeatmapSet:
+		rows, err := s.deps.Hub.DB().QueryContext(ctx,
+			`SELECT DISTINCT identity_key FROM identity_version WHERE content_hash=?`, sl.ContentKey)
+		if err != nil {
+			return nil, fmt.Errorf("读谱面集 %s 的身份键: %w", sl.ContentKey, err)
+		}
+		for rows.Next() {
+			var ik string
+			if err := rows.Scan(&ik); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("扫身份键: %w", err)
+			}
+			out[unitKey{string(hub.KindBeatmapSet), ik, ""}] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("遍历身份键: %w", err)
+		}
+		rows.Close()
+	case hub.KindKeyBinding:
+		rn, v, ai, _, err := hub.DecodeKeyBindingContentKey(sl.ContentKey)
+		if err != nil {
+			return nil, fmt.Errorf("键位内容键解码 %q: %w", sl.ContentKey, err)
+		}
+		out[unitKey{string(hub.KindKeyBinding), hub.KeyBindingIdentityKey(rn, v, ai), ""}] = true
+	default:
+		out[unitKey{string(sl.Kind), sl.ContentKey, ""}] = true
 	}
 	return out, nil
 }

@@ -15,6 +15,32 @@ export interface BatchFailure {
 /** Category 对账分类的 UI 徽标口径（§6.2 四分类 + 恢复组）。 */
 export type Category = "create" | "target-only" | "conflict" | "version-update" | "restore";
 
+/**
+ * ConflictDetail 一个冲突单位的取值面（数据页「冲突明细」二级面板数据）：
+ * 中枢值摘要 + 逐端取值与字段差异，「以 X 为准」按钮的 Winner 选项来源。
+ */
+export interface ConflictDetail {
+  Kind: string;
+  /** 传入的行键 */
+  ContentKey: string;
+  /** 中枢值摘要（「以中枢为准」推向全部目标端） */
+  Canonical: string;
+  Variants: ConflictVariant[];
+}
+
+/** ConflictVariant 冲突单位里一端的取值面（含缺席端）。 */
+export interface ConflictVariant {
+  ForkID: string;
+  /** 该端持有该单位（收藏=有此夹；谱面集=持有其某版本） */
+  Has: boolean;
+  /** 人话值：谱面=版本摘要；设置=字段值；收藏=成员数 */
+  Value: string;
+  /** 该端当前取值的内容键（谱面=该端版本 hash；其余=内容键） */
+  Key: string;
+  /** 该端 vs 中枢值的差异字段明细（标量类逐字段） */
+  Fields: FieldDiff[];
+}
+
 export interface DeployReport {
   Applied: ItemResult[];
   Skipped: SkipStat[];
@@ -278,10 +304,15 @@ export interface SectionToggle {
   Enabled: boolean;
 }
 
-/** Selection 预览页勾选结果的一项（类型 + 内容键）。 */
+/**
+ * Selection 预览页勾选结果的一项（类型 + 内容键）。Winner 非空 = 用户
+ * 在冲突详情里拍板「以该端当前值为准」——该端取值成为决定值推向全部
+ * 目标端（强制覆盖，§0.3 手动处置）；空 = 中枢值为准（原勾选语义）。
+ */
 export interface Selection {
   Kind: EntityKind;
   ContentKey: string;
+  Winner: string;
 }
 
 /** SettingsInfo 设置页数据（§6.4 M1 骨架：备份目录、守卫名单、链接策略显示）。 */
@@ -416,6 +447,10 @@ export const CompareService = {
    */
   previewDeploy(target: string): Promise<DiffRow[]> {
     return call("CompareService.PreviewDeploy", target);
+  },
+  /** UnitConflict 单冲突单位的取值面（CompareService 实现）。 */
+  unitConflict(kind: EntityKind, contentKey: string): Promise<ConflictDetail> {
+    return call("CompareService.UnitConflict", kind, contentKey);
   },
 } as const;
 

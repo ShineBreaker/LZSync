@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"lzsync/internal/deploy"
-	"lzsync/internal/fixture"
 	"lzsync/internal/filestore"
+	"lzsync/internal/fixture"
 	"lzsync/internal/forks"
 	"lzsync/internal/guard"
 	"lzsync/internal/hub"
@@ -65,8 +65,8 @@ func newRunBackend(t *testing.T, aSeed, bSeed fixture.Seed) (*Backend, *hub.Stor
 	}
 	b, err := NewRealBackend(Deps{
 		Hub: h, Files: filestore.NewEngine(store), Snapshots: snaps,
-		Backups:  mustBackups(t, filepath.Join(dir, "backups")),
-		Guard:    guard.NewGuard(nil), GameIni: iniStore,
+		Backups: mustBackups(t, filepath.Join(dir, "backups")),
+		Guard:   guard.NewGuard(nil), GameIni: iniStore,
 		DataRoot: dataRoot, DataDir: dir,
 	}, nil)
 	if err != nil {
@@ -374,6 +374,108 @@ func TestPrepareSelectedExplicitDisposition(t *testing.T) {
 	}
 	if !sawUpdate {
 		t.Error("显式勾选的冲突项应以 update 落 B")
+	}
+}
+
+// TestPrepareSelectedWinnerOverrides 胜者拍板（§0.3 手动处置）：规则集
+// 设置两端异值、无基线 → 单位冲突（正常轮不写）。显式 Winner=delta →
+// lazer 计划 delta 取值的就地更新；胜者端自身不落项；CommitRun 后
+// lazer presence 收为 delta 值，下一轮收敛（基线已推进无冲突）。
+func TestPrepareSelectedWinnerOverrides(t *testing.T) {
+	aSeed := fixture.Seed{RulesetSettings: []fixture.SeedRulesetSetting{
+		{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"topright"`},
+	}}
+	bSeed := fixture.Seed{RulesetSettings: []fixture.SeedRulesetSetting{
+		{RulesetName: "osu", Variant: 0, Key: "hud_position", Value: `"bottomleft"`},
+	}}
+	b, h, _, _ := newRunBackend(t, aSeed, bSeed)
+	ck := hub.RulesetSettingContentKey("osu", 0, "hud_position")
+	preview, err := b.Sync.PrepareSelected([]Selection{
+		{Kind: hub.KindRulesetSetting, ContentKey: ck, Winner: "delta"},
+	})
+	if err != nil {
+		t.Fatalf("PrepareSelected: %v", err)
+	}
+	got := map[string]int{}
+	for _, tp := range preview.Targets {
+		got[tp.ForkID] = tp.Items
+	}
+	if got["lazer"] != 1 {
+		t.Fatalf("lazer 计划项 = %d，期望 1（以 delta 为准的就地更新）targets=%+v", got["lazer"], preview.Targets)
+	}
+	if got["delta"] != 0 {
+		t.Fatalf("delta 计划项 = %d，期望 0（胜者端自身不落项）", got["delta"])
+	}
+	if _, err := b.Sync.CommitRun(preview.RunID); err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	var lv string
+	if err := h.DB().QueryRow(
+		`SELECT local_values FROM presence WHERE fork_id='lazer' AND kind='ruleset_setting' AND content_key=?`, ck).Scan(&lv); err != nil {
+		t.Fatalf("读 lazer presence: %v", err)
+	}
+	if !strings.Contains(lv, "bottomleft") {
+		t.Errorf("lazer presence 未收为 delta 值：%s", lv)
+	}
+	// 收敛验证：拍板值经基线推进后下一轮应零项零冲突。
+	p2, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun(2): %v", err)
+	}
+	for _, tp := range p2.Targets {
+		if tp.Items != 0 {
+			t.Errorf("收敛后轮次 %s 计划项 = %d，期望 0", tp.ForkID, tp.Items)
+		}
+	}
+	if p2.Pending.Conflicts != 0 {
+		t.Errorf("收敛后冲突 = %d，期望 0", p2.Pending.Conflicts)
+	}
+}
+
+// TestPrepareSelectedWinnerBeatmapVersion 谱面集版本拍板：同一身份
+// （OnlineID）两端各持不同版本冲突 → Winner=delta → lazer 计划
+// version-replace 到 delta 的版本；delta 不落项。
+func TestPrepareSelectedWinnerBeatmapVersion(t *testing.T) {
+	aSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "hash-win-a", OnlineID: 9010, StatusInt: 1},
+	}}
+	bSeed := fixture.Seed{BeatmapSets: []hub.BeatmapSet{
+		{Hash: "hash-win-b", OnlineID: 9010, StatusInt: 1},
+	}}
+	b, _, _, _ := newRunBackend(t, aSeed, bSeed)
+	preview, err := b.Sync.PrepareSelected([]Selection{
+		{Kind: hub.KindBeatmapSet, ContentKey: "hash-win-a", Winner: "delta"},
+	})
+	if err != nil {
+		t.Fatalf("PrepareSelected: %v", err)
+	}
+	got := map[string]int{}
+	for _, tp := range preview.Targets {
+		got[tp.ForkID] = tp.Items
+	}
+	if got["lazer"] != 1 {
+		t.Fatalf("lazer 计划项 = %d，期望 1（version-replace → delta 版本）targets=%+v", got["lazer"], preview.Targets)
+	}
+	if got["delta"] != 0 {
+		t.Fatalf("delta 计划项 = %d，期望 0", got["delta"])
+	}
+	report, err := b.Sync.CommitRun(preview.RunID)
+	if err != nil {
+		t.Fatalf("CommitRun: %v", err)
+	}
+	var sawReplace bool
+	for _, fr := range report.Forks {
+		if fr.Deploy == nil {
+			continue
+		}
+		for _, a := range fr.Deploy.Applied {
+			if a.Action == deploy.ActionVersionReplace {
+				sawReplace = true
+			}
+		}
+	}
+	if !sawReplace {
+		t.Errorf("拍板应以 version-replace 落 lazer，applied=%+v", report.Forks)
 	}
 }
 

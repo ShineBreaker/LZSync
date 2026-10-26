@@ -271,9 +271,20 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 		// 勾选轮（§0.4 手动处置）：勾选项即用户对冲突/恢复/弱键的显式
 		// 拍板，按 canonical 变体生成计划（planItemFrom）；判定产物只用于
 		// 待处理计数与基线推进面（selUnits 在 CommitRun 计算）。
+		// 带 Winner 的勾选项走「以该端为准」处置装配（resolveSel）：胜者
+		// 端当前取值作决定值、forced 语义解锁弱键/恢复门。
+		var resolved []Selection
 		selSet := make(map[string]bool, len(sel))
 		for _, sl := range sel {
-			selSet[string(sl.Kind)+"\x00"+sl.ContentKey] = true
+			if sl.Winner != "" {
+				resolved = append(resolved, sl)
+			} else {
+				selSet[string(sl.Kind)+"\x00"+sl.ContentKey] = true
+			}
+		}
+		resolvedPlans, rejects, err := s.resolveSel(ctx, resolved, outcome)
+		if err != nil {
+			return RunPreview{}, fmt.Errorf("处置装配: %w", err)
 		}
 		sum := newSummarizer(s.deps.Hub)
 		for _, p := range parts {
@@ -285,27 +296,39 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 				run.skipped[p.ref.ForkID] = err.Error()
 				continue
 			}
+			// 合并胜者处置项：同键时胜者项胜（显式拍板优先）——resolved
+			// 键先占位，canonical 项跳过已占键，防 NewPlan 同键报错。
+			seen := map[string]bool{}
+			for _, it := range resolvedPlans[p.ref.ForkID] {
+				seen[string(it.Kind)+"\x00"+it.ContentKey] = true
+			}
 			var planItems []deploy.PlanItem
 			for _, it := range items {
-				if !kinds[it.Kind] || !selSet[string(it.Kind)+"\x00"+it.ContentKey] {
+				key := string(it.Kind) + "\x00" + it.ContentKey
+				if !kinds[it.Kind] || !selSet[key] || seen[key] {
 					continue
 				}
 				planItems = append(planItems, planItemFrom(it, sum))
 			}
+			planItems = append(planItems, resolvedPlans[p.ref.ForkID]...)
 			// 勾选但不在本端预演中的项：逐端如实记 skip（快照可能已过期）。
-			inPlan := map[string]bool{}
+			inPlan := seen
 			for _, it := range items {
 				inPlan[string(it.Kind)+"\x00"+it.ContentKey] = true
 			}
 			for _, sl := range sel {
 				key := string(sl.Kind) + "\x00" + sl.ContentKey
-				if inPlan[key] {
+				reason := rejects[key]
+				if reason == "" && inPlan[key] {
 					continue
+				}
+				if reason == "" {
+					reason = "预演数据中不存在该键（快照可能已过期，请刷新预览）"
 				}
 				planItems = append(planItems, deploy.PlanItem{
 					Kind: sl.Kind, ContentKey: sl.ContentKey, Action: deploy.ActionSkip,
 					Summary:    sum.summary(sl.Kind, sl.ContentKey),
-					SkipReason: "预演数据中不存在该键（快照可能已过期，请刷新预览）",
+					SkipReason: reason,
 				})
 			}
 			plan, err := deploy.NewPlan(p.ref.ForkID, planItems)
@@ -518,4 +541,83 @@ func intersectionSkipCount(rep deploy.Report) int {
 		}
 	}
 	return n
+}
+
+// resolveSel 勾选处置装配（§0.4 手动处置的「以该端为准」路径）：每条带
+// Winner 的勾选 → 覆盖单位 → 以胜者端当前值构造 forced 判定（writable
+// = 全部目标端——显式覆盖保护/差异态）→ 子集装配复用全套兼容预检与
+// 谱面集版本替换语义。tombstone/弱键门由 forced 降级为 Restore/
+// NeedsConfirm 项。胜者端不持有（或持多版本）的勾选记拒绝原因。
+// 返回 (目标端→计划项, 勾选键 kind\x00key → 拒绝原因)。
+func (s *realSync) resolveSel(ctx context.Context, sel []Selection,
+	outcome *decideOutcome) (map[string][]deploy.PlanItem, map[string]string, error) {
+	plans := map[string][]deploy.PlanItem{}
+	rejects := map[string]string{}
+	if len(sel) == 0 {
+		return plans, rejects, nil
+	}
+	in := outcome.in
+	done := map[unitKey]bool{}
+	for _, sl := range sel {
+		key := string(sl.Kind) + "\x00" + sl.ContentKey
+		uks, err := s.unitsForSelection(ctx, sl, outcome.units)
+		if err != nil {
+			return nil, nil, err
+		}
+		// 单位按 member 排序：哨兵（member=""）先评估——收藏的「胜者
+		// 端持有」校验在哨兵处定，成员缺席降级为移除语义而非拒绝。
+		sorted := make([]unitKey, 0, len(uks))
+		for uk := range uks {
+			sorted = append(sorted, uk)
+		}
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].member < sorted[j].member })
+		subUnits := map[unitKey]*unitRow{}
+		subDecs := map[unitKey]*unitDecision{}
+		reason := ""
+		for _, uk := range sorted {
+			row, ok := outcome.units[uk]
+			if !ok {
+				continue // 纯基线残留单位（无 presence）——处置面只认当前单位
+			}
+			wv, held := row.cur[sl.Winner]
+			if !held {
+				if uk.kind == string(hub.KindCollection) && uk.member != "" {
+					wv = unitVal{fp: "0"} // 胜者端该成员缺席 → 以胜者为准即移除
+				} else {
+					reason = fmt.Sprintf("%s 端不持有该项，无法以其为准", sl.Winner)
+					break
+				}
+			}
+			if uk.kind == string(hub.KindBeatmapSet) {
+				if hs := decodeSetFP(wv.fp); len(hs) != 1 {
+					reason = fmt.Sprintf("%s 端持有该谱面集 %d 个版本，无法以其为准", sl.Winner, len(hs))
+					break
+				}
+			}
+			if done[uk] {
+				continue // 同单位已被前序勾选处置（首条生效，确定性）
+			}
+			done[uk] = true
+			subUnits[uk] = row
+			writable := make(map[string]bool, len(in.targets))
+			for _, t := range in.targets {
+				writable[t] = true
+			}
+			subDecs[uk] = &unitDecision{
+				decided: true, fp: wv.fp, winner: sl.Winner, forced: true,
+				writable:  writable,
+				protected: map[string]bool{},
+				divergent: map[string]bool{},
+			}
+		}
+		if reason != "" {
+			rejects[key] = reason
+			continue
+		}
+		sub := assemblePlans(in, subUnits, subDecs)
+		for t, items := range sub.plans {
+			plans[t] = append(plans[t], items...)
+		}
+	}
+	return plans, rejects, nil
 }

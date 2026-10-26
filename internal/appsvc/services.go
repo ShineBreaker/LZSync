@@ -32,8 +32,8 @@ var ErrNoPlan = errors.New("appsvc: 尚无投放计划，请先在对比预览�
 
 // ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。
 type ProgressEvent struct {
-	Service string    // "collect" | "deploy"
-	Stage   string    // collect/deploy 的 Stage 字符串值
+	Service string // "collect" | "deploy"
+	Stage   string // collect/deploy 的 Stage 字符串值
 	Current int
 	Total   int
 	Message string // 人类可读补充（批号、对象计数等）
@@ -63,17 +63,17 @@ const (
 // LibraryCard 库管理页卡片数据（§6.1）：身份、版本来源标注、files 体积、
 // 进程运行状态（状态灯数据）。
 type LibraryCard struct {
-	ForkID          string             // 命中的 Profile ID；未识别为 ""
-	DataDir         string             // fork 数据目录（files/ 的父目录）
+	ForkID          string // 命中的 Profile ID；未识别为 ""
+	DataDir         string // fork 数据目录（files/ 的父目录）
 	RealmPath       string
-	DiskVersion     uint64             // 原始磁盘版本（未识别/运行中可为 0）
+	DiskVersion     uint64              // 原始磁盘版本（未识别/运行中可为 0）
 	VersionSource   forks.VersionSource // 版本值来源标注
-	UpstreamVersion int                // 解码后的官方基线版本
-	ForkRev         int                // fork 修订号（非 Ez 恒 0）
-	VersionLabel    string             // 预组装显示（如 "52011 = 官方 52 + Ez 11"）
-	RealmSize       int64              // 库文件字节数
-	FilesDir        string             // §5.3 三级回退解析结果
-	FilesSize       int64              // files/ 总字节（实体与链接一并计入）
+	UpstreamVersion int                 // 解码后的官方基线版本
+	ForkRev         int                 // fork 修订号（非 Ez 恒 0）
+	VersionLabel    string              // 预组装显示（如 "52011 = 官方 52 + Ez 11"）
+	RealmSize       int64               // 库文件字节数
+	FilesDir        string              // §5.3 三级回退解析结果
+	FilesSize       int64               // files/ 总字节（实体与链接一并计入）
 	FilesCount      int
 	ProcessRunning  bool     // 该 fork 的进程名命中守卫名单（§6.1 运行状态）
 	RunningNames    []string // 命中的进程名
@@ -103,10 +103,31 @@ type DiffRow struct {
 	DefaultChecked bool        // §6.2 默认勾选规则预计算
 }
 
-// Selection 预览页勾选结果的一项（类型 + 内容键）。
+// Selection 预览页勾选结果的一项（类型 + 内容键）。Winner 非空 = 用户
+// 在冲突详情里拍板「以该端当前值为准」——该端取值成为决定值推向全部
+// 目标端（强制覆盖，§0.3 手动处置）；空 = 中枢值为准（原勾选语义）。
 type Selection struct {
 	Kind       hub.EntityKind
 	ContentKey string
+	Winner     string
+}
+
+// ConflictVariant 冲突单位里一端的取值面（含缺席端）。
+type ConflictVariant struct {
+	ForkID string
+	Has    bool        // 该端持有该单位（收藏=有此夹；谱面集=持有其某版本）
+	Value  string      // 人话值：谱面=版本摘要；设置=字段值；收藏=成员数
+	Key    string      // 该端当前取值的内容键（谱面=该端版本 hash；其余=内容键）
+	Fields []FieldDiff // 该端 vs 中枢值的差异字段明细（标量类逐字段）
+}
+
+// ConflictDetail 一个冲突单位的取值面（数据页「冲突明细」二级面板数据）：
+// 中枢值摘要 + 逐端取值与字段差异，「以 X 为准」按钮的 Winner 选项来源。
+type ConflictDetail struct {
+	Kind       string
+	ContentKey string // 传入的行键
+	Canonical  string // 中枢值摘要（「以中枢为准」推向全部目标端）
+	Variants   []ConflictVariant
 }
 
 // ForkPresenceEntry 单行 presence 投影（数据浏览 x/y 聚合数据源）。
@@ -132,9 +153,9 @@ type SettingsInfo struct {
 	DataDir      string // hub 数据目录（§3.4）
 	HubDBPath    string
 	BackupsDir   string
-	BackupsCount int    // 备份目录内条目数
+	BackupsCount int      // 备份目录内条目数
 	GuardNames   []string // 内置守卫名单（ForkProfile.ProcessNames 汇总）
-	LinkSymlink  bool   // 链接能力探测（§5.3 分级）
+	LinkSymlink  bool     // 链接能力探测（§5.3 分级）
 	LinkHardlink bool
 	LinkNote     string // 探测说明（如「不可用时自动降级复制」）
 	NativeLibOK  bool   // librealm 加载状态（P-2 诊断）
@@ -176,6 +197,9 @@ type CompareService interface {
 	// 优先，否则第一张图；无图返回空串）。data:image/*;base64,... 形态，
 	// 前端直接喂 <img src> 或 background-image。
 	CoverImage(contentKey string) (string, error)
+	// UnitConflict 单个冲突单位的取值面：逐端当前值 + 与中枢的字段
+	// 差异（数据页冲突明细二级面板；行键按身份锚归并到判定单位）。
+	UnitConflict(kind hub.EntityKind, contentKey string) (ConflictDetail, error)
 	// BuildPlan 把勾选结果组装为投放计划（覆盖全部启用 kind：收藏夹/
 	// 谱面集/皮肤/成绩）。NeedsConfirm 项（元数据弱键疑似）必须已经用户
 	// 拍板——勾选即视为拍板（NeedsConfirm 置位留痕）；「恢复（已删除）」
