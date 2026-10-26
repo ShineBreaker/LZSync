@@ -238,6 +238,14 @@ html, body {
   margin-bottom: 16px;
 }
 
+/* 页内区块标题（同步页冲突处置区） */
+.section-title {
+  font-size: var(--fs-card-title);
+  font-weight: 700;
+  color: var(--text-hi);
+  margin: 28px 0 10px;
+}
+
 /* ---------- 通用按钮 ---------- */
 .btn {
   padding: 6px 14px;

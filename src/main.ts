@@ -4,31 +4,27 @@
 import { getLang, onLangChange, t, type DictKey } from "./i18n";
 import { LibraryService, events } from "./mygo";
 import { renderBrowse, setBrowseFilter } from "./pages/browse";
-import { renderConflicts } from "./pages/conflicts";
 import { renderClients } from "./pages/clients";
 import { dispatchProgress, detachProgress, renderSync, requestRun, setPendingPreview } from "./pages/sync";
 import { renderSettings } from "./pages/settings";
 import { clear, el, errText, setNavigator, text } from "./ui";
 
-type PageId = "beatmaps" | "collections" | "skins" | "scores" | "conflicts" | "sync" | "clients" | "settings";
+type PageId = "beatmaps" | "collections" | "skins" | "scores" | "sync" | "clients" | "settings";
 
 const PAGES: { id: PageId; labelKey: DictKey; render: (root: HTMLElement) => Promise<void> }[] = [
   { id: "beatmaps", labelKey: "nav.beatmaps", render: (r) => renderBrowse(r, "beatmap_set") },
   { id: "collections", labelKey: "nav.collections", render: (r) => renderBrowse(r, "collection") },
   { id: "skins", labelKey: "nav.skins", render: (r) => renderBrowse(r, "skin") },
   { id: "scores", labelKey: "nav.scores", render: (r) => renderBrowse(r, "score") },
-  { id: "conflicts", labelKey: "nav.conflicts", render: renderConflicts },
   { id: "sync", labelKey: "nav.sync", render: renderSync },
   { id: "clients", labelKey: "nav.clients", render: renderClients },
   { id: "settings", labelKey: "nav.settings", render: renderSettings },
 ];
 
-// 侧栏分组：数据域在前，操作页在后
+// 侧栏分组：数据域在前，管理与操作在后（冲突处置已并入同步页底部）。
 const NAV_GROUPS: { sep?: DictKey; items: PageId[] }[] = [
-  { items: ["beatmaps"] },
-  { sep: "nav.sectionData", items: ["collections", "skins", "scores"] },
-  { items: ["conflicts", "sync"] },
-  { items: ["clients", "settings"] },
+  { sep: "nav.sectionData", items: ["beatmaps", "collections", "skins", "scores"] },
+  { sep: "nav.sectionManage", items: ["sync", "clients", "settings"] },
 ];
 
 let current: PageId = "beatmaps";

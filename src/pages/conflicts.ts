@@ -1,7 +1,8 @@
-// 冲突处置页：全类冲突清单（CompareService.listConflicts）——数据页只
-// 展示四类实体，键位/规则集设置/mod 预设/game.ini 的冲突在此统一处置。
-// 展开行 = 逐端取值面板（共享 conflictpanel）；拍板后「同步所选」走
-// PrepareSelected → 同步页确认执行（与数据页勾选项同管道）。
+// 冲突处置区（并入同步页底部，侧栏不再单列入口）：全类冲突清单
+//（CompareService.listConflicts）——数据页只展示四类实体，键位/规则集
+// 设置/mod 预设/game.ini 的冲突在此统一处置。展开行 = 逐端取值面板
+//（共享 conflictpanel）；拍板后「同步所选」走 PrepareSelected → 同步页
+// 确认执行（与数据页勾选项同管道）。
 
 import { t } from "../i18n";
 import { CompareService, SyncService } from "../mygo";
@@ -11,9 +12,8 @@ import { clear, el, errText, message, navigate, text } from "../ui";
 
 type ConflictRow = Awaited<ReturnType<typeof CompareService.listConflicts>>[number];
 
-export async function renderConflicts(root: HTMLElement): Promise<void> {
+export async function renderConflictList(root: HTMLElement): Promise<void> {
   clear(root);
-  root.append(el("h1", { class: "page-title" }, [text(t("nav.conflicts"))]));
 
   const statusLine = el("div", { class: "status-line" });
   const toolbar = el("div", { class: "toolbar" });

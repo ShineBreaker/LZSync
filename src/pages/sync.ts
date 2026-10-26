@@ -8,6 +8,7 @@ import { t, trBackend } from "../i18n";
 import { LibraryService, SyncService } from "../mygo";
 import type { ForkRunReport, ProgressEvent, RunPreview } from "../mygo";
 import { clear, el, errText, forkDot, kindLabel, message, navigate, text } from "../ui";
+import { renderConflictList } from "./conflicts";
 
 // ---- 数据页 → 同步页的手交 / 页间留存 ----
 
@@ -69,6 +70,13 @@ export async function renderSync(root: HTMLElement): Promise<void> {
     }
   };
 
+  // ---- 冲突处置区（原独立冲突页并入本页底部；侧栏不再单列入口） ----
+  const conflictBox = el("div");
+  const conflictBody = el("div");
+  conflictBox.append(el("h2", { class: "section-title" }, [text(t("nav.conflicts"))]), conflictBody);
+  root.append(conflictBox);
+  void renderConflictList(conflictBody);
+
   // ---- 底部还原条 ----
   const restoreBar = el("div", { class: "toolbar" });
   const restoreSel = el("select", { class: "input" }) as HTMLSelectElement;
@@ -107,23 +115,21 @@ export async function renderSync(root: HTMLElement): Promise<void> {
     }
   });
 
-  // ---- 待处理计数（冲突/需确认/不支持） ----
+  // ---- 待处理计数（冲突/需确认/不支持）：冲突跳本页冲突区，需确认跳数据页 ----
   function pendingChips(p: RunPreview["Pending"]): HTMLElement {
     const box = el("div", { class: "toolbar", style: "gap:8px" });
-    const chip = (n: number, label: string, page?: string, filter?: "conflict" | "needsConfirm"): HTMLElement => {
-      const node = el("span", { class: `badge${n > 0 ? " warn" : ""}`, style: n > 0 && page ? "cursor:pointer" : "" }, [
+    const chip = (n: number, label: string, onClick?: () => void): HTMLElement => {
+      const node = el("span", { class: `badge${n > 0 ? " warn" : ""}`, style: n > 0 && onClick ? "cursor:pointer" : "" }, [
         text(`${label} ${n}`),
       ]);
-      if (n > 0 && page && filter) {
-        node.addEventListener("click", () => {
-          navigate(page, filter);
-        });
+      if (n > 0 && onClick) {
+        node.addEventListener("click", onClick);
       }
       return node;
     };
     box.append(
-      chip(p.Conflicts, t("pend.conflicts"), "conflicts", "conflict"),
-      chip(p.NeedsConfirm, t("pend.needsConfirm"), "beatmaps", "needsConfirm"),
+      chip(p.Conflicts, t("pend.conflicts"), () => conflictBox.scrollIntoView({ behavior: "smooth" })),
+      chip(p.NeedsConfirm, t("pend.needsConfirm"), () => navigate("beatmaps", "needsConfirm")),
       chip(p.Unsupported, t("pend.unsupported")),
       chip(p.Restore, t("pend.restore")),
     );
