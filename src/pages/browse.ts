@@ -4,12 +4,12 @@
 
 import { t, trBackend } from "../i18n";
 import { CompareService, ExportService, LibraryService, SyncService } from "../mygo";
+import { conflictDetail, conflictFallback } from "./conflictpanel";
 import { setPendingPreview } from "./sync";
 import { clear, el, errText, message, navigate, popoverAt, popoverForkRow, syncStateClass, syncStateLabel, text, type SyncState } from "../ui";
 
 type DiffRow = Awaited<ReturnType<typeof CompareService.previewDeploy>>[number];
 type LibCard = Awaited<ReturnType<typeof LibraryService.list>>[number];
-type ConflictDetail = Awaited<ReturnType<typeof CompareService.unitConflict>>;
 
 type BrowseFilter = "all" | "diff" | "conflict" | "needsConfirm";
 
@@ -353,25 +353,6 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
       main.querySelector(".row-meta")?.append(resolveBadge);
 
       const detail = el("div", { class: "row-detail hidden" });
-      const buildFallback = () => {
-        if (!r.conflictFields || r.conflictFields.length === 0) {
-          return el("div", { class: "page-meta" }, [text(t("browse.conflictNoData"))]);
-        }
-        const table = el("table", { class: "row-detail-table" });
-        table.append(el("tr", {}, [
-          el("th", {}, [text("")]),
-          el("th", {}, [text(t("browse.conflictHub"))]),
-          el("th", {}, [text(t("browse.conflictFork"))]),
-        ]));
-        for (const f of r.conflictFields) {
-          table.append(el("tr", {}, [
-            el("td", { class: "k" }, [text(f.Field)]),
-            el("td", {}, [text(f.HubValue)]),
-            el("td", {}, [text(f.ForkValue)]),
-          ]));
-        }
-        return table;
-      };
       const pick = (winner: string) => {
         resolutions.set(r.key, winner);
         checked.add(r.key);
@@ -379,42 +360,6 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
         rowEl.classList.add("checked");
         resolveBadge.textContent = winner ? `→ ${winner}` : t("browse.pickedHub");
         updateToolbar();
-      };
-      const renderConflictDetail = (cd: ConflictDetail): HTMLElement => {
-        const table = el("table", { class: "row-detail-table" });
-        table.append(el("tr", {}, [
-          el("th", {}, [text("")]),
-          el("th", {}, [text(t("browse.conflictValue"))]),
-          el("th", {}, [text(t("browse.conflictDiff"))]),
-          el("th", {}, [text("")]),
-        ]));
-        const btn = (winner: string, label: string) => {
-          const b = el("button", { class: "btn small" }, [text(label)]) as HTMLButtonElement;
-          b.addEventListener("click", (e) => {
-            e.stopPropagation();
-            pick(winner);
-          });
-          return b;
-        };
-        // 中枢行：未选胜者时的默认行为（勾选项按中枢值推送）。
-        table.append(el("tr", {}, [
-          el("td", { class: "k" }, [text(t("browse.conflictHub"))]),
-          el("td", {}, [text(cd.Canonical || "—")]),
-          el("td", {}, [text("")]),
-          el("td", {}, [btn("", t("browse.useHub"))]),
-        ]));
-        for (const v of cd.Variants) {
-          const diffs = (v.Fields ?? []).map((f) => `${f.Field}: ${f.HubValue} → ${f.ForkValue}`).join("；");
-          table.append(el("tr", {}, [
-            el("td", { class: "k" }, [text(v.ForkID)]),
-            el("td", {}, [text(v.Value || t("browse.variantMissing"))]),
-            el("td", { class: "k" }, [text(diffs)]),
-            el("td", {}, v.Has ? [btn(v.ForkID, t("browse.useFork"))] : []),
-          ]));
-        }
-        const box = el("div");
-        box.append(table, el("div", { class: "page-meta" }, [text(t("browse.hintResolve"))]));
-        return box;
       };
       detail.append(el("div", { class: "page-meta" }, [text(t("browse.conflictLoading"))]));
       rowEl.append(detail);
@@ -427,10 +372,10 @@ export async function renderBrowse(root: HTMLElement, kind: string): Promise<voi
         loaded = true;
         CompareService.unitConflict(r.kind as never, r.contentKey).then((cd) => {
           clear(detail);
-          detail.append(renderConflictDetail(cd));
+          detail.append(conflictDetail(cd, pick));
         }).catch(() => {
           clear(detail);
-          detail.append(buildFallback());
+          detail.append(conflictFallback(r.conflictFields));
         });
       });
     }

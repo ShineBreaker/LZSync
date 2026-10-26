@@ -25,7 +25,32 @@ export interface ConflictDetail {
   ContentKey: string;
   /** 中枢值摘要（「以中枢为准」推向全部目标端） */
   Canonical: string;
+  /**
+   * CanPickHub 是否允许「以中枢为准」：无 canonical 值的类（game.ini
+   * 只存端侧快照，中枢无独立取值）只能选端。
+   */
+  CanPickHub: boolean;
   Variants: ConflictVariant[];
+}
+
+/**
+ * ConflictRow 冲突清单的一行（全类冲突的统一枚举面——数据页只展示四
+ * 类，键位/规则集设置/mod 预设/game.ini 的冲突也经此枚举可处置）。
+ * ContentKey 可直接回填 Selection/UnitConflict。
+ */
+export interface ConflictRow {
+  /** EntityKind 或 "game_ini" */
+  Kind: string;
+  /** 勾选/详情键（谱面集=持有版本哈希、键位=一条四段内容键、ini=键名） */
+  ContentKey: string;
+  /** 人话摘要 */
+  Label: string;
+  /** 持有该单位的端 */
+  Forks: string[];
+  /** 异值种数（>1 即分歧） */
+  Values: number;
+  /** 同 ConflictDetail.CanPickHub */
+  CanPickHub: boolean;
 }
 
 /** ConflictVariant 冲突单位里一端的取值面（含缺席端）。 */
@@ -206,6 +231,8 @@ export interface PendingSummary {
   Restore: number;
   /** 不支持：全局交集排除等兼容跳过（CommitRun 后累加） */
   Unsupported: number;
+  /** 冲突按 kind 分解（数据页未展示的类仍可处置——经服务面 Selection 拍板） */
+  ByKind: Record<string, number>;
 }
 
 export interface Plan {
@@ -438,6 +465,15 @@ export const CompareService = {
   /** ForkPresence 查 hub presence 表（数据浏览页 x/y 数据源，§6.2）。 */
   forkPresence(kind: EntityKind): Promise<ForkPresenceEntry[]> {
     return call("CompareService.ForkPresence", kind);
+  },
+  /**
+   * ListConflicts 全类冲突枚举（CompareService 实现）：快照态跑三方判定
+   * （不跑收集——与 UnitConflict 同口径的「最近一轮同步后」数据），冲突/
+   * 保护/异值单位 → 可处置行。收藏成员级冲突按收藏名归并为一行（处置
+   * 粒度 = 整夹拍板）。
+   */
+  listConflicts(): Promise<ConflictRow[]> {
+    return call("CompareService.ListConflicts");
   },
   /**
    * PreviewDeploy hub 真相 → 单 fork 投放预演（hub 内纯 SQL，§6.2）：

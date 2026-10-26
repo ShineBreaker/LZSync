@@ -122,7 +122,7 @@ export async function renderSync(root: HTMLElement): Promise<void> {
       return node;
     };
     box.append(
-      chip(p.Conflicts, t("pend.conflicts"), "collections", "conflict"),
+      chip(p.Conflicts, t("pend.conflicts"), "conflicts", "conflict"),
       chip(p.NeedsConfirm, t("pend.needsConfirm"), "beatmaps", "needsConfirm"),
       chip(p.Unsupported, t("pend.unsupported")),
       chip(p.Restore, t("pend.restore")),
@@ -254,7 +254,7 @@ export async function renderSync(root: HTMLElement): Promise<void> {
       lastReport = { preview: pv, forks: report.Forks };
       renderReport(pv, report.Forks);
     } catch (err) {
-      renderReport(p ?? { RunID: runID, Targets: [], Skipped: [], Pending: { Conflicts: 0, NeedsConfirm: 0, Restore: 0, Unsupported: 0 } }, [], err);
+      renderReport(p ?? { RunID: runID, Targets: [], Skipped: [], Pending: { Conflicts: 0, NeedsConfirm: 0, Restore: 0, Unsupported: 0, ByKind: {} } }, [], err);
       statusLine.append(message("error", errText(err)));
     }
   }

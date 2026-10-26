@@ -4,18 +4,20 @@
 import { getLang, onLangChange, t, type DictKey } from "./i18n";
 import { LibraryService, events } from "./mygo";
 import { renderBrowse, setBrowseFilter } from "./pages/browse";
+import { renderConflicts } from "./pages/conflicts";
 import { renderClients } from "./pages/clients";
 import { dispatchProgress, detachProgress, renderSync, requestRun, setPendingPreview } from "./pages/sync";
 import { renderSettings } from "./pages/settings";
 import { clear, el, errText, setNavigator, text } from "./ui";
 
-type PageId = "beatmaps" | "collections" | "skins" | "scores" | "sync" | "clients" | "settings";
+type PageId = "beatmaps" | "collections" | "skins" | "scores" | "conflicts" | "sync" | "clients" | "settings";
 
 const PAGES: { id: PageId; labelKey: DictKey; render: (root: HTMLElement) => Promise<void> }[] = [
   { id: "beatmaps", labelKey: "nav.beatmaps", render: (r) => renderBrowse(r, "beatmap_set") },
   { id: "collections", labelKey: "nav.collections", render: (r) => renderBrowse(r, "collection") },
   { id: "skins", labelKey: "nav.skins", render: (r) => renderBrowse(r, "skin") },
   { id: "scores", labelKey: "nav.scores", render: (r) => renderBrowse(r, "score") },
+  { id: "conflicts", labelKey: "nav.conflicts", render: renderConflicts },
   { id: "sync", labelKey: "nav.sync", render: renderSync },
   { id: "clients", labelKey: "nav.clients", render: renderClients },
   { id: "settings", labelKey: "nav.settings", render: renderSettings },
@@ -25,7 +27,7 @@ const PAGES: { id: PageId; labelKey: DictKey; render: (root: HTMLElement) => Pro
 const NAV_GROUPS: { sep?: DictKey; items: PageId[] }[] = [
   { items: ["beatmaps"] },
   { sep: "nav.sectionData", items: ["collections", "skins", "scores"] },
-  { items: ["sync"] },
+  { items: ["conflicts", "sync"] },
   { items: ["clients", "settings"] },
 ];
 
