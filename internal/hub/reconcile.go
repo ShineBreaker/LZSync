@@ -225,10 +225,13 @@ SELECT content_hash, payload FROM beatmap_set WHERE superseded_by IS NULL ORDER 
 	}
 	tombKeys := tombs[KindBeatmapSet]
 
-	// 身份索引：内容哈希 → 身份键 + 证据强度（一个哈希正常只属一个身份键）。
+	// 身份索引：内容哈希 → 身份键 + 证据强度。异域副本会让同一哈希同时
+	// 挂强键（online:）与弱键（meta:）——与判定层同序「强键优先 + 序
+	// 最小」取首个命中，保证 pairing/锚定跨端一致（§0.3 身份锚）。
 	idRows, err := s.db.QueryContext(ctx, `
 SELECT iv.content_hash, iv.identity_key, bi.evidence
-FROM identity_version iv JOIN beatmap_identity bi ON bi.identity_key = iv.identity_key`)
+FROM identity_version iv JOIN beatmap_identity bi ON bi.identity_key = iv.identity_key
+ORDER BY CASE WHEN iv.identity_key LIKE 'online:%' THEN 0 ELSE 1 END, iv.identity_key`)
 	if err != nil {
 		return nil, fmt.Errorf("hub: 读身份索引: %w", err)
 	}
@@ -243,7 +246,9 @@ FROM identity_version iv JOIN beatmap_identity bi ON bi.identity_key = iv.identi
 			idRows.Close()
 			return nil, fmt.Errorf("hub: 读身份索引行: %w", err)
 		}
-		hashIdent[h] = ident{k, ev}
+		if _, ok := hashIdent[h]; !ok {
+			hashIdent[h] = ident{k, ev}
+		}
 	}
 	if err := idRows.Err(); err != nil {
 		idRows.Close()

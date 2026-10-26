@@ -258,10 +258,15 @@ export interface RunSkippedFork {
   Reason: string;
 }
 
-/** RunTargetPreview 单个目标端的预览（将写入的动作项数，不含 skip）。 */
+/**
+ * RunTargetPreview 单个目标端的预览（将写入的动作项数，不含 skip）。
+ * Breakdown 是 kind|action → 项数的聚合诊断面（realdbtool 与执行页可
+ * 复核计划构成；键序按字典序序列化为 "kind|action" 形式）。
+ */
 export interface RunTargetPreview {
   ForkID: string;
   Items: number;
+  Breakdown: Record<string, number>;
 }
 
 /** Section 同步板块（§0 设置页「同步范围」的板块开关维度）。 */

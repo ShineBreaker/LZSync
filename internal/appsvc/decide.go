@@ -83,18 +83,19 @@ type decideOutcome struct {
 
 // decideInput 引擎输入（run.go 装载）。
 type decideInput struct {
-	presence map[string]map[hub.EntityKind]map[string]string // fork → kind → 内容键 → local_values
-	baseline map[unitKey]map[string]string                   // 单位 → fork → 基线值
-	ini      map[string]map[string]string                    // fork → 键 → 值（仅有快照端）
-	sources  []string                                        // 全部 Source 端（含本轮跳过——最后已知值）
-	targets  []string                                        // 全部 Target 端（含本轮跳过）
-	live     map[string]bool                                 // 本轮未跳过的目标端（出计划者）
-	kinds    map[hub.EntityKind]bool                         // 开启板块实体类
-	gameIni  bool                                            // ini 板块开关
-	tombs    map[string]map[hub.EntityKind]map[string]int64  // 目标端 → kind → 键 → deletedAt
-	evidence map[string]bool                                 // beatmap identity_key → 强键已确认可用
-	canon    *canonicalIndex                                 // canonical 载荷索引（create 的载荷来源）
-	sum      *summarizer
+	presence  map[string]map[hub.EntityKind]map[string]string // fork → kind → 内容键 → local_values
+	baseline  map[unitKey]map[string]string                   // 单位 → fork → 基线值
+	ini       map[string]map[string]string                    // fork → 键 → 值（仅有快照端）
+	sources   []string                                        // 全部 Source 端（含本轮跳过——最后已知值）
+	targets   []string                                        // 全部 Target 端（含本轮跳过）
+	live      map[string]bool                                 // 本轮未跳过的目标端（出计划者）
+	kinds     map[hub.EntityKind]bool                         // 开启板块实体类
+	gameIni   bool                                            // ini 板块开关
+	tombs     map[string]map[hub.EntityKind]map[string]int64  // 目标端 → kind → 键 → deletedAt
+	evidence  map[string]bool                                 // beatmap identity_key → 强键已确认可用
+	hashIdent map[string]string                               // 内容哈希 → 注册身份键（identity_version 表锚）
+	canon     *canonicalIndex                                 // canonical 载荷索引（create 的载荷来源）
+	sum       *summarizer
 }
 
 // canonicalIndex canonical 载荷索引（判定单位 → 写面载荷/身份键）。
@@ -270,7 +271,14 @@ func buildUnits(in *decideInput) (map[unitKey]*unitRow, map[string][]unitKey) {
 					if json.Unmarshal([]byte(lv), &bs) != nil {
 						continue
 					}
-					ik, _ := hub.BeatmapSetIdentityKey(&bs)
+					// 身份锚 = hub 注册表（identity_version），载荷现算只做
+					// 兜底：S8 异域写入把 OnlineID 置 -1 → 同一物理集在不同
+					// 服务器域会算出不同身份键（online:<id> vs meta:<…>），
+					// 用载荷现算单位身份会让三端永不收敛、互相重灌全量。
+					ik := in.hashIdent[ck]
+					if ik == "" {
+						ik, _ = hub.BeatmapSetIdentityKey(&bs)
+					}
 					uk := unitKey{string(kind), ik, ""}
 					r := rowOf(uk)
 					hashes := decodeSetFP(r.cur[fork].fp)
@@ -897,16 +905,17 @@ func loadDecideInput(ctx context.Context, deps *Deps, sources, targets []string,
 	live map[string]bool, kinds map[hub.EntityKind]bool, wantGameIni bool,
 	freshIni map[string]bool) (*decideInput, error) {
 	in := &decideInput{
-		presence: map[string]map[hub.EntityKind]map[string]string{},
-		baseline: map[unitKey]map[string]string{},
-		ini:      map[string]map[string]string{},
-		sources:  append([]string(nil), sources...),
-		targets:  append([]string(nil), targets...),
-		live:     live,
-		kinds:    kinds,
-		gameIni:  wantGameIni,
-		tombs:    map[string]map[hub.EntityKind]map[string]int64{},
-		evidence: map[string]bool{},
+		presence:  map[string]map[hub.EntityKind]map[string]string{},
+		baseline:  map[unitKey]map[string]string{},
+		ini:       map[string]map[string]string{},
+		sources:   append([]string(nil), sources...),
+		targets:   append([]string(nil), targets...),
+		live:      live,
+		kinds:     kinds,
+		gameIni:   wantGameIni,
+		tombs:     map[string]map[hub.EntityKind]map[string]int64{},
+		evidence:  map[string]bool{},
+		hashIdent: map[string]string{},
 		canon: &canonicalIndex{
 			collections: map[string]string{},
 			sets:        map[string]bool{},
@@ -989,6 +998,33 @@ func loadDecideInput(ctx context.Context, deps *Deps, sources, targets []string,
 		}
 		in.tombs[t] = tm
 	}
+
+	// 谱面身份锚：内容哈希 → 注册身份键（identity_version）。异域副本
+	// 会让同一哈希同时挂强键（online:）与弱键（meta:）——锚必须优先
+	// 强键：选弱键会让该端后续新版本注册到 online: 后单位分裂（同一
+	// 物理集进两个单位 → 双向 create 重灌）。ORDER BY 强键优先 + 序
+	// 最小，哈希首个命中行即锚（确定性）。
+	idAnchor, err := deps.Hub.DB().QueryContext(ctx, `
+SELECT content_hash, identity_key FROM identity_version
+ORDER BY CASE WHEN identity_key LIKE 'online:%' THEN 0 ELSE 1 END, identity_key`)
+	if err != nil {
+		return nil, fmt.Errorf("读身份锚: %w", err)
+	}
+	for idAnchor.Next() {
+		var h, ik string
+		if err := idAnchor.Scan(&h, &ik); err != nil {
+			idAnchor.Close()
+			return nil, fmt.Errorf("扫身份锚: %w", err)
+		}
+		if _, ok := in.hashIdent[h]; !ok {
+			in.hashIdent[h] = ik
+		}
+	}
+	if err := idAnchor.Err(); err != nil {
+		idAnchor.Close()
+		return nil, fmt.Errorf("遍历身份锚: %w", err)
+	}
+	idAnchor.Close()
 
 	// beatmap 身份证据：强键或用户已确认 → 自动路径可用；弱键未确认 →
 	// 需确认（§5.4 三选一前置，版本替换不自动）。

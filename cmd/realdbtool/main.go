@@ -28,7 +28,7 @@ func main() {
 	var (
 		dataDir  = flag.String("data-dir", filepath.Join(home, ".local/share/lzsync-realdbtest"), "LZSync 自有数据目录（hub/store/snapshots/backups）")
 		dataRoot = flag.String("data-root", filepath.Join(home, ".local/share"), "fork 数据根")
-		phase    = flag.String("phase", "full", "scan|collect|compare|deploy|verify|full")
+		phase    = flag.String("phase", "full", "scan|collect|compare|deploy|run|verify|full")
 		forkList = flag.String("forks", "lazer,delta,g0v0", "收集顺序（逗号分隔）")
 		deployTo = flag.String("deploy-to", "delta", "投放目标 fork")
 		maxSets  = flag.Int("max-sets", 3, "计划中谱面集上限")
@@ -59,6 +59,15 @@ func main() {
 		must(doRestore(b, *deployTo, flag.Arg(0)))
 	case "verify":
 		doVerify(b, *deployTo)
+	case "run":
+		// §0.4 一轮同步编排真链路：PrepareRun（读范围→收集→三方判定→
+		// 逐端计划）→ -confirm-write 才 CommitRun（逐目标端写入+基线推进）。
+		pv := doPrepareRun(b)
+		if *confirm {
+			doCommitRun(b, pv.RunID)
+		} else {
+			fmt.Println("[run] 未传 -confirm-write，跳过 CommitRun（准备阶段已完成）")
+		}
 	case "full":
 		doScan(b)
 		doCollect(b, strings.Split(*forkList, ","))
@@ -239,6 +248,89 @@ func skipNote(r appsvc.DiffRow) string {
 		return "（" + r.SkipReason + "）"
 	}
 	return ""
+}
+
+// doPrepareRun 一轮同步准备段（§0.4 步骤 1-4 真链路）：逐端收集 → 三方
+// 判定 → 逐端计划计数与待处理计数打印。
+func doPrepareRun(b *appsvc.Backend) appsvc.RunPreview {
+	fmt.Println("===== R1) PrepareRun（收集+三方判定+逐端计划）=====")
+	pv, err := b.Sync.PrepareRun()
+	if err != nil {
+		fmt.Printf("[run] PrepareRun 失败：%v\n", err)
+		os.Exit(1)
+	}
+	sort.Slice(pv.Targets, func(i, j int) bool { return pv.Targets[i].ForkID < pv.Targets[j].ForkID })
+	for _, tp := range pv.Targets {
+		var bd []string
+		for k, n := range tp.Breakdown {
+			bd = append(bd, fmt.Sprintf("%s=%d", k, n))
+		}
+		sort.Strings(bd)
+		fmt.Printf("[target] %s 计划项=%d {%s}\n", tp.ForkID, tp.Items, strings.Join(bd, " "))
+	}
+	for _, sk := range pv.Skipped {
+		fmt.Printf("[skipped] %s：%s\n", sk.ForkID, sk.Reason)
+	}
+	fmt.Printf("[pending] 冲突=%d 需确认=%d 恢复=%d 不支持=%d\n",
+		pv.Pending.Conflicts, pv.Pending.NeedsConfirm, pv.Pending.Restore, pv.Pending.Unsupported)
+	return pv
+}
+
+// doCommitRun 一轮执行段（§0.4 步骤 6-7）：逐端报告收集/投放/跳过面。
+func doCommitRun(b *appsvc.Backend, runID string) {
+	fmt.Println("===== R2) CommitRun（逐目标端写入+基线推进）=====")
+	t0 := time.Now()
+	rep, err := b.Sync.CommitRun(runID)
+	if err != nil {
+		fmt.Printf("[commit] 失败：%v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("[commit] 耗时=%s\n", time.Since(t0).Round(time.Second))
+	for _, fr := range rep.Forks {
+		var parts []string
+		if fr.Skipped {
+			parts = append(parts, "跳过:"+fr.SkipReason)
+		}
+		if fr.Collect != nil {
+			var kinds []string
+			for k, n := range fr.Collect.Entities {
+				kinds = append(kinds, fmt.Sprintf("%s=%d", k, n))
+			}
+			sort.Strings(kinds)
+			var skips []string
+			for _, s := range fr.Collect.Skips {
+				skips = append(skips, fmt.Sprintf("%s×%d", s.Reason, s.Count))
+			}
+			parts = append(parts, fmt.Sprintf("收集{%s} 跳过[%s]", strings.Join(kinds, " "), strings.Join(skips, "; ")))
+		}
+		if fr.Deploy != nil {
+			cnt := map[string]int{}
+			for _, a := range fr.Deploy.Applied {
+				cnt[string(a.Kind)+"|"+string(a.Action)]++
+			}
+			var applied []string
+			for k, n := range cnt {
+				applied = append(applied, fmt.Sprintf("%s=%d", k, n))
+			}
+			sort.Strings(applied)
+			parts = append(parts, fmt.Sprintf("投放{%s} 备份=%s", strings.Join(applied, " "), fr.Deploy.BackupPath))
+			for _, s := range fr.Deploy.Skipped {
+				parts = append(parts, fmt.Sprintf("投放skip[%s×%d]", s.Reason, s.Count))
+			}
+			for _, f := range fr.Deploy.FailedBatches {
+				parts = append(parts, fmt.Sprintf("FAIL批#%d[%s]", f.BatchIndex, f.Reason))
+			}
+		}
+		if fr.Error != "" {
+			parts = append(parts, "错误:"+fr.Error)
+		}
+		fmt.Printf("[fork] %-8s src=%v tgt=%v %s\n", fr.ForkID, fr.Source, fr.Target, strings.Join(parts, " | "))
+	}
+	fmt.Printf("[pending] 冲突=%d 需确认=%d 恢复=%d 不支持=%d\n",
+		rep.Pending.Conflicts, rep.Pending.NeedsConfirm, rep.Pending.Restore, rep.Pending.Unsupported)
+	if rep.BaselineError != "" {
+		fmt.Printf("[baseline] 推进失败：%s\n", rep.BaselineError)
+	}
 }
 
 // pickSelection 从预演行选计划勾选集：收藏夹全量 + 各类型限量 create 项。

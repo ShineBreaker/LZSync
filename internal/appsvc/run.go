@@ -29,9 +29,12 @@ type PendingSummary struct {
 }
 
 // RunTargetPreview 单个目标端的预览（将写入的动作项数，不含 skip）。
+// Breakdown 是 kind|action → 项数的聚合诊断面（realdbtool 与执行页可
+// 复核计划构成；键序按字典序序列化为 "kind|action" 形式）。
 type RunTargetPreview struct {
-	ForkID string
-	Items  int
+	ForkID    string
+	Items     int
+	Breakdown map[string]int
 }
 
 // RunSkippedFork 本轮被跳过的端（运行中/收集失败等），携原因。
@@ -84,7 +87,7 @@ type preparedRun struct {
 	intersection   []string // 全局交集端清单（全部 Target=true 端）
 	collectReports map[string]*collect.Report
 	pending        PendingSummary
-	order          []string // 参与端排序（ForkID 序）
+	order          []string        // 参与端排序（ForkID 序）
 	fresh          map[string]bool // 本轮收集成功的端（presence 快照可信）
 	freshIni       map[string]bool // 本轮 ini 快照成功的端
 	// 基线推进面（§0.3）：全量轮 = 全部评估单位；勾选轮 = selUnits 子集。
@@ -162,7 +165,7 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 
 	kinds := scopeKinds(s.cfg)
 	wantGameIni := sel == nil && s.cfg.sectionEnabled(SectionGameIni) // 同步所选只处理勾选项，不带 game.ini
-	intersection := s.cfg.targetForkIDs() // 全部 Target 端（含将被跳过的）
+	intersection := s.cfg.targetForkIDs()                             // 全部 Target 端（含将被跳过的）
 
 	// 参与端：已注册且 Source||Target。
 	var parts []struct {
@@ -324,12 +327,14 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 			continue
 		}
 		n := 0
+		bd := map[string]int{}
 		for _, it := range plan.Items {
 			if it.Action != deploy.ActionSkip {
 				n++
+				bd[string(it.Kind)+"|"+string(it.Action)]++
 			}
 		}
-		targets = append(targets, RunTargetPreview{ForkID: fid, Items: n})
+		targets = append(targets, RunTargetPreview{ForkID: fid, Items: n, Breakdown: bd})
 	}
 	skipped := []RunSkippedFork{}
 	for fid, reason := range run.skipped {
@@ -514,4 +519,3 @@ func intersectionSkipCount(rep deploy.Report) int {
 	}
 	return n
 }
-
