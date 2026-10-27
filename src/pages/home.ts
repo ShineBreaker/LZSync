@@ -564,9 +564,11 @@ export function renderHome(root: HTMLElement): () => void {
 
   function inboxRow(item: InboxItem): HTMLElement {
     const row = el("div", { class: `irow ${item.mode}` });
+    const check = el("input", { class: "icheck", type: "checkbox" }) as HTMLInputElement;
     const holdersEl = el("span", { class: "iholders" });
     row.append(
       el("span", { class: "ibar" }),
+      check,
       el("span", { class: "ikind" }, [text(kindLabel(item.kind))]),
       el("span", { class: "ilabel" }, [text(item.label)]),
       holdersEl,
@@ -574,10 +576,12 @@ export function renderHome(root: HTMLElement): () => void {
       el("span", { class: "ichev" }, [icon("chevron")]),
     );
     const choice = row.querySelector<HTMLElement>(".ichoice")!;
+    check.addEventListener("click", (e) => e.stopPropagation()); // 不触发展开
 
     // 外环：staged winner 实环（已拍板）；未拍板时配置基准端弱化预览。
+    const stagedEntry = () => staged.get(item.kind, item.key);
     const stagedWinner = (): string | undefined => {
-      const e = staged.get(item.kind, item.key);
+      const e = stagedEntry();
       return e?.action === "winner" ? e.winner : undefined;
     };
     function paintHolders(): void {
@@ -594,7 +598,27 @@ export function renderHome(root: HTMLElement): () => void {
         holdersEl.append(d);
       }
     }
+    function syncCheck(): void {
+      check.checked = stagedEntry() !== undefined;
+    }
     paintHolders();
+    syncCheck();
+
+    // 勾选 = 加入暂存（已选 winner 则 winner，否则 select=默认基准）；
+    // 取消 = 摘出暂存。
+    check.addEventListener("change", () => {
+      if (check.checked) {
+        const w = stagedWinner();
+        staged.put(w !== undefined
+          ? { kind: item.kind, contentKey: item.key, label: item.label, action: "winner", winner: w }
+          : { kind: item.kind, contentKey: item.key, label: item.label, action: "select", winner: "" });
+      } else {
+        staged.remove(item.kind, item.key);
+      }
+      const e = stagedEntry();
+      paintChoice(choice, e?.action === "winner" ? e.winner : e?.action);
+      paintHolders();
+    });
 
     const detail = el("div", { class: "idetail hidden" });
     row.append(detail);
@@ -611,7 +635,7 @@ export function renderHome(root: HTMLElement): () => void {
         CompareService.unitConflict(item.kind as EntityKind, item.key)
           .then((cd) => {
             clear(detail);
-            detail.append(conflictCards(cd, (a) => pick(a), stagedWinner()));
+            detail.append(conflictCards(cd, (a) => pick(a), stagedWinner(), item.baselineFork));
           })
           .catch((e) => {
             clear(detail);
@@ -628,13 +652,14 @@ export function renderHome(root: HTMLElement): () => void {
       } else {
         staged.put({ kind: item.kind, contentKey: item.key, label: item.label, action: "select", winner: "" });
       }
-      const e = staged.get(item.kind, item.key);
+      const e = stagedEntry();
       paintChoice(choice, e?.action === "winner" ? e.winner : e?.action);
-      paintHolders(); // 外环跟随 staged
+      paintHolders();
+      syncCheck(); // 点卡自动勾
       detail.classList.add("hidden");
       row.classList.remove("open");
     }
-    const e0 = staged.get(item.kind, item.key);
+    const e0 = stagedEntry();
     paintChoice(choice, e0?.action === "winner" ? e0.winner : e0?.action);
     return row;
   }

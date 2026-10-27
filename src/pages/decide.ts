@@ -14,13 +14,21 @@ export type DecideAction =
 
 type ConflictDetail = Awaited<ReturnType<typeof CompareService.unitConflict>>;
 
-/** conflictCards 冲突展开卡集：每变体一卡 + 「保留差异」虚线卡；
- * selected = 已拍板 winner（加 .sel 选中态）。 */
-export function conflictCards(cd: ConflictDetail, onPick: (a: DecideAction) => void, selected?: string): HTMLElement {
+/** conflictCards 冲突展开卡集：逐端取值卡（缺席端置灰），选中态由
+ * selected 驱动。baseline = 默认预选端（未拍板时弱化高亮，不写入
+ * staged；用户点卡后才正式选中）。
+ */
+export function conflictCards(
+  cd: ConflictDetail,
+  onPick: (a: DecideAction) => void,
+  selected?: string,
+  baseline?: string,
+): HTMLElement {
   const box = el("div", { class: "vcards" });
   for (const v of cd.Variants) {
     const isSel = selected === v.ForkID;
-    const card = el("div", { class: `vcard${v.Has ? "" : " disabled"}${isSel ? " sel" : ""}` });
+    const isPre = !selected && baseline === v.ForkID && v.Has;
+    const card = el("div", { class: `vcard${v.Has ? "" : " disabled"}${isSel ? " sel" : ""}${isPre ? " pre" : ""}` });
     card.append(el("div", { class: "vhead" }, [forkDot(v.ForkID), text(v.ForkID)]));
     card.append(el("div", { class: "vval" }, [text(v.Value || "—")]));
     if (v.Has) {
@@ -31,13 +39,6 @@ export function conflictCards(cd: ConflictDetail, onPick: (a: DecideAction) => v
     }
     box.append(card);
   }
-  const keep = el("div", { class: "vcard keep" });
-  keep.append(el("div", { class: "vhead" }, [text(t("decide.keep"))]));
-  keep.addEventListener("click", (e) => {
-    e.stopPropagation();
-    onPick({ action: "keep" });
-  });
-  box.append(keep);
   return box;
 }
 
