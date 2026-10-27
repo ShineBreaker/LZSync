@@ -218,10 +218,10 @@ func (s *realSync) prepareRun(ctx context.Context, sel []Selection) (RunPreview,
 			Kinds:   kinds,
 			GameIni: wantGameIni, // 仅目标端也收 ini 快照（v(t) 与基线输入，读侧不改文件）
 		}
-		s.prog(ProgressEvent{Service: "run", Stage: string(collect.StageProject), At: time.Now(),
+		s.prog(ProgressEvent{Service: "run", Stage: string(collect.StageProject), ForkID: p.ref.ForkID, At: time.Now(),
 			Message: fmt.Sprintf("开始收集 %s", p.ref.ForkID)})
 		cr, err := s.cRunner().CollectWith(ctx, p.ref, opts, func(stage collect.Stage, current, total int) {
-			s.prog(ProgressEvent{Service: "run", Stage: string(stage), Current: current, Total: total,
+			s.prog(ProgressEvent{Service: "run", Stage: string(stage), ForkID: p.ref.ForkID, Current: current, Total: total,
 				At: time.Now(), Message: fmt.Sprintf("%s · %s：%d/%d", p.ref.ForkID, stageLabel(stage), current, total)})
 		})
 		if err != nil {
@@ -450,10 +450,10 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 				report.Forks = append(report.Forks, fr)
 				continue
 			}
-			s.prog(ProgressEvent{Service: "run", Stage: string(deploy.StageGuard), At: time.Now(),
+			s.prog(ProgressEvent{Service: "run", Stage: string(deploy.StageGuard), ForkID: fid, At: time.Now(),
 				Message: fmt.Sprintf("开始投放到 %s（%d 项）", fid, len(plan.Items))})
 			rep, derr := s.dRunner().Deploy(ctx, *plan, func(stage deploy.Stage, batchIndex, batchTotal, current, total int) {
-				s.prog(ProgressEvent{Service: "run", Stage: string(stage), Current: current, Total: total,
+				s.prog(ProgressEvent{Service: "run", Stage: string(stage), ForkID: fid, Current: current, Total: total,
 					At: time.Now(), Message: fmt.Sprintf("%s · 批 %d/%d · %s：%d/%d", fid, batchIndex, batchTotal, stageLabel(stage), current, total)})
 			})
 			fr.Deploy = &rep
@@ -534,6 +534,88 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 		report.BaselineError = err.Error()
 	}
 	return report, nil
+}
+
+// KeepDifference 「接受差异」处置（§0-B12/G13）：勾选单位的各端基线推进
+// 为各自当前值——保留差异不再计冲突，任一端再改动照常判定。不写任何端
+// 库，只动 baseline 表。
+//
+// 推进面：live = 已收集过的参与端（collect_log 审计行——快照零行也不漏，
+// presence 空集的端照样算「收集过」）。从未收集的端不给基线行：缺席哨兵
+// BaselineAbsent 会在它首次收集后被误判「端自行改动」（无行 = 无同步史
+// 才是正确初态）。ini 单位只对有 ini 快照的端推进。
+func (s *realSync) KeepDifference(sel []Selection) error {
+	if len(sel) == 0 {
+		return errors.New("appsvc: 未选择任何条目")
+	}
+	if err := s.begin("keep", ""); err != nil {
+		return err
+	}
+	defer s.finish()
+	ctx := context.Background()
+
+	// 参与端 = 已注册且 Source||Target（与判定面一致）。
+	var parts []string
+	for _, ref := range s.reg.all() {
+		role, ok := s.cfg.role(ref.ForkID)
+		if !ok || (!role.Source && !role.Target) {
+			continue
+		}
+		parts = append(parts, ref.ForkID)
+	}
+	sort.Strings(parts)
+
+	live := map[string]bool{}
+	rows, err := s.deps.Hub.DB().QueryContext(ctx, `SELECT DISTINCT fork_id FROM collect_log`)
+	if err != nil {
+		return fmt.Errorf("读收集审计: %w", err)
+	}
+	collected := map[string]bool{}
+	for rows.Next() {
+		var fid string
+		if err := rows.Scan(&fid); err != nil {
+			rows.Close()
+			return fmt.Errorf("扫收集审计: %w", err)
+		}
+		collected[fid] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, f := range parts {
+		live[f] = collected[f]
+	}
+	freshIni := map[string]bool{}
+	if s.deps.GameIni != nil {
+		for _, f := range parts {
+			if _, _, ok, err := s.deps.GameIni.Load(f); err == nil && ok {
+				freshIni[f] = true
+			}
+		}
+	}
+
+	out, err := runDecisions(ctx, &s.deps, s.cfg.sourceForkIDs(), s.cfg.targetForkIDs(),
+		live, scopeKinds(s.cfg), s.cfg.sectionEnabled(SectionGameIni), freshIni)
+	if err != nil {
+		return fmt.Errorf("三方判定: %w", err)
+	}
+	uks, err := s.selUnits(ctx, sel, out.units)
+	if err != nil {
+		return err
+	}
+	subset := suRows(out.units, uks)
+	if len(subset) == 0 {
+		return errors.New("appsvc: 勾选未命中任何判定单位（快照可能已过期，请刷新）")
+	}
+	baseRows := baselineRows(subset, out.decs, nil, func(kind string) map[string]bool {
+		if kind == hub.BaselineKindGameIni {
+			return freshIni
+		}
+		return live
+	}, true, time.Now().UnixMilli())
+	return s.deps.Hub.AdvanceBaselines(ctx, baseRows)
 }
 
 // suRows 勾选轮的基线推进面：只含勾选单位（未勾选的冲突保持冻结）。

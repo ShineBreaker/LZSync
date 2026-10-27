@@ -47,6 +47,11 @@ export interface ConflictRow {
   Label: string;
   /** 持有该单位的端 */
   Forks: string[];
+  /**
+   * BaselineFork 基准端：首个「当前值=上轮基线」的未改动端（§0.3 三方
+   * 判定的基线保持者）；全端自行改动或无同步史时为空。
+   */
+  BaselineFork: string;
   /** 异值种数（>1 即分歧） */
   Values: number;
   /** 同 ConflictDetail.CanPickHub */
@@ -121,6 +126,17 @@ export interface FieldDiff {
   Field: string;
   HubValue: string;
   ForkValue: string;
+}
+
+/**
+ * ForkCoverage 单端对一行的覆盖态（§4.2 覆盖点语义）。
+ * State: has（已有）| incoming（下轮将写入）| conflict | confirm | deleted | none。
+ */
+export interface ForkCoverage {
+  ForkID: string;
+  State: string;
+  /** 预演行/交集给出的原因原文（悬浮层附行） */
+  Reason: string;
 }
 
 /** ForkPresenceEntry 单行 presence 投影（数据浏览 x/y 聚合数据源）。 */
@@ -211,6 +227,26 @@ export interface LibraryCard {
   Registered: boolean;
 }
 
+/**
+ * LibraryItem 资料库页一行（DESIGN.md §4.2）：库内全量条目 ∪ 各端预演/
+ * 删除组键，逐端覆盖态。Forks 每注册端一条、按 ForkID 排序。
+ */
+export interface LibraryItem {
+  Kind: EntityKind;
+  ContentKey: string;
+  /** 与 DiffRow.Summary 同一摘要面（summarizer） */
+  Summary: string;
+  /** 谱面身份键（online:/meta: 前缀；其余类为空） */
+  IdentityKey: string;
+  /** "ok" | "incoming" | "conflict" | "confirm" */
+  State: string;
+  /** 有注册端把此键记为已删除（恢复组） */
+  Deleted: boolean;
+  /** 各端删除时间的最大者（Unix 毫秒） */
+  DeletedAt: number;
+  Forks: ForkCoverage[];
+}
+
 export interface LibraryRef {
   ForkID: string;
   DataDir: string;
@@ -256,12 +292,17 @@ export interface PlanItem {
   SourceFork: string;
 }
 
-/** ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。 */
+/**
+ * ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。
+ * ForkID 是连线进度的分派键（同步台按端填轨道，DESIGN.md §3.2）。
+ */
 export interface ProgressEvent {
-  /** "collect" | "deploy" */
+  /** "collect" | "deploy" | "run" */
   Service: string;
   /** collect/deploy 的 Stage 字符串值 */
   Stage: string;
+  /** 该进度所属的端（空 = 全局步序事件） */
+  ForkID: string;
   Current: number;
   Total: number;
   /** 人类可读补充（批号、对象计数等） */
@@ -391,7 +432,10 @@ export type VersionSource = string;
 // ---- Services ----
 
 export const LibraryService = {
-  /** AssignFork 用户指认 fork 身份（绝不猜，§6.1）；指认后按 Profile 解码版本。 */
+  /**
+   * AssignFork 用户指认 fork 身份（绝不猜，§6.1）；指认后按 Profile 解码版本。
+   * path 与 Register 同样接受数据目录或库文件。
+   */
   assignFork(path: string, forkID: string): Promise<LibraryRef> {
     return call("LibraryService.AssignFork", path, forkID);
   },
@@ -400,8 +444,9 @@ export const LibraryService = {
     return call("LibraryService.List");
   },
   /**
-   * Register 手动注册：识别失败返回 ForkID 为空串的 ref（携带原始版本供
-   * UI 指认，§6.1）；只有路径不可访问等硬错误走 error。
+   * Register 手动注册：path 可给数据目录或库文件本身；识别失败返回 ForkID
+   * 为空串的 ref（携带解析后的 RealmPath 与原始版本供 UI 指认，§6.1）；
+   * 只有路径不可访问等硬错误走 error。
    */
   register(path: string): Promise<LibraryRef> {
     return call("LibraryService.Register", path);
@@ -466,6 +511,17 @@ export const CompareService = {
   forkPresence(kind: EntityKind): Promise<ForkPresenceEntry[]> {
     return call("CompareService.ForkPresence", kind);
   },
+  /** HubCounts 库内各类条目数（CompareService 实现）。 */
+  hubCounts(): Promise<Record<string, number>> {
+    return call("CompareService.HubCounts");
+  },
+  /**
+   * Library 资料库页行集（CompareService 实现）：逐注册端跑预演+删除组+
+   * presence，喂 buildLibrary。判定叠加（G12 行态）与 PreviewDeploy 同规则。
+   */
+  library(kind: EntityKind): Promise<LibraryItem[]> {
+    return call("CompareService.Library", kind);
+  },
   /**
    * ListConflicts 全类冲突枚举（CompareService 实现）：快照态跑三方判定
    * （不跑收集——与 UnitConflict 同口径的「最近一轮同步后」数据），冲突/
@@ -514,6 +570,19 @@ export const SyncService = {
   /** DeployCurrentPlan 执行当前计划（§6.3 投放执行：守卫 → 备份 → 批事务）。 */
   deployCurrentPlan(): Promise<DeployReport> {
     return call("SyncService.DeployCurrentPlan");
+  },
+  /**
+   * KeepDifference 「接受差异」处置（§0-B12/G13）：勾选单位的各端基线推进
+   * 为各自当前值——保留差异不再计冲突，任一端再改动照常判定。不写任何端
+   * 库，只动 baseline 表。
+   *
+   * 推进面：live = 已收集过的参与端（collect_log 审计行——快照零行也不漏，
+   * presence 空集的端照样算「收集过」）。从未收集的端不给基线行：缺席哨兵
+   * BaselineAbsent 会在它首次收集后被误判「端自行改动」（无行 = 无同步史
+   * 才是正确初态）。ini 单位只对有 ini 快照的端推进。
+   */
+  keepDifference(sel: Selection[]): Promise<void> {
+    return call("SyncService.KeepDifference", sel);
   },
   /**
    * PrepareRun 准备一轮同步（§0.4 步骤 1-4）：参与端 = 已注册且 Source||Target；
@@ -573,6 +642,18 @@ export const SettingsService = {
    */
   setSyncScope(scope: SyncScope): Promise<void> {
     return call("SettingsService.SetSyncScope", scope);
+  },
+} as const;
+
+/** DialogService 是绑定给前端的系统对话框服务。 */
+export const DialogService = {
+  /** PickFile 选择文件（「还原…」选备份；defaultPath 开备份目录）。 */
+  pickFile(defaultPath: string): Promise<string> {
+    return call("DialogService.PickFile", defaultPath);
+  },
+  /** PickFolder 选择目录（注册客户端「选择文件夹…」）。 */
+  pickFolder(defaultPath: string): Promise<string> {
+    return call("DialogService.PickFolder", defaultPath);
   },
 } as const;
 

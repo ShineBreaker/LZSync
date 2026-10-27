@@ -31,9 +31,11 @@ var ErrBusy = errors.New("appsvc: 已有同步任务在执行，请等待完成�
 var ErrNoPlan = errors.New("appsvc: 尚无投放计划，请先在对比预览页勾选并生成计划")
 
 // ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。
+// ForkID 是连线进度的分派键（同步台按端填轨道，DESIGN.md §3.2）。
 type ProgressEvent struct {
-	Service string // "collect" | "deploy"
+	Service string // "collect" | "deploy" | "run"
 	Stage   string // collect/deploy 的 Stage 字符串值
+	ForkID  string // 该进度所属的端（空 = 全局步序事件）
 	Current int
 	Total   int
 	Message string // 人类可读补充（批号、对象计数等）
@@ -141,8 +143,11 @@ type ConflictRow struct {
 	ContentKey string   // 勾选/详情键（谱面集=持有版本哈希、键位=一条四段内容键、ini=键名）
 	Label      string   // 人话摘要
 	Forks      []string // 持有该单位的端
-	Values     int      // 异值种数（>1 即分歧）
-	CanPickHub bool     // 同 ConflictDetail.CanPickHub
+	// BaselineFork 基准端：首个「当前值=上轮基线」的未改动端（§0.3 三方
+	// 判定的基线保持者）；全端自行改动或无同步史时为空。
+	BaselineFork string
+	Values     int  // 异值种数（>1 即分歧）
+	CanPickHub bool // 同 ConflictDetail.CanPickHub
 }
 
 // ForkPresenceEntry 单行 presence 投影（数据浏览 x/y 聚合数据源）。
@@ -151,6 +156,27 @@ type ForkPresenceEntry struct {
 	Kind        hub.EntityKind
 	ContentKey  string
 	CollectedAt int64 // Unix 毫秒
+}
+
+// LibraryItem 资料库页一行（DESIGN.md §4.2）：库内全量条目 ∪ 各端预演/
+// 删除组键，逐端覆盖态。Forks 每注册端一条、按 ForkID 排序。
+type LibraryItem struct {
+	Kind        hub.EntityKind
+	ContentKey  string
+	Summary     string // 与 DiffRow.Summary 同一摘要面（summarizer）
+	IdentityKey string // 谱面身份键（online:/meta: 前缀；其余类为空）
+	State       string // "ok" | "incoming" | "conflict" | "confirm"
+	Deleted     bool   // 有注册端把此键记为已删除（恢复组）
+	DeletedAt   int64  // 各端删除时间的最大者（Unix 毫秒）
+	Forks       []ForkCoverage
+}
+
+// ForkCoverage 单端对一行的覆盖态（§4.2 覆盖点语义）。
+// State: has（已有）| incoming（下轮将写入）| conflict | confirm | deleted | none。
+type ForkCoverage struct {
+	ForkID string
+	State  string
+	Reason string // 预演行/交集给出的原因原文（悬浮层附行）
 }
 
 // SyncStatus 长任务运行状态（执行页轮询）。
@@ -218,6 +244,13 @@ type CompareService interface {
 	// ListConflicts 枚举当前三方判定下的全部冲突单位（含数据页未展
 	// 示的设置类与 game.ini——快照态，不跑收集；处置仍走 PrepareSelected）。
 	ListConflicts() ([]ConflictRow, error)
+	// HubCounts 库内各类条目数（侧栏与库卡板块胶囊）：键 = "beatmap_set"|
+	// "collection"|"skin"|"score"；beatmap_set 只计当前版本（链尾）。
+	HubCounts() (map[string]int, error)
+	// Library 资料库页行集（DESIGN.md §4）：库内全量条目 ∪ 各端预演/删除
+	// 组键，逐端覆盖态 + 行级 worst-state。仅四数据类（beatmap_set/
+	// collection/skin/score）。
+	Library(kind hub.EntityKind) ([]LibraryItem, error)
 	// BuildPlan 把勾选结果组装为投放计划（覆盖全部启用 kind：收藏夹/
 	// 谱面集/皮肤/成绩）。NeedsConfirm 项（元数据弱键疑似）必须已经用户
 	// 拍板——勾选即视为拍板（NeedsConfirm 置位留痕）；「恢复（已删除）」
@@ -244,6 +277,10 @@ type SyncService interface {
 	// CommitRun 执行已准备的一轮（§0.4 步骤 6-7）：逐目标端写入 → 重收集
 	// 刷新快照。未知/过期 runID 报错「请重新同步」。
 	CommitRun(runID string) (RunReport, error)
+	// KeepDifference 「接受差异」处置（§0-B12/G13）：勾选单位的各端基线
+	// 推进为各自当前值——冲突此后不再提示，任一端再改动照常判定。
+	// 不碰任何端库；未收集过的端不写基线（BaselineAbsent 行会伪装改动）。
+	KeepDifference(sel []Selection) error
 	// Cancel 取消当前长任务（批事务进行中不可打断，批间生效）。
 	Cancel()
 	// Running 当前任务状态。

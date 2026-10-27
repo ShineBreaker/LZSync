@@ -1,548 +1,216 @@
-// 双语词典与语言状态（zh-CN / en）：前端展示文案与后端稳定字符串翻译。
-// 文案规则见 docs/DESIGN.md：名词用实体名，动词最小集，不解释概念。
+// 双语文案（DESIGN.md §7）：页面只放允许词表内的短词，无解释句。
+// t(key, ...args) 支持 {0}{1} 占位；trBackend 直译后端返回词。
 
 export type Lang = "zh" | "en";
 
-const STORAGE_KEY = "lzsync.lang";
+let lang: Lang = "zh";
 
-function detectLang(): Lang {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === "zh" || saved === "en") return saved;
-  } catch {
-    // 无 localStorage 环境回退浏览器语言。
-  }
-  const nav = typeof navigator !== "undefined" ? navigator.language.toLowerCase() : "zh";
-  return nav.startsWith("en") ? "en" : "zh";
+export function setLang(l: Lang): void {
+  lang = l;
 }
-
-let currentLang: Lang = detectLang();
-const listeners = new Set<() => void>();
 
 export function getLang(): Lang {
-  return currentLang;
+  return lang;
 }
 
-export function setLang(lang: Lang): void {
-  if (currentLang === lang) return;
-  currentLang = lang;
-  try {
-    localStorage.setItem(STORAGE_KEY, lang);
-  } catch {
-    // 忽略存储限制。
-  }
-  document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
-  for (const fn of listeners) {
-    fn();
-  }
+const zh: Record<string, string> = {
+  "nav.sync": "同步",
+  "nav.beatmap_set": "谱面集",
+  "nav.collection": "收藏",
+  "nav.skin": "皮肤",
+  "nav.score": "成绩",
+  "nav.settings": "设置",
+
+  "btn.sync": "同步",
+  "btn.pulling": "拉取中…",
+  "btn.writeN": "写入 {0} 项",
+  "btn.writing": "写入中…",
+  "btn.uptodate": "已是最新",
+  "btn.cancel": "取消",
+  "btn.close": "关闭",
+
+  "lane.pull": "拉取",
+  "lane.write": "写入",
+
+  "client.running": "运行中",
+  "client.scan": "扫描",
+  "client.pickDir": "选择文件夹…",
+  "client.restore": "还原…",
+  "client.remove": "移除",
+  "client.restoreAt": "还原 {0}",
+
+  "decide.keep": "保留差异",
+  "decide.update": "更新为新版本",
+  "decide.restore": "恢复",
+
+  "bar.staged": "已选 {0}",
+
+  "result.created": "新增 {0}",
+  "result.updated": "更新 {0}",
+  "result.skipped": "跳过 {0}",
+  "result.backup": "备份 {0}",
+  "pend.unsupported": "不支持 {0}",
+
+  "cov.has": "✓",
+  "cov.incoming": "将写入",
+  "cov.conflict": "冲突",
+  "cov.confirm": "待确认",
+  "cov.deleted": "已删除",
+  "cov.unsupported": "不支持",
+  "cov.noWrite": "不写入",
+  "cov.none": "—",
+
+  "inbox.baseline": "基准",
+
+  "lib.search": "搜索",
+  "lib.all": "全部",
+  "lib.pending": "待处理",
+  "lib.deleted": "已删除",
+  "lib.deletedAt": "删除于 {0}",
+
+  "set.title": "设置",
+  "set.lang": "语言",
+  "set.storage": "存储",
+  "set.dataDir": "数据目录",
+  "set.hubDb": "库数据库",
+  "set.backups": "备份目录",
+  "set.backupsCount": "{0} 个",
+  "set.engine": "引擎",
+  "set.engine.real": "正常",
+  "set.engine.mock": "演示",
+  "set.engine.fallback": "降级",
+  "set.links": "链接支持",
+  "set.sym": "符号链接",
+  "set.hard": "硬链接",
+  "set.guard": "游戏进程守卫",
+  "set.guardHint": "运行中不写",
+
+  "kind.beatmap_set": "谱面集",
+  "kind.collection": "收藏",
+  "kind.skin": "皮肤",
+  "kind.score": "成绩",
+  "kind.beatmap": "谱面",
+  "kind.key_binding": "键位",
+  "kind.ruleset_setting": "规则集设置",
+  "kind.mod_preset": "Mod 预设",
+  "kind.game_ini": "game.ini",
+
+  "toast.saved": "已保存",
+  "toast.removed": "已移除",
+  "toast.restored": "已还原",
+  "toast.assigned": "已识别",
+  "toast.scanDone": "扫描完成",
+  "toast.registered": "已注册 {0}",
+};
+
+const en: Record<string, string> = {
+  "nav.sync": "Sync",
+  "nav.beatmap_set": "Beatmap Sets",
+  "nav.collection": "Collections",
+  "nav.skin": "Skins",
+  "nav.score": "Scores",
+  "nav.settings": "Settings",
+
+  "btn.sync": "Sync",
+  "btn.pulling": "Pulling…",
+  "btn.writeN": "Write {0} items",
+  "btn.writing": "Writing…",
+  "btn.uptodate": "Up to date",
+  "btn.cancel": "Cancel",
+  "btn.close": "Close",
+
+  "lane.pull": "Pull",
+  "lane.write": "Write",
+
+  "client.running": "Running",
+  "client.scan": "Scan",
+  "client.pickDir": "Choose folder…",
+  "client.restore": "Restore…",
+  "client.remove": "Remove",
+  "client.restoreAt": "Restore {0}",
+
+  "decide.keep": "Keep difference",
+  "decide.update": "Update to new version",
+  "decide.restore": "Restore",
+
+  "bar.staged": "{0} selected",
+
+  "result.created": "{0} created",
+  "result.updated": "{0} updated",
+  "result.skipped": "{0} skipped",
+  "result.backup": "Backup {0}",
+  "pend.unsupported": "{0} unsupported",
+
+  "cov.has": "✓",
+  "cov.incoming": "Will write",
+  "cov.conflict": "Conflict",
+  "cov.confirm": "Needs confirm",
+  "cov.deleted": "Deleted",
+  "cov.unsupported": "Unsupported",
+  "cov.noWrite": "Not writing",
+  "cov.none": "—",
+
+  "inbox.baseline": "Baseline",
+
+  "lib.search": "Search",
+  "lib.all": "All",
+  "lib.pending": "Pending",
+  "lib.deleted": "Deleted",
+  "lib.deletedAt": "Deleted {0}",
+
+  "set.title": "Settings",
+  "set.lang": "Language",
+  "set.storage": "Storage",
+  "set.dataDir": "Data directory",
+  "set.hubDb": "Hub database",
+  "set.backups": "Backups directory",
+  "set.backupsCount": "{0} backups",
+  "set.engine": "Engine",
+  "set.engine.real": "Normal",
+  "set.engine.mock": "Demo",
+  "set.engine.fallback": "Degraded",
+  "set.links": "Link support",
+  "set.sym": "Symlink",
+  "set.hard": "Hardlink",
+  "set.guard": "Game process guard",
+  "set.guardHint": "never writes while running",
+
+  "kind.beatmap_set": "beatmap set",
+  "kind.collection": "collection",
+  "kind.skin": "skin",
+  "kind.score": "score",
+  "kind.beatmap": "beatmap",
+  "kind.key_binding": "key binding",
+  "kind.ruleset_setting": "ruleset setting",
+  "kind.mod_preset": "Mod Presets",
+  "kind.game_ini": "game.ini",
+
+  "toast.saved": "Saved",
+  "toast.removed": "Removed",
+  "toast.restored": "Restored",
+  "toast.assigned": "Assigned",
+  "toast.scanDone": "Scan done",
+  "toast.registered": "Registered {0}",
+};
+
+/** t 文案查表 + {0} 占位替换。 */
+export function t(key: string, ...args: (string | number)[]): string {
+  const table = lang === "zh" ? zh : en;
+  let s = table[key] ?? zh[key] ?? key;
+  args.forEach((a, i) => {
+    s = s.replace(`{${i}}`, String(a));
+  });
+  return s;
 }
 
-export function onLangChange(fn: () => void): void {
-  listeners.add(fn);
-}
-
-const DICT = {
-  zh: {
-    // ===== 导航与壳 =====
-    "nav.overview": "概览",
-    "nav.beatmaps": "谱面集",
-    "nav.collections": "收藏",
-    "nav.skins": "皮肤",
-    "nav.scores": "成绩",
-    "nav.sync": "同步",
-    "nav.conflicts": "冲突",
-    "nav.clients": "客户端",
-    "nav.settings": "设置",
-    "nav.sectionData": "数据",
-    "nav.sectionManage": "管理",
-    "sidebar.clients": "客户端",
-    "sidebar.running": "{0} 运行中",
-    "sidebar.clientsSummary": "{0} 端 · {1}",
-    "sidebar.noClients": "未添加",
-    "sidebar.statusUnavailable": "状态未知",
-    "global.gameRunning": "{0} 运行中",
-    "search.placeholder": "搜索",
-
-    // ===== 数据行状态（悬浮层端态） =====
-    "st.synced": "一致",
-    "st.update": "有更新",
-    "st.conflict": "冲突",
-    "st.needsConfirm": "需确认",
-    "st.targetOnly": "仅目标有",
-    "st.missing": "—",
-    "st.ok": "✓",
-    "st.old": "⚠ 旧",
-
-    // ===== 通用 =====
-    "kind.beatmap_set": "谱面集",
-    "kind.beatmap": "难度",
-    "kind.collection": "收藏",
-    "kind.skin": "皮肤",
-    "kind.score": "成绩",
-    "kind.key_binding": "键位",
-    "kind.ruleset_setting": "规则集",
-    "kind.mod_preset": "Mod",
-    "kind.game_ini": "game.ini",
-    "action.create": "新建",
-    "action.update": "更新",
-    "action.version-replace": "替换版本",
-
-    // 兼容 ui.ts 既有 helper（计划执行报告用）
-    "cat.create": "新增",
-    "cat.target-only": "仅目标有",
-    "cat.conflict": "冲突",
-    "cat.version-update": "有更新",
-    "cat.restore": "已删除",
-    "vsrc.realm-open": "实时",
-    "vsrc.filename": "文件名",
-    "vsrc.snapshot-cache": "缓存",
-    "vsrc.unknown-running": "未知",
-
-    // ===== 数据浏览页 =====
-    "browse.title": "谱面集",
-    "browse.total": "{0} 项",
-    "browse.selected": "已选 {0}",
-    "browse.syncBtn": "同步全部",
-    "browse.pushAll": "已下发 {0} 项到全部 {1} 端",
-    "browse.pushAllFail": "已下发到 {0}/{1} 端",
-    "browse.exportBtn": "导出",
-    "browse.filterAll": "全部",
-    "browse.filterDiff": "仅看差异",
-    "browse.filterConflict": "冲突",
-    "browse.filterNeedsConfirm": "需确认",
-    "browse.empty": "暂无数据",
-    "conflicts.total": "共 {0} 个冲突",
-    "conflicts.empty": "没有待处置的冲突",
-    "conflicts.holders": "持有端 {0}",
-    "conflicts.values": "{0} 处分歧",
-    "conflicts.syncBtn": "同步所选",
-    "browse.loading": "加载中…",
-    "browse.collectedBy": "最近拉取自 {0}",
-    "browse.hubVersion": "v{0}",
-    "browse.diff": "{0} 难度",
-    "browse.files": "{0} MiB",
-    "browse.beatmaps": "{0} 谱面",
-    "browse.confirmTitle": "确认要替换目标端的旧版本吗？",
-    "browse.conflictFields": "差异字段",
-    "browse.conflictHub": "中枢",
-    "browse.conflictFork": "目标端",
-    "browse.conflictLoading": "加载冲突明细…",
-    "browse.conflictNoData": "无字段差异明细",
-    "browse.conflictValue": "当前取值",
-    "browse.conflictDiff": "与中枢差异",
-    "browse.useHub": "以中枢为准",
-    "browse.useFork": "以此端为准",
-    "browse.pickedHub": "→ 中枢",
-    "browse.variantMissing": "缺席",
-    "browse.hintResolve": "勾选项未选胜者时按中枢值推送；选中胜者则以该端当前值覆盖全部目标端",
-    "browse.deletedOn": "删除于 {0}",
-    "browse.showDiff": "查看差异",
-
-    // ===== 同步页 =====
-    "sync.title": "同步",
-    "sync.step1": "拉取",
-    "sync.step2": "同步到",
-    "sync.step3": "还原",
-    "sync.pullBtn": "拉取",
-    "sync.pullAll": "全部拉取",
-    "sync.pullDesc": "把客户端最新数据读到中枢",
-    "sync.pushBtn": "同步",
-    "sync.pushDesc": "把选中的数据写到目标端",
-    "sync.checkGuard": "目标未运行",
-    "sync.checkBackup": "自动备份",
-    "sync.checkPlan": "{0} 个动作",
-    "sync.running": "同步中…",
-    "sync.done": "完成",
-    "sync.failed": "中断",
-    "sync.cancel": "取消",
-    "sync.applied": "新增 {0} · 更新 {1} · 跳过 {2}",
-    "sync.noPlan": "先到数据页勾选条目",
-    "sync.backup": "备份 → {0}",
-    "sync.restoreFrom": "从备份还原",
-    "sync.restoreTarget": "目标",
-    "sync.restorePath": "路径",
-    "sync.restoreBtn": "还原",
-    "sync.restoreDone": "已还原",
-
-    // ===== 一轮同步（§0.4） =====
-    "run.confirm": "写入 {0} 端 · {1} 项",
-    "run.go": "同步",
-    "run.cancel": "取消",
-    "run.preparing": "正在预演…",
-    "run.pulled": "拉取",
-    "pend.conflicts": "冲突",
-    "pend.needsConfirm": "需确认",
-    "pend.unsupported": "不支持",
-    "pend.restore": "已删除",
-
-    // ===== 同步范围 =====
-    "set.syncScope": "同步范围",
-    "scope.pull": "拉取",
-    "scope.write": "写入",
-    "sec.beatmap_set": "谱面集",
-    "sec.collection": "收藏",
-    "sec.skin": "皮肤",
-    "sec.score": "成绩",
-    "sec.key_binding": "键位",
-    "sec.ruleset_setting": "规则集设置",
-    "sec.mod_preset": "Mod 预设",
-    "sec.game_ini": "game.ini",
-
-    // ===== 客户端页 =====
-    "clients.title": "客户端",
-    "clients.scan": "自动扫描",
-    "clients.add": "手动注册",
-    "clients.pathPlaceholder": "数据目录或 client.realm",
-    "clients.remove": "移除",
-    "clients.running": "运行中",
-    "clients.unidentified": "未识别",
-    "clients.assignFork": "选择类型",
-    "clients.confirmAssign": "确认",
-    "clients.empty": "未添加客户端",
-    "clients.added": "已添加 {0}",
-    "clients.version": "v{0}",
-
-    // ===== 设置页 =====
-    "set.language": "语言",
-    "set.backend": "后端",
-    "set.mode": "模式",
-    "set.modeReal": "正常",
-    "set.modeMock": "演示",
-    "set.modeFallback": "降级",
-    "set.nativeLib": "引擎",
-    "set.nativeOk": "就绪",
-    "set.nativeFail": "未加载",
-    "set.paths": "存储",
-    "set.dataDir": "数据目录",
-    "set.hubDb": "中枢数据库",
-    "set.backupsDir": "备份目录",
-    "set.backupsCount": "{0} 份",
-    "set.guardSection": "进程",
-    "set.linkSection": "链接",
-    "set.linkOk": "支持",
-    "set.linkFail": "不支持",
-  },
-  en: {
-    // ===== Navigation & shell =====
-    "nav.overview": "Overview",
-    "nav.beatmaps": "Beatmaps",
-    "nav.collections": "Collections",
-    "nav.skins": "Skins",
-    "nav.scores": "Scores",
-    "nav.sync": "Sync",
-    "nav.conflicts": "Conflicts",
-    "nav.clients": "Clients",
-    "nav.settings": "Settings",
-    "nav.sectionData": "Data",
-    "nav.sectionManage": "Manage",
-    "sidebar.clients": "Clients",
-    "sidebar.running": "{0} running",
-    "sidebar.clientsSummary": "{0} · {1}",
-    "sidebar.noClients": "None",
-    "sidebar.statusUnavailable": "Unknown",
-    "global.gameRunning": "{0} running",
-    "search.placeholder": "Search",
-
-    // ===== Sync states =====
-    "st.synced": "Synced",
-    "st.update": "Update",
-    "st.conflict": "Conflict",
-    "st.needsConfirm": "Confirm",
-    "st.targetOnly": "Target only",
-    "st.missing": "—",
-    "st.ok": "✓",
-    "st.old": "⚠",
-
-    // ===== Common =====
-    "kind.beatmap_set": "Beatmap Set",
-    "kind.beatmap": "Beatmap",
-    "kind.collection": "Collection",
-    "kind.skin": "Skin",
-    "kind.score": "Score",
-    "kind.key_binding": "Key",
-    "kind.ruleset_setting": "Ruleset",
-    "kind.mod_preset": "Mod",
-    "kind.game_ini": "game.ini",
-    "action.create": "New",
-    "action.update": "Update",
-    "action.version-replace": "Replace",
-
-    "cat.create": "New",
-    "cat.target-only": "Target only",
-    "cat.conflict": "Conflict",
-    "cat.version-update": "Update",
-    "cat.restore": "Deleted",
-    "vsrc.realm-open": "Live",
-    "vsrc.filename": "Filename",
-    "vsrc.snapshot-cache": "Cached",
-    "vsrc.unknown-running": "Unknown",
-
-    // ===== Browse page =====
-    "browse.title": "Beatmap Sets",
-    "browse.total": "{0}",
-    "browse.selected": "{0} selected",
-    "browse.syncBtn": "Sync All",
-    "browse.pushAll": "Pushed {0} item(s) to all {1} forks",
-    "browse.pushAllFail": "Pushed to {0}/{1} forks",
-    "browse.exportBtn": "Export",
-    "browse.filterAll": "All",
-    "browse.filterDiff": "Changed",
-    "browse.filterConflict": "Conflicts",
-    "browse.filterNeedsConfirm": "Needs confirm",
-    "browse.empty": "Nothing here",
-    "conflicts.total": "{0} conflicts",
-    "conflicts.empty": "No pending conflicts",
-    "conflicts.holders": "held by {0}",
-    "conflicts.values": "{0} divergent",
-    "conflicts.syncBtn": "Sync selected",
-    "browse.loading": "Loading…",
-    "browse.collectedBy": "From {0}",
-    "browse.hubVersion": "v{0}",
-    "browse.diff": "{0} diffs",
-    "browse.files": "{0} MiB",
-    "browse.beatmaps": "{0} beatmaps",
-    "browse.confirmTitle": "Replace older version on target?",
-    "browse.conflictHub": "Hub",
-    "browse.conflictFork": "Target",
-    "browse.conflictLoading": "Loading conflict details…",
-    "browse.conflictNoData": "No field-level diff",
-    "browse.conflictValue": "Current value",
-    "browse.conflictDiff": "vs hub",
-    "browse.useHub": "Use hub",
-    "browse.useFork": "Use this fork",
-    "browse.pickedHub": "→ hub",
-    "browse.variantMissing": "absent",
-    "browse.hintResolve": "Checked rows without a winner use the hub value; picking a fork overwrites all targets with its value",
-    "browse.deletedOn": "Deleted {0}",
-    "browse.conflictFields": "Differences",
-    "browse.showDiff": "Diff",
-
-    // ===== Sync page =====
-    "sync.title": "Sync",
-    "sync.step1": "Pull",
-    "sync.step2": "Sync to",
-    "sync.step3": "Restore",
-    "sync.pullBtn": "Pull",
-    "sync.pullAll": "Pull all",
-    "sync.pullDesc": "Read client data into hub",
-    "sync.pushBtn": "Sync",
-    "sync.pushDesc": "Write selected data to target",
-    "sync.checkGuard": "Target not running",
-    "sync.checkBackup": "Auto backup",
-    "sync.checkPlan": "{0} actions",
-    "sync.running": "Syncing…",
-    "sync.done": "Done",
-    "sync.failed": "Stopped",
-    "sync.cancel": "Cancel",
-    "sync.applied": "+{0} / ~{1} / skip {2}",
-    "sync.noPlan": "Select items in Browse first",
-    "sync.backup": "Backup → {0}",
-    "sync.restoreFrom": "Restore from backup",
-    "sync.restoreTarget": "Target",
-    "sync.restorePath": "Path",
-    "sync.restoreBtn": "Restore",
-    "sync.restoreDone": "Restored",
-
-    // ===== One sync round (§0.4) =====
-    "run.confirm": "Write {0} forks · {1} items",
-    "run.go": "Sync",
-    "run.cancel": "Cancel",
-    "run.preparing": "Preparing…",
-    "run.pulled": "Pulled",
-    "pend.conflicts": "Conflicts",
-    "pend.needsConfirm": "Needs confirm",
-    "pend.unsupported": "Unsupported",
-    "pend.restore": "Deleted",
-
-    // ===== Sync scope =====
-    "set.syncScope": "Sync Scope",
-    "scope.pull": "Pull",
-    "scope.write": "Write",
-    "sec.beatmap_set": "Beatmap Sets",
-    "sec.collection": "Collections",
-    "sec.skin": "Skins",
-    "sec.score": "Scores",
-    "sec.key_binding": "Key Bindings",
-    "sec.ruleset_setting": "Ruleset Settings",
-    "sec.mod_preset": "Mod Presets",
-    "sec.game_ini": "game.ini",
-
-    // ===== Clients page =====
-    "clients.title": "Clients",
-    "clients.scan": "Scan",
-    "clients.add": "Add",
-    "clients.pathPlaceholder": "Data dir or client.realm",
-    "clients.remove": "Remove",
-    "clients.running": "Running",
-    "clients.unidentified": "Unidentified",
-    "clients.assignFork": "Type",
-    "clients.confirmAssign": "Confirm",
-    "clients.empty": "No clients",
-    "clients.added": "Added {0}",
-    "clients.version": "v{0}",
-
-    // ===== Settings page =====
-    "set.language": "Language",
-    "set.backend": "Backend",
-    "set.mode": "Mode",
-    "set.modeReal": "Active",
-    "set.modeMock": "Demo",
-    "set.modeFallback": "Fallback",
-    "set.nativeLib": "Engine",
-    "set.nativeOk": "Ready",
-    "set.nativeFail": "Unavailable",
-    "set.paths": "Storage",
-    "set.dataDir": "Data dir",
-    "set.hubDb": "Hub DB",
-    "set.backupsDir": "Backups",
-    "set.backupsCount": "{0}",
-    "set.guardSection": "Processes",
-    "set.linkSection": "Links",
-    "set.linkOk": "Yes",
-    "set.linkFail": "No",
-  },
-} as const;
-
-export type DictKey = keyof typeof DICT.zh;
-
-export function t(key: DictKey, ...args: (string | number)[]): string {
-  const table = DICT[currentLang];
-  let out: string = table[key] ?? DICT.zh[key];
-  for (let i = 0; i < args.length; i++) {
-    out = out.replace(`{${i}}`, String(args[i]));
-  }
-  return out;
-}
-
-/**
- * 后端字符串翻译：中文模式剥离内部章节号，英文模式做轻量映射。
- */
+/** trBackend 后端返回文本直译：后端已输出本地化文案时透传。 */
 export function trBackend(s: string): string {
-  if (!s) return s;
-  if (currentLang === "zh") {
-    return cleanZhBackend(s);
-  }
-  return translateToEn(s);
+  return s;
 }
 
-function cleanZhBackend(s: string): string {
-  return s
-    .replace(/^appsvc:\s*/, "")
-    .replace(/^guard:\s*/, "")
-    .replace(/^deploy:\s*/, "")
-    .replace(/^collect:\s*/, "")
-    .replace(/（§[^）]*）/g, "")
-    .replace(/（[A-Z]\d+[^）]*）/g, "")
-    .replace(/，§[\d.-]+/g, "")
-    .replace(/元数据弱键「疑似」版本更新，需用户拍板/g, "同名谱面待确认");
-}
-
-const EN_EXACT: Record<string, string> = {
-  "未知（运行中）": "Unknown (running)",
-  "元数据弱键「疑似」版本更新，需用户拍板（§5.4 三选一）": "Title match, needs confirmation",
-  "元数据弱键「疑似」版本更新，需用户拍板": "Title match, needs confirmation",
-  "Protected 系统谱面集": "Protected system beatmap set",
-  "Ez 外部托管谱面集": "Ez2Lazer external beatmap set",
-  "软删谱面集（DeletePending）": "Pending deletion beatmap set",
-  "Hidden 难度": "Hidden beatmap difficulty",
-  "fork 专有规则集难度（OwnRulesets）": "Fork-exclusive ruleset difficulty",
-  "软删皮肤（DeletePending）": "Pending deletion skin",
-  "Protected 内置皮肤": "Built-in protected skin",
-  "fork 专有皮肤（OwnSkins 指纹）": "Fork-exclusive skin",
-  "皮肤 Hash 为空（无法判定身份）": "Skin has empty hash",
-  "软删成绩（DeletePending）": "Pending deletion score",
-  "成绩 BeatmapHash 为空（无谱面锚点）": "Score missing BeatmapHash",
-  "fork 专有规则集成绩（OwnRulesets）": "Fork-exclusive ruleset score",
-  "规则集市场行成绩（OnlineID 超内置域，服务器市场产物不跨端）": "Custom server ruleset score",
-  "fork 专有判定档成绩（判定语义列非 0，官方端重算会错）": "Fork-specific judgement score",
-  "软删模组预设（DeletePending）": "Pending deletion mod preset",
-  "源端无 game.ini（从未启动过客户端，ini 键未收集）": "No game.ini on source",
-  "目标已出现同键行：新建 → 就地更新": "Target row exists: Create → Update",
-  "目标缺同键行：就地更新 → 新建": "Target row missing: Update → Create",
-  "目标已是 canonical 值（重续判定：已存在 → 跳过）": "Already up to date",
-  "目标已软删（计划后删除），跳过防复活（§5.4 删除不复活）": "Deleted on target, skipped",
-  "预演数据中不存在该键（快照可能已过期，请刷新预览）": "Item not in preview (refresh)",
-  "成绩 Statistics 含目标端不认识的 HitResult 键（过滤后写入，D7）": "Filtered unsupported HitResult keys",
-  "守卫复查通过": "Process check passed",
-  "Mock 后端仅演示：未生成真实容器、未拉起客户端": "Demo mode: no container files written",
-  "LZSYNC_MOCK=1 强制 Mock 后端（M-4 开发模式）": "LZSYNC_MOCK=1 demo mode",
-  "Mock 后端不加载 native 库（M-4 冒烟模式）": "Not loaded in demo mode",
-  "按 §5.3 自动分级：符号链接 → 硬链接（同卷）→ 复制兜底；探测不可用时逐级降级": "Symlink → Hardlink (same drive) → Copy",
-  "Mock 探测结果（真实后端按 §5.3 现场探测）": "Demo probe result",
-};
-
-const EN_STAGE: Record<string, string> = {
-  "只读投影": "Reading",
-  "入 hub": "Saving",
-  "收仓+回链": "Archiving",
-  "守卫复查": "Checking",
-  "自动备份": "Backup",
-  "建链接": "Linking",
-  "事务写入": "Writing",
-  "结构校验": "Verifying",
-};
-
-function translateToEn(s: string): string {
-  const exact = EN_EXACT[s];
-  if (exact) return exact;
-
-  const verMatch = /^(\d+)\s*=\s*官方\s*(\d+)\s*\+\s*(\S+)\s*(\d+)$/.exec(s);
-  if (verMatch) {
-    return `${verMatch[1]} (upstream ${verMatch[2]} + ${verMatch[3]} ${verMatch[4]})`;
-  }
-
-  const colMatch = /^收藏夹「(.+)」$/.exec(s);
-  if (colMatch) return `Collection "${colMatch[1]}"`;
-
-  const skinMatch = /^皮肤「(.+?)」（(.+)）$/.exec(s);
-  if (skinMatch) return `Skin "${skinMatch[1]}" (${skinMatch[2]})`;
-
-  const skinSimple = /^皮肤「(.+)」$/.exec(s);
-  if (skinSimple) return `Skin "${skinSimple[1]}"`;
-
-  const scoreMatch = /^成绩\s+(\S+)\s+·\s+(\d+)\s+分\s+·\s+(.+)$/.exec(s);
-  if (scoreMatch) return `Score ${scoreMatch[1]} · ${scoreMatch[2]} pts · ${scoreMatch[3]}`;
-
-  const kbMatch = /^键位\s+(.+)$/.exec(s);
-  if (kbMatch) return `Key Binding ${kbMatch[1]!.replace(/^全局/, "Global")}`;
-
-  const rsMatch = /^规则集设置\s+(.+)$/.exec(s);
-  if (rsMatch) return `Ruleset Setting ${rsMatch[1]}`;
-
-  const mpMatch = /^模组预设\s+(.+)$/.exec(s);
-  if (mpMatch) return `Mod Preset ${mpMatch[1]}`;
-
-  const batchMatch = /^批\s*(\d+)\/(\d+)\s*·\s*([^：:]+)[：:]\s*(\d+)\/(\d+)$/.exec(s);
-  if (batchMatch) {
-    const st = EN_STAGE[batchMatch[3]!] ?? batchMatch[3];
-    return `Batch ${batchMatch[1]}/${batchMatch[2]} · ${st}: ${batchMatch[4]}/${batchMatch[5]}`;
-  }
-  const stepMatch = /^([^：:]+)[：:]\s*(\d+)\/(\d+)$/.exec(s);
-  if (stepMatch && EN_STAGE[stepMatch[1]!]) {
-    return `${EN_STAGE[stepMatch[1]!]}: ${stepMatch[2]}/${stepMatch[3]}`;
-  }
-  if (s.startsWith("开始收集 ")) {
-    return `Pulling ${s.slice("开始收集 ".length)}…`;
-  }
-  if (s.startsWith("写前自动备份：")) {
-    return `Backup: ${s.slice("写前自动备份：".length)}`;
-  }
-
-  return s
-    .replace(/^appsvc:\s*/, "")
-    .replace(/^guard:\s*/, "")
-    .replace(/^deploy:\s*/, "")
-    .replace(/^collect:\s*/, "")
-    .replace(/目标游戏进程正在运行，请先关闭游戏后再同步/g, "Game is running")
-    .replace(/目标库正被其他进程占用，请先关闭游戏后再同步/g, "Database in use")
-    .replace(/已有同步任务在执行，请等待完成或取消/g, "Sync already running")
-    .replace(/尚无投放计划，请先在对比预览页勾选并生成计划/g, "Select items first")
-    .replace(/未勾选任何条目/g, "No items selected")
-    .replace(/请选择目标 fork/g, "Select a target")
-    .replace(/请选择对比双方 fork/g, "Select both forks")
-    .replace(/对比双方不能是同一个 fork/g, "Source and target must differ")
-    .replace(/运行中：/g, "running: ")
-    .replace(/谱面集 /g, "Beatmap Set ")
-    .replace(/皮肤 /g, "Skin ")
-    .replace(/成绩 /g, "Score ");
+/** kindLabel 实体类短词（收件箱/行内标签）。 */
+export function kindLabel(kind: string): string {
+  const key = `kind.${kind}`;
+  const s = (lang === "zh" ? zh : en)[key] ?? zh[key];
+  return s ?? kind;
 }

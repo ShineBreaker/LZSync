@@ -42,6 +42,7 @@ func main() {
 	mygo.BindAs("SyncService", backend.Sync)
 	mygo.BindAs("ExportService", backend.Export)
 	mygo.BindAs("SettingsService", backend.Settings)
+	mygo.BindAs("DialogService", DialogService{})
 
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{

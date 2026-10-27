@@ -16,7 +16,7 @@ LZSync：管理同一台机器上多个 osu!lazer fork（官方 lazer、DeltaLaz
 | `internal/{collect,deploy}` | 收集/投放编排 |
 | `internal/{filestore,guard}` | 内容寻址仓与链接分级、进程守卫与备份 |
 | `internal/{diff,fixture,itests}` | 对账查询、测试库构造器、集成验收断言 |
-| `internal/appsvc` + `src/` + `main.go` | mygo Bind 服务层与 vanilla TS 四页前端 |
+| `internal/appsvc` + `src/` + `main.go` | mygo Bind 服务层与 vanilla TS 前端（同步台 / 资料库 / 设置，UI 规范见 `docs/DESIGN.md`） |
 | `docs/design.md` | 施工蓝图：**§0 产品行为模型（B1-B12、三方判定、一轮流程、G 差距清单）优先级最高**，其后 18 硬约束 + HB1-HB4；改同步行为/内核前必读 |
 | `docs/research/` | 四端差异的唯一事实源（自包含，reference/ 已删除） |
 | `GLOSSARY.md` / `docs/adr/` | 领域术语表与架构决策记录 |

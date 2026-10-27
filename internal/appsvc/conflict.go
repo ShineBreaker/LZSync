@@ -608,6 +608,9 @@ func (s *realCompare) ListConflicts() ([]ConflictRow, error) {
 			// 成员单位并入收藏行：歧成员数累加、持有端并集。
 			rows[i].Values++
 			rows[i].Forks = unionStrings(rows[i].Forks, cr.Forks)
+			if rows[i].BaselineFork == "" {
+				rows[i].BaselineFork = cr.BaselineFork
+			}
 			continue
 		}
 		seen[gk] = len(rows)
@@ -633,6 +636,28 @@ func conflictRowFor(uk unitKey, row *unitRow, in *decideInput, sum *summarizer) 
 	}
 	sort.Strings(cr.Forks)
 	cr.Values = len(fps)
+
+	// 基准端：首个「当前值 = 上轮基线」的未改动端（§0.3 未改动端即基线
+	// 保持者）。全端自行改动或无基线时留空。
+	seenF := map[string]bool{}
+	for _, f := range append(append([]string{}, in.targets...), in.sources...) {
+		if seenF[f] {
+			continue
+		}
+		seenF[f] = true
+		b, hasB := row.base[f]
+		if !hasB {
+			continue
+		}
+		v := hub.BaselineAbsent
+		if cv, ok := row.cur[f]; ok {
+			v = cv.fp
+		}
+		if v == b || (absentEq(uk.kind, v) && absentEq(uk.kind, b)) {
+			cr.BaselineFork = f
+			break
+		}
+	}
 
 	switch uk.kind {
 	case string(hub.KindCollection):

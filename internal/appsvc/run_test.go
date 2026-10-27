@@ -734,6 +734,89 @@ func TestRunGameIniDivergenceStaysPending(t *testing.T) {
 	}
 }
 
+// TestRealKeepDifference 「接受差异」（§0-B12/G13）：双端 game.ini 异值无
+// 基线 → 冲突枚举；KeepDifference 把各端基线推进为各自当前值后——冲突
+// 不再枚举、判定面收敛；一端再改动照常传播（A→「maybe」决定值写入 B 的
+// game.ini）。
+func TestRealKeepDifference(t *testing.T) {
+	b, _, refA, refB := newRunBackend(t, fixture.Seed{}, fixture.Seed{})
+	if _, err := fixture.WriteGameIni(refA.DataDir, map[string]string{"ShowFpsDisplay": "true"}); err != nil {
+		t.Fatalf("WriteGameIni(A): %v", err)
+	}
+	if _, err := fixture.WriteGameIni(refB.DataDir, map[string]string{"ShowFpsDisplay": "false"}); err != nil {
+		t.Fatalf("WriteGameIni(B): %v", err)
+	}
+	sel := []Selection{{Kind: hub.EntityKind(hub.BaselineKindGameIni), ContentKey: "ShowFpsDisplay"}}
+
+	// 空勾选与未命中键都如实报错，不静默成功。
+	if err := b.Sync.KeepDifference(nil); err == nil {
+		t.Fatalf("空勾选应报错")
+	}
+	if err := b.Sync.KeepDifference([]Selection{
+		{Kind: hub.EntityKind(hub.BaselineKindGameIni), ContentKey: "NotWhitelisted"}},
+	); err == nil {
+		t.Fatalf("未命中判定单位的勾选应报错")
+	}
+
+	if _, err := b.Sync.PrepareRun(); err != nil {
+		t.Fatalf("PrepareRun: %v", err)
+	}
+	rows, err := b.Compare.ListConflicts()
+	if err != nil {
+		t.Fatalf("ListConflicts: %v", err)
+	}
+	var found bool
+	for _, r := range rows {
+		if r.Kind == hub.BaselineKindGameIni && r.ContentKey == "ShowFpsDisplay" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("两端异值应枚举为冲突: %+v", rows)
+	}
+
+	if err := b.Sync.KeepDifference(sel); err != nil {
+		t.Fatalf("KeepDifference: %v", err)
+	}
+	rows, err = b.Compare.ListConflicts()
+	if err != nil {
+		t.Fatalf("ListConflicts(after): %v", err)
+	}
+	for _, r := range rows {
+		if r.Kind == hub.BaselineKindGameIni && r.ContentKey == "ShowFpsDisplay" {
+			t.Fatalf("保留差异后冲突不应再枚举: %+v", r)
+		}
+	}
+	p, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun(after): %v", err)
+	}
+	for _, tp := range p.Targets {
+		if tp.Items > 0 {
+			t.Fatalf("收敛后不应有写计划: %+v", p.Targets)
+		}
+	}
+
+	// A 再改动 → 照常传播：决定值「maybe」写入 B 的 game.ini。
+	if _, err := fixture.WriteGameIni(refA.DataDir, map[string]string{"ShowFpsDisplay": "maybe"}); err != nil {
+		t.Fatalf("改 A ini: %v", err)
+	}
+	p2, err := b.Sync.PrepareRun()
+	if err != nil {
+		t.Fatalf("PrepareRun(again): %v", err)
+	}
+	if _, err := b.Sync.CommitRun(p2.RunID); err != nil {
+		t.Fatalf("CommitRun(again): %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(refB.DataDir, "game.ini"))
+	if err != nil {
+		t.Fatalf("读 delta game.ini: %v", err)
+	}
+	if got, _ := inisettings.Parse(after).Value("ShowFpsDisplay"); got != "maybe" {
+		t.Errorf("保留差异后的新改动应传播到 B: ShowFpsDisplay = %q，期望 maybe", got)
+	}
+}
+
 // TestPrepareRunDecideInputErrorFails 判定输入装载 fail-closed：presence
 // 读不出 → PrepareRun 整体报错（判不准不动升级为不跑——半个判定面产出
 // 的计划比没有计划更危险）。注入方式：收集用缓存 runner 的原 hub 指针，

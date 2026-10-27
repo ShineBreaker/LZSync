@@ -1,35 +1,24 @@
 <!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LZSync</title>
-    <link rel="stylesheet" href="./src/style.css" />
-  </head>
-  <body>
-    <div id="app">
-      <aside id="sidebar">
-        <div class="brand">
-          <img src="./resources/icon.png" alt="LZSync" class="brand-icon" />
-          <span class="brand-name">LZSync</span>
-        </div>
-        <nav id="nav"></nav>
-        <div id="side-client-card" class="side-client-card hidden">
-          <div class="t" data-i18n="sidebar.clients">客户端</div>
-          <div class="s" id="side-client-status"></div>
-          <div class="warn hidden" id="side-client-warn"></div>
-        </div>
-      </aside>
-      <header id="topbar">
-        <div class="searchbox">
-          <span class="icon"></span>
-          <input id="global-search" type="text" data-i18n-placeholder="search.placeholder" placeholder="搜索" />
-        </div>
-        <div id="global-warning" class="global-warn hidden"></div>
-        <button id="topbar-sync" class="btn primary">同步</button>
-      </header>
-      <main id="content"></main>
-    </div>
-    <script type="module" src="./src/main.ts"></script>
-  </body>
+<html lang="zh-Hans">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LZSync</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <img src="./resources/icon.png" alt="LZSync" class="brand-icon" />
+        <span class="brand-name">LZSync</span>
+      </div>
+      <nav id="nav"></nav>
+      <div class="side-bottom" id="side-bottom"></div>
+    </aside>
+    <main id="content"></main>
+    <div id="staged-bar" class="hidden"></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
 </html>

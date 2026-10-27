@@ -982,10 +982,10 @@ func (s *realSync) Collect(forkID string) (collect.Report, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.setCancel(cancel)
 	defer cancel()
-	s.prog(ProgressEvent{Service: "collect", Stage: string(collect.StageProject), At: time.Now(),
+	s.prog(ProgressEvent{Service: "collect", Stage: string(collect.StageProject), ForkID: forkID, At: time.Now(),
 		Message: fmt.Sprintf("开始收集 %s", forkID)})
 	report, err := s.cRunner().Collect(ctx, ref, func(stage collect.Stage, current, total int) {
-		s.prog(ProgressEvent{Service: "collect", Stage: string(stage), Current: current, Total: total,
+		s.prog(ProgressEvent{Service: "collect", Stage: string(stage), ForkID: forkID, Current: current, Total: total,
 			At: time.Now(), Message: fmt.Sprintf("%s：%d/%d", stageLabel(stage), current, total)})
 	})
 	if report.Entities == nil {
@@ -1016,10 +1016,10 @@ func (s *realSync) DeployCurrentPlan() (deploy.Report, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.setCancel(cancel)
 	defer cancel()
-	s.prog(ProgressEvent{Service: "deploy", Stage: string(deploy.StageGuard), At: time.Now(),
+	s.prog(ProgressEvent{Service: "deploy", Stage: string(deploy.StageGuard), ForkID: plan.TargetFork, At: time.Now(),
 		Message: fmt.Sprintf("开始投放到 %s（%d 项）", plan.TargetFork, len(plan.Items))})
 	report, err := s.dRunner().Deploy(ctx, plan, func(stage deploy.Stage, batchIndex, batchTotal, current, total int) {
-		s.prog(ProgressEvent{Service: "deploy", Stage: string(stage), Current: current, Total: total,
+		s.prog(ProgressEvent{Service: "deploy", Stage: string(stage), ForkID: plan.TargetFork, Current: current, Total: total,
 			At: time.Now(), Message: fmt.Sprintf("批 %d/%d · %s：%d/%d", batchIndex, batchTotal, stageLabel(stage), current, total)})
 	})
 	if err == nil {

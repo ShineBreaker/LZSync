@@ -34,7 +34,8 @@ type mockBackend struct {
 	reasn string
 
 	mu    sync.Mutex
-	scope *SyncScope // 内存态同步范围（M-4 冒烟，不落盘）
+	scope *SyncScope      // 内存态同步范围（M-4 冒烟，不落盘）
+	kept  map[string]bool // KeepDifference 已「接受差异」的 kind\x00key（ListConflicts 过滤）
 }
 
 func newMockBackend(mode, reason string, prog ProgressSink) *Backend {
@@ -48,6 +49,7 @@ func newMockBackend(mode, reason string, prog ProgressSink) *Backend {
 		exp:  &mockExport{},
 		mode: mode, reasn: reason,
 	}
+	cmp.b = b
 	sync := &mockSync{prog: prog, b: b, runs: map[string]*mockRun{}}
 	sync.cmp = cmp
 	b.sync = sync
@@ -208,6 +210,7 @@ type mockCompare struct {
 	mu        sync.Mutex
 	plan      deploy.Plan
 	createdAt time.Time
+	b         *mockBackend // 同步范围（Target 角色）与 kept 集（装配后回填）
 }
 
 // mockPreviewRows hub → fork 投放预演样本（对 target=delta）：覆盖五类
@@ -306,10 +309,8 @@ func (m *mockCompare) CompareForks(source, target string) ([]DiffRow, error) {
 	return mockForkDiffRows(), nil
 }
 
-func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
-	if target == "" {
-		return nil, errors.New("appsvc: 请选择目标 fork")
-	}
+// mockDeletedRows 删除组样本（DeletedEntries 与 Library 共用一份）。
+func mockDeletedRows() []DiffRow {
 	return []DiffRow{
 		{Kind: hub.KindCollection, ContentKey: "旧收藏", Category: CategoryRestore,
 			Summary: "收藏夹「旧收藏」", DefaultChecked: false,
@@ -323,27 +324,50 @@ func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
 		{Kind: hub.KindScore, ContentKey: "bh-gone|sc-0010", Category: CategoryRestore,
 			Summary: "成绩 fruits · 4242 分 · 2025-12-30", DefaultChecked: false,
 			DeletedAt: time.Now().Add(-24 * time.Hour).UnixMilli()},
-	}, nil
+	}
 }
 
-// ListConflicts mock：演示冲突清单（两条固定行，无真实 hub）。
+func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
+	if target == "" {
+		return nil, errors.New("appsvc: 请选择目标 fork")
+	}
+	return mockDeletedRows(), nil
+}
+
+// ListConflicts mock：演示冲突清单（两条固定行，无真实 hub）；「保留差
+// 异」处置过的键（kept）不再枚举——处置语义与真实后端一致。
 func (m *mockCompare) ListConflicts() ([]ConflictRow, error) {
-	return []ConflictRow{
-		{Kind: string(hub.KindBeatmapSet), ContentKey: "demo-set-hash", Label: "演示谱面集", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
-		{Kind: string(hub.KindRulesetSetting), ContentKey: hub.RulesetSettingContentKey("osu", 0, "hud_position"), Label: "hud_position", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
-	}, nil
+	rows := []ConflictRow{
+		{Kind: string(hub.KindBeatmapSet), ContentKey: "hash-conflict-0004", Label: "IA - Suna no Wakusei（nhato）", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
+		{Kind: string(hub.KindRulesetSetting), ContentKey: hub.RulesetSettingContentKey("osu", 0, "hud_position"), Label: "osu · 变体 0 · hud_position", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
+		{Kind: "game_ini", ContentKey: "ShowFpsDisplay", Label: "game.ini · ShowFpsDisplay", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: false},
+	}
+	m.b.mu.Lock()
+	kept := m.b.kept
+	m.b.mu.Unlock()
+	out := rows[:0]
+	for _, r := range rows {
+		if kept[r.Kind+"\x00"+r.ContentKey] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
-// UnitConflict mock：演示冲突明细面板形态（固定两端取值，无真实 hub）。
+// UnitConflict mock：演示冲突明细面板形态（两端取值 + 两端缺席置灰，
+// 无真实 hub）。CanPickHub 对 game.ini 为 false（无 canonical 表）。
 func (m *mockCompare) UnitConflict(kind hub.EntityKind, contentKey string) (ConflictDetail, error) {
 	return ConflictDetail{
-		Kind: string(kind), ContentKey: contentKey, CanPickHub: true,
+		Kind: string(kind), ContentKey: contentKey, CanPickHub: kind != hub.EntityKind(hub.BaselineKindGameIni),
 		Canonical: "中枢值（演示）",
 		Variants: []ConflictVariant{
-			{ForkID: "lazer", Has: true, Key: contentKey, Value: "lazer 端取值（演示）",
-				Fields: []FieldDiff{{Field: "Value", HubValue: "中枢值", ForkValue: "lazer 值"}}},
 			{ForkID: "delta", Has: true, Key: contentKey, Value: "delta 端取值（演示）",
 				Fields: []FieldDiff{{Field: "Value", HubValue: "中枢值", ForkValue: "delta 值"}}},
+			{ForkID: "ez2lazer", Has: false, Value: "缺席"},
+			{ForkID: "g0v0", Has: false, Value: "缺席"},
+			{ForkID: "lazer", Has: true, Key: contentKey, Value: "lazer 端取值（演示）",
+				Fields: []FieldDiff{{Field: "Value", HubValue: "中枢值", ForkValue: "lazer 值"}}},
 		},
 	}, nil
 }
@@ -356,43 +380,160 @@ func (m *mockCompare) CoverImage(contentKey string) (string, error) {
 
 // ForkPresence mock 数据（数据浏览 x/y 聚合数据源）。
 // 演示：谱面集 0001 全 4 端持有 / 0002 lazer+delta / 0003 仅 lazer /
-// 0004 delta+ez2 / 其余 kind 简化覆盖。
+// 0004 delta+ez2 / 其余 kind 简化覆盖；库内同步全项（mockCanonItems）
+// 全部 4 端持有。
 func (m *mockCompare) ForkPresence(kind hub.EntityKind) ([]ForkPresenceEntry, error) {
+	return mockPresenceEntries(kind), nil
+}
+
+func mockPresenceEntries(kind hub.EntityKind) []ForkPresenceEntry {
 	now := time.Now().UnixMilli()
 	mk := func(fork, key string, hoursAgo int) ForkPresenceEntry {
 		return ForkPresenceEntry{ForkID: fork, Kind: kind, ContentKey: key,
 			CollectedAt: now - int64(hoursAgo)*3600000}
 	}
+	var out []ForkPresenceEntry
 	switch kind {
 	case hub.KindBeatmapSet:
-		return []ForkPresenceEntry{
-			mk("lazer", "hash-new-set-0001", 1), mk("delta", "hash-new-set-0001", 1),
-			mk("ez2lazer", "hash-new-set-0001", 1), mk("g0v0", "hash-new-set-0001", 1),
+		out = []ForkPresenceEntry{
+			mk("lazer", "hash-new-set-0001", 1), // create 键：仅来源端持有
 			mk("lazer", "hash-old-ver-0002", 2), mk("delta", "hash-old-ver-0002", 2),
 			mk("lazer", "hash-weak-0003", 3),
 			mk("delta", "hash-conflict-0004", 1), mk("ez2lazer", "hash-conflict-0004", 1),
 			mk("lazer", "hash-deleted-0009", 4),
-		}, nil
+		}
 	case hub.KindCollection:
-		return []ForkPresenceEntry{
-			mk("lazer", "新谱面收藏", 1), mk("delta", "新谱面收藏", 1),
+		out = []ForkPresenceEntry{
+			mk("lazer", "新谱面收藏", 1),
 			mk("lazer", "常用练习", 1), mk("delta", "常用练习", 2),
 			mk("lazer", "旧收藏", 5), mk("delta", "旧收藏", 5),
-		}, nil
+		}
 	case hub.KindSkin:
-		return []ForkPresenceEntry{
-			mk("lazer", "hash-skin-new-0005", 1), mk("delta", "hash-skin-new-0005", 1),
-			mk("ez2lazer", "hash-skin-new-0005", 1),
+		out = []ForkPresenceEntry{
+			mk("lazer", "hash-skin-new-0005", 1),
 			mk("lazer", "hash-skin-conflict-0006", 1), mk("delta", "hash-skin-conflict-0006", 2),
-		}, nil
+		}
 	case hub.KindScore:
-		return []ForkPresenceEntry{
-			mk("lazer", "bh-new|sc-0008", 1), mk("delta", "bh-new|sc-0008", 1),
+		out = []ForkPresenceEntry{
+			mk("lazer", "bh-new|sc-0008", 1),
 			mk("lazer", "bh-old|sc-0009", 2), mk("delta", "bh-old|sc-0009", 2),
-		}, nil
-	default:
-		return []ForkPresenceEntry{}, nil
+		}
 	}
+	for _, c := range mockCanonItems(kind) {
+		for _, f := range mockRefs {
+			out = append(out, mk(f.ForkID, c.ContentKey, 6))
+		}
+	}
+	return out
+}
+
+// mockCanonItems 库内已同步条目样本（全部端持有的「满库」行——资料库页
+// 不能只列差异，§4.2）。摘要形态与 summarizer 输出一致。
+func mockCanonItems(kind hub.EntityKind) []canonItem {
+	switch kind {
+	case hub.KindBeatmapSet:
+		return []canonItem{
+			{ContentKey: "hash-canon-0001", IdentityKey: "online:2012345", Summary: "Camellia - Parallel Universe（Sotarks）"},
+			{ContentKey: "hash-canon-0002", IdentityKey: "online:774891", Summary: "xi - Freedom Dive（Nathan）"},
+			{ContentKey: "hash-canon-0003", IdentityKey: "online:512340", Summary: "DJ Okawari - Flower Dance（mapper）"},
+			{ContentKey: "hash-canon-0004", IdentityKey: "meta:MEMODEMO|Aqualius|mapper", Summary: "MEMODEMO - Aqualius（mapper）"},
+			{ContentKey: "hash-canon-0005", IdentityKey: "online:1899013", Summary: "S3RL - MTC（Ryu*）"},
+			{ContentKey: "hash-canon-0006", IdentityKey: "online:2412996", Summary: "Frums - dropdead（Livi）"},
+		}
+	case hub.KindCollection:
+		return []canonItem{
+			{ContentKey: "常驻收藏", Summary: "收藏夹「常驻收藏」"},
+			{ContentKey: "怀旧金曲", Summary: "收藏夹「怀旧金曲」"},
+		}
+	case hub.KindSkin:
+		return []canonItem{
+			{ContentKey: "hash-skin-canon-1", Summary: "皮肤「YUGEN」（itsamemario）"},
+			{ContentKey: "hash-skin-canon-2", Summary: "皮肤「WhiteCat 2.1」（BK）"},
+		}
+	case hub.KindScore:
+		return []canonItem{
+			{ContentKey: "bh-c1|sc-c1", Summary: "成绩 osu · 1024000 分 · 2026-03-02"},
+			{ContentKey: "bh-c2|sc-c2", Summary: "成绩 mania · 887654 分 · 2026-02-18"},
+		}
+	}
+	return nil
+}
+
+// HubCounts mock：canonical ∪ 预演/删除组键的去重计数（与真实 SQL 口径
+// 同形——库内条目 = canonical 行 + 预演行键）。
+func (m *mockCompare) HubCounts() (map[string]int, error) {
+	out := map[string]int{}
+	for _, kind := range []hub.EntityKind{hub.KindBeatmapSet, hub.KindCollection, hub.KindSkin, hub.KindScore} {
+		keys := map[string]bool{}
+		for _, c := range mockCanonItems(kind) {
+			keys[c.ContentKey] = true
+		}
+		for _, r := range mockPreviewRows() {
+			if r.Kind == kind {
+				keys[r.ContentKey] = true
+			}
+		}
+		for _, r := range mockDeletedRows() {
+			if r.Kind == kind {
+				keys[r.ContentKey] = true
+			}
+		}
+		out[string(kind)] = len(keys)
+	}
+	return out, nil
+}
+
+// Library mock：与真实后端同一 buildLibrary——注册端逐端喂预演/删除组/
+// presence 样本（Target 角色取内存态同步范围）。
+func (m *mockCompare) Library(kind hub.EntityKind) ([]LibraryItem, error) {
+	if !libraryKinds[kind] {
+		return nil, fmt.Errorf("appsvc: 资料库页不支持实体类型 %q", kind)
+	}
+	scope := m.b.getScope()
+	targetOf := map[string]bool{}
+	for _, fr := range scope.Forks {
+		targetOf[fr.ForkID] = fr.Target
+	}
+	m.b.lib.mu.Lock()
+	refs := m.b.lib.reg()
+	ids := make([]string, 0, len(refs))
+	for id := range refs {
+		ids = append(ids, id)
+	}
+	m.b.lib.mu.Unlock()
+	sort.Strings(ids)
+	presenceOf := map[string]map[string]bool{}
+	for _, e := range mockPresenceEntries(kind) {
+		m, ok := presenceOf[e.ForkID]
+		if !ok {
+			m = map[string]bool{}
+			presenceOf[e.ForkID] = m
+		}
+		m[e.ContentKey] = true
+	}
+	var ins []forkLibInput
+	for _, fid := range ids {
+		var preview, deleted []DiffRow
+		for _, r := range mockPreviewRows() {
+			if r.Kind == kind {
+				preview = append(preview, r)
+			}
+		}
+		for _, r := range mockDeletedRows() {
+			if r.Kind == kind {
+				deleted = append(deleted, r)
+			}
+		}
+		pres := presenceOf[fid]
+		if pres == nil {
+			pres = map[string]bool{}
+		}
+		ins = append(ins, forkLibInput{
+			ForkID: fid, Target: targetOf[fid],
+			Preview: preview, Deleted: deleted, Presence: pres,
+		})
+	}
+	return buildLibrary(kind, mockCanonItems(kind), ins), nil
 }
 
 // BuildPlan 勾选 → 计划（内存持久；动作面与真实后端同构：M2 三类放行
@@ -541,7 +682,7 @@ func (m *mockSync) Collect(forkID string) (collect.Report, error) {
 			if ctx.Err() != nil {
 				return collect.Report{}, ctx.Err()
 			}
-			m.emit(ProgressEvent{Service: "collect", Stage: string(st.stage), Current: i, Total: st.total,
+			m.emit(ProgressEvent{Service: "collect", Stage: string(st.stage), ForkID: forkID, Current: i, Total: st.total,
 				Message: fmt.Sprintf("%s：%d/%d", st.label, i, st.total), At: time.Now()})
 			time.Sleep(mockSleep)
 		}
@@ -575,9 +716,9 @@ func (m *mockSync) DeployCurrentPlan() (deploy.Report, error) {
 	defer cancel()
 
 	backup := fmt.Sprintf("/mock/data/backups/client.realm.%s", time.Now().UTC().Format("20060102-150405"))
-	m.emit(ProgressEvent{Service: "deploy", Stage: string(deploy.StageGuard), At: time.Now(), Message: "守卫复查通过"})
+	m.emit(ProgressEvent{Service: "deploy", Stage: string(deploy.StageGuard), ForkID: plan.TargetFork, At: time.Now(), Message: "守卫复查通过"})
 	time.Sleep(mockSleep)
-	m.emit(ProgressEvent{Service: "deploy", Stage: string(deploy.StageBackup), At: time.Now(), Message: "写前自动备份：" + backup})
+	m.emit(ProgressEvent{Service: "deploy", Stage: string(deploy.StageBackup), ForkID: plan.TargetFork, At: time.Now(), Message: "写前自动备份：" + backup})
 	time.Sleep(mockSleep)
 
 	const batches = 4
@@ -594,7 +735,7 @@ func (m *mockSync) DeployCurrentPlan() (deploy.Report, error) {
 		}
 		for _, st := range []deploy.Stage{deploy.StageLink, deploy.StageWrite, deploy.StageVerify} {
 			for i := 1; i <= 3; i++ {
-				m.emit(ProgressEvent{Service: "deploy", Stage: string(st), Current: i, Total: 3,
+				m.emit(ProgressEvent{Service: "deploy", Stage: string(st), ForkID: plan.TargetFork, Current: i, Total: 3,
 					Message: fmt.Sprintf("批 %d/%d · %s：%d/3", b, batches, stageLabel(st), i), At: time.Now()})
 				time.Sleep(mockSleep)
 			}
@@ -694,7 +835,7 @@ func (m *mockSync) prepareRun(sel []Selection) (RunPreview, error) {
 			continue
 		}
 		for _, st := range []collect.Stage{collect.StageProject, collect.StageApply, collect.StageAdopt} {
-			m.emit(ProgressEvent{Service: "run", Stage: string(st), Current: 1, Total: 1,
+			m.emit(ProgressEvent{Service: "run", Stage: string(st), ForkID: fr.ForkID, Current: 1, Total: 1,
 				Message: fmt.Sprintf("%s · %s", fr.ForkID, stageLabel(st)), At: time.Now()})
 			time.Sleep(mockSleep)
 			if ctx.Err() != nil {
@@ -779,7 +920,7 @@ func (m *mockSync) CommitRun(runID string) (RunReport, error) {
 					report.Forks = append(report.Forks, frp)
 					return report, ctx.Err()
 				}
-				m.emit(ProgressEvent{Service: "run", Stage: string(st), Current: 1, Total: 1,
+				m.emit(ProgressEvent{Service: "run", Stage: string(st), ForkID: fr.ForkID, Current: 1, Total: 1,
 					Message: fmt.Sprintf("%s · %s", fr.ForkID, stageLabel(st)), At: time.Now()})
 				time.Sleep(mockSleep)
 			}
@@ -822,6 +963,27 @@ func (m *mockSync) RestoreBackup(forkID, backupPath string) error {
 	}
 	if forkID == "g0v0" {
 		return fmt.Errorf("%w（运行中：[g0v0!]）", guard.ErrGameRunning)
+	}
+	return nil
+}
+
+// KeepDifference mock：记 kept 键集，ListConflicts 不再枚举（处置后不再
+// 提示的语义演示；mock 无 baseline 表，记忆态即语义）。
+func (m *mockSync) KeepDifference(sel []Selection) error {
+	if len(sel) == 0 {
+		return errors.New("appsvc: 未选择任何条目")
+	}
+	if err := m.begin("keep", ""); err != nil {
+		return err
+	}
+	defer m.finish()
+	m.b.mu.Lock()
+	defer m.b.mu.Unlock()
+	if m.b.kept == nil {
+		m.b.kept = map[string]bool{}
+	}
+	for _, sl := range sel {
+		m.b.kept[string(sl.Kind)+"\x00"+sl.ContentKey] = true
 	}
 	return nil
 }

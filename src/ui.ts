@@ -1,217 +1,199 @@
-// UI 基础设施：DOM 构造助手与展示格式化（vanilla TS strict，M-3）。
+// 通用 UI 助手（DESIGN.md §9）：DOM 构造、内联 SVG 图标、悬浮层、
+// 右下角瞬态 toast、fork 色点。错误只走 toast/popover——页面上不放
+// 解释句（§1）。
 
-import { getLang, t, trBackend } from "./i18n";
+import { t, trBackend } from "./i18n";
 
-/** 类型安全的元素构造：el("div", { class: "card", text: "hi" }, [child…])。 */
+// ---------- DOM ----------
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
-  attrs?: Partial<Record<string, string | boolean>>,
-  children?: Node[],
+  attrs?: Record<string, string>,
+  children?: (Node | string)[],
 ): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
+  const n = document.createElement(tag);
   if (attrs) {
-    for (const [key, value] of Object.entries(attrs)) {
-      if (value === true) {
-        node.setAttribute(key, "");
-      } else if (typeof value === "string") {
-        node.setAttribute(key, value);
-      }
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") n.className = v;
+      else n.setAttribute(k, v);
     }
   }
   if (children) {
-    for (const child of children) {
-      node.append(child);
-    }
+    for (const c of children) n.append(c);
   }
-  return node;
+  return n;
 }
 
-/** 文本节点快捷方式。 */
 export function text(s: string): Text {
   return document.createTextNode(s);
 }
 
-/** 字节量人类可读化。 */
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ["KiB", "MiB", "GiB", "TiB"] as const;
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${units[i] ?? "PiB"}`;
+export function clear(n: HTMLElement): void {
+  while (n.firstChild) n.removeChild(n.firstChild);
 }
 
-/** Unix 毫秒时间戳本地化显示。 */
-export function fmtMillis(ms: number): string {
-  if (ms <= 0) return "—";
-  return new Date(ms).toLocaleString(getLang() === "en" ? "en-US" : "zh-CN");
+export function errText(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
 }
 
-/** 分类徽标文本（§6.2 差异分类徽标）。 */
-export function categoryLabel(cat: string): string {
-  switch (cat) {
-    case "create":
-    case "target-only":
-    case "conflict":
-    case "version-update":
-    case "restore":
-      return t(`cat.${cat}`);
-    default:
-      return cat;
-  }
+// ---------- 图标（DESIGN.md §6.4 内联 SVG 几何图标） ----------
+
+const ICONS: Record<string, string> = {
+  chevron: `<svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+  x: `<svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+  dots: `<svg viewBox="0 0 14 4" width="14" height="4"><circle cx="2" cy="2" r="1.4" fill="currentColor"/><circle cx="7" cy="2" r="1.4" fill="currentColor"/><circle cx="12" cy="2" r="1.4" fill="currentColor"/></svg>`,
+  plus: `<svg viewBox="0 0 12 12" width="12" height="12"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+  scan: `<svg viewBox="0 0 14 14" width="14" height="14"><circle cx="6" cy="6" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M9.2 9.2L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+  folder: `<svg viewBox="0 0 14 12" width="14" height="12"><path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h3l1.2 1.5h4.8A1.5 1.5 0 0 1 13 4v5.5A1.5 1.5 0 0 1 11.5 11h-9A1.5 1.5 0 0 1 1 9.5z" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`,
+  check: `<svg viewBox="0 0 12 12" width="12" height="12"><path d="M2.5 6.5l2.4 2.4 4.6-5.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  lib: `<svg viewBox="0 0 14 14" width="14" height="14"><rect x="1.5" y="1.5" width="3.4" height="11" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="5.6" y="1.5" width="3.4" height="11" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="9.7" y="1.5" width="3.4" height="11" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>`,
+};
+
+export function icon(name: keyof typeof ICONS, cls = ""): HTMLElement {
+  const span = el("span", { class: `ic ${cls}`.trim() });
+  span.innerHTML = ICONS[name] ?? "";
+  return span;
 }
 
-/** 实体类型显示名（§6.2 数据类型 Tab / 行键显示）。 */
-export function kindLabel(kind: string): string {
-  switch (kind) {
-    case "beatmap_set":
-    case "beatmap":
-    case "collection":
-    case "skin":
-    case "score":
-    case "key_binding":
-    case "ruleset_setting":
-    case "mod_preset":
-      return t(`kind.${kind}`);
-    default:
-      return kind;
-  }
+// ---------- fork 色彩（DESIGN.md §6.2） ----------
+
+export const FORK_COLORS: Record<string, string> = {
+  lazer: "#66CCFF",
+  delta: "#C88BF5",
+  ez2lazer: "#FF7EB6",
+  g0v0: "#7CE8B8",
+};
+
+export function forkColor(forkID: string): string {
+  return FORK_COLORS[forkID] ?? "#3A4150";
 }
 
-/** 计划动作显示名（§6.2 计划摘要 / §6.3 执行报告）。 */
-export function actionLabel(action: string): string {
-  switch (action) {
-    case "create":
-    case "update":
-    case "version-replace":
-      return t(`action.${action}`);
-    default:
-      return action;
-  }
+export function forkDot(forkID: string, size = 10): HTMLElement {
+  const d = el("span", { class: "fdot" });
+  d.style.background = forkColor(forkID);
+  d.style.width = `${size}px`;
+  d.style.height = `${size}px`;
+  return d;
 }
 
-/** 徽标色类。 */
-export function categoryClass(cat: string): string {
-  return `badge badge-${cat}`;
+// ---------- 悬浮层（hover 覆盖点详情 / 「⋯」菜单） ----------
+
+let activePopover: { node: HTMLElement; close: () => void } | null = null;
+
+export function closePopover(): void {
+  activePopover?.close();
 }
 
-/** 版本来源标注（§3.2 降级链）。 */
-export function versionSourceLabel(src: string): string {
-  switch (src) {
-    case "realm-open":
-    case "filename":
-    case "snapshot-cache":
-    case "unknown-running":
-      return t(`vsrc.${src}`);
-    default:
-      return src;
-  }
-}
-
-/** 行内状态提示条：show(el) 渲染错误/成功消息。 */
-export function message(kind: "error" | "ok" | "info", msg: unknown): HTMLElement {
-  const node = el("div", { class: `message message-${kind}` });
-  node.textContent = String(msg);
-  return node;
-}
-
-/** 错误对象 → 展示文本（mygo 以错误消息字符串拒绝 Promise）。 */
-export function errText(err: unknown): string {
-  if (err instanceof Error) {
-    return trBackend(err.message);
-  }
-  return trBackend(String(err));
-}
-
-/** 清空容器。 */
-export function clear(node: HTMLElement): void {
-  while (node.firstChild) {
-    node.removeChild(node.firstChild);
-  }
-}
-
-/* ===== 数据浏览页专用辅助（DESIGN.md §数据行 / §悬浮层） ===== */
-
-/** 同步状态语义（对应 DESIGN.md §同步状态语义色）。 */
-export type SyncState = "synced" | "update" | "conflict" | "needsConfirm" | "targetOnly";
-
-export function syncStateLabel(state: SyncState): string {
-  return t(`st.${state}`);
-}
-
-export function syncStateClass(state: SyncState): string {
-  switch (state) {
-    case "synced":
-      return "st-ok";
-    case "update":
-      return "st-update";
-    case "conflict":
-      return "st-err";
-    case "needsConfirm":
-      return "st-warn";
-    case "targetOnly":
-      return "st-neutral";
-  }
-}
-
-/** fork 色点（DESIGN.md §四端指示色只作 8px 圆点）。 */
-export function forkDot(forkID: string): HTMLElement {
-  const dot = el("span", { class: "dot" });
-  dot.style.background = `var(--fork-${forkID}, var(--fork-unknown))`;
-  return dot;
-}
-
-/** 悬浮层端行：`色点 + 端名 + 状态`（DESIGN.md §悬浮明细）。 */
-export function popoverForkRow(forkID: string, state: "ok" | "warn" | "err" | "missing", label: string): HTMLElement {
-  const row = el("div", { class: "popover-row" });
-  row.append(forkDot(forkID), el("span", { class: "name" }, [text(forkID)]), el("span", { class: `state ${state}` }, [text(label)]));
-  return row;
-}
-
-/** 悬浮层定位在父元素下方右对齐（数据行 x/y 块悬浮）。 */
-export function popoverAt(trigger: HTMLElement, build: (pop: HTMLElement) => void): () => void {
-  let pop: HTMLElement | null = null;
-
-  function open(): void {
-    if (pop) return;
-    pop = el("div", { class: "popover" });
-    build(pop);
-    // popover 挂到 body + fixed 定位，避免 .data-row 的 overflow:hidden 裁切（DESIGN.md §悬浮明细）。
-    // 先插入再测量宽度。
-    document.body.append(pop);
-    const rect = trigger.getBoundingClientRect();
-    const pw = pop.offsetWidth;
-    pop.style.top = `${rect.bottom + 6}px`;
-    let left = rect.right - pw;
-    if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
-    if (left < 8) left = 8;
-    pop.style.left = `${left}px`;
-  }
-
-  function close(): void {
-    if (pop) {
-      pop.remove();
-      pop = null;
+/** showPopover 在 anchor 附近弹出内容；点击外部 / 再次调用 / anchor leave 关闭。
+ *  mode="click"：点 anchor 开关、点击外部关（菜单）。
+ *  mode="hover"：anchor hover 开、离开 anchor+popover 关（覆盖点详情）。 */
+export function showPopover(anchor: HTMLElement, content: HTMLElement, mode: "click" | "hover"): void {
+  closePopover();
+  const pop = el("div", { class: "popover" });
+  pop.append(content);
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = `${Math.min(r.left, window.innerWidth - 280)}px`;
+  pop.style.top = `${r.bottom + 6}px`;
+  let dead = false;
+  const close = () => {
+    if (dead) return;
+    dead = true;
+    pop.remove();
+    document.removeEventListener("pointerdown", onDoc, true);
+    anchor.removeEventListener("pointerleave", onLeave);
+    pop.removeEventListener("pointerleave", onLeave);
+    if (activePopover?.node === pop) activePopover = null;
+  };
+  const onDoc = (e: PointerEvent) => {
+    if (!pop.contains(e.target as Node) && e.target !== anchor && !anchor.contains(e.target as Node)) {
+      close();
     }
+  };
+  const onLeave = (e: PointerEvent) => {
+    const to = e.relatedTarget as Node | null;
+    if (to && (pop.contains(to) || anchor.contains(to))) return;
+    close();
+  };
+  document.addEventListener("pointerdown", onDoc, true);
+  if (mode === "hover") {
+    anchor.addEventListener("pointerleave", onLeave);
+    pop.addEventListener("pointerleave", onLeave);
   }
-
-  trigger.addEventListener("mouseenter", open);
-  trigger.addEventListener("mouseleave", close);
-  trigger.addEventListener("click", open);
-  return close;
+  activePopover = { node: pop, close };
 }
 
+// ---------- toast（右下角瞬态） ----------
 
-/** 页面导航钩子（main.ts 注入实现；数据页/同步页经它跨页跳转）。 */
-let navigatorFn: ((page: string, filter?: string) => void) | null = null;
+export type ToastKind = "ok" | "err" | "info";
 
-export function setNavigator(fn: (page: string, filter?: string) => void): void {
-  navigatorFn = fn;
+export function toast(kind: ToastKind, msg: string): void {
+  let box = document.getElementById("toasts");
+  if (!box) {
+    box = el("div", { id: "toasts" });
+    document.body.append(box);
+  }
+  const n = el("div", { class: `toast ${kind}` }, [text(trBackend(msg))]);
+  box.append(n);
+  setTimeout(() => {
+    n.classList.add("out");
+    setTimeout(() => n.remove(), 250);
+  }, 3200);
 }
 
-export function navigate(page: string, filter?: string): void {
-  navigatorFn?.(page, filter);
+// ---------- 数字/日期 ----------
+
+export function fmtBytes(n: number): string {
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)}GiB`;
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(0)}MiB`;
+  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(0)}KiB`;
+  return `${n}B`;
+}
+
+export function fmtDate(ms: number): string {
+  const d = new Date(ms);
+  const p = (x: number) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())}`;
+}
+
+export function fmtClock(ms: number): string {
+  const d = new Date(ms);
+  const p = (x: number) => String(x).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+export function fmtMonthDay(ms: number): string {
+  const d = new Date(ms);
+  const p = (x: number) => String(x).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${fmtClock(ms)}`;
+}
+
+// ---------- 摘要拆行（"Artist - Title" → 副行/标题） ----------
+
+export function splitSummary(summary: string): { title: string; sub: string } {
+  const i = summary.indexOf(" - ");
+  if (i <= 0) return { title: summary, sub: "" };
+  return { title: summary.slice(i + 3), sub: summary.slice(0, i) };
+}
+
+// ---------- 覆盖态词表（§4.2 悬浮层词表） ----------
+
+export function coverageWord(state: string, reason: string): string {
+  switch (state) {
+    case "has":
+      return t("cov.has");
+    case "incoming":
+      return t("cov.incoming");
+    case "conflict":
+      return t("cov.conflict");
+    case "confirm":
+      return t("cov.confirm");
+    case "deleted":
+      return t("cov.deleted");
+    default:
+      if (reason === "不写入") return t("cov.noWrite");
+      if (reason) return t("cov.unsupported");
+      return t("cov.none");
+  }
 }
