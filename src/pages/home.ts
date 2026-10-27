@@ -656,6 +656,13 @@ export function renderHome(root: HTMLElement): () => void {
       paintChoice(choice, e?.action === "winner" ? e.winner : e?.action);
       paintHolders();
       syncCheck(); // 点卡自动勾
+      // 就地更新卡选中态（不重建，.sel 跟随最新 staged winner）
+      const w = stagedWinner();
+      detail.querySelectorAll<HTMLElement>(".vcard").forEach((c) => {
+        const f = c.dataset.fork;
+        c.classList.toggle("sel", f !== undefined && f === w);
+        c.classList.toggle("pre", f !== undefined && w === undefined && f === item.baselineFork);
+      });
       detail.classList.add("hidden");
       row.classList.remove("open");
     }
@@ -666,12 +673,11 @@ export function renderHome(root: HTMLElement): () => void {
 
   function paintChoice(node: HTMLElement, sel: string | undefined): void {
     clear(node);
-    if (!sel) return;
-    if (sel === "keep" || sel === "select") {
+    if (!sel || sel === "select") return; // 外环已标记选中端，select/未选不显示
+    if (sel === "keep") {
       node.append(text("="));
-    } else {
-      node.append(forkDot(sel, 8));
     }
+    // winner 不画重复点——holders 外环已标。
   }
 
   // ---------- 订阅与清理 ----------

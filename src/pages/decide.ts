@@ -28,7 +28,10 @@ export function conflictCards(
   for (const v of cd.Variants) {
     const isSel = selected === v.ForkID;
     const isPre = !selected && baseline === v.ForkID && v.Has;
-    const card = el("div", { class: `vcard${v.Has ? "" : " disabled"}${isSel ? " sel" : ""}${isPre ? " pre" : ""}` });
+    const card = el("div", {
+      class: `vcard${v.Has ? "" : " disabled"}${isSel ? " sel" : ""}${isPre ? " pre" : ""}`,
+      "data-fork": v.ForkID,
+    });
     card.append(el("div", { class: "vhead" }, [forkDot(v.ForkID), text(v.ForkID)]));
     card.append(el("div", { class: "vval" }, [text(v.Value || "—")]));
     if (v.Has) {
