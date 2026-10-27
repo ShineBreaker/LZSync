@@ -75,17 +75,20 @@ export function renderHome(root: HTMLElement): () => void {
   let scope: SyncScope | null = null;
   let counts: Record<string, number> = {};
   let settingsDir = "";
+  let baselineFork = "";
 
   // ---------- 数据装载 ----------
 
   async function loadAll(): Promise<void> {
     try {
+      const settings = await SettingsService.get();
+      settingsDir = settings.BackupsDir;
+      baselineFork = settings.BaselineFork;
       [cards, scope, counts] = await Promise.all([
         LibraryService.list().then((c) => [...c].sort((a, b) => a.ForkID.localeCompare(b.ForkID))),
         SettingsService.getSyncScope(),
         CompareService.hubCounts(),
       ]);
-      SettingsService.get().then((s) => (settingsDir = s.BackupsDir)).catch(() => undefined);
       paintTopo();
       void loadInbox();
       if (cards.length === 0 && !scanTried) {
@@ -126,7 +129,11 @@ export function renderHome(root: HTMLElement): () => void {
     clear(topo);
     lanes.clear();
     const rows = el("div", { class: "topo-rows" });
-    for (const card of cards) {
+    // 基准端排最前（设置页默认值），其余字母序。
+    const sorted = baselineFork
+      ? [...cards].sort((a, b) => (b.ForkID === baselineFork ? 1 : 0) - (a.ForkID === baselineFork ? 1 : 0))
+      : cards;
+    for (const card of sorted) {
       rows.append(rowOf(clientNode(card), laneNode(card.ForkID)));
     }
     for (const p of pendingClients) {

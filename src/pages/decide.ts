@@ -14,8 +14,8 @@ export type DecideAction =
 type ConflictDetail = Awaited<ReturnType<typeof CompareService.unitConflict>>;
 
 /** conflictCards 冲突展开卡集：逐端取值卡（缺席端置灰），选中态由
- * selected 驱动。baseline = 默认预选端（未拍板时弱化高亮，不写入
- * staged；用户点卡后才正式选中）。
+ * selected 驱动。baseline = 默认预选端（排最前 + 未拍板时弱化高亮，
+ * 不写入 staged；用户点卡后才正式选中）。
  */
 export function conflictCards(
   cd: ConflictDetail,
@@ -24,7 +24,11 @@ export function conflictCards(
   baseline?: string,
 ): HTMLElement {
   const box = el("div", { class: "vcards" });
-  for (const v of cd.Variants) {
+  const variants = baseline
+    ? [...cd.Variants].sort((a, b) =>
+        (b.ForkID === baseline ? 1 : 0) - (a.ForkID === baseline ? 1 : 0))
+    : cd.Variants;
+  for (const v of variants) {
     const isSel = selected === v.ForkID;
     const isPre = !selected && baseline === v.ForkID && v.Has;
     const card = el("div", {
