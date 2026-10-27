@@ -876,10 +876,21 @@ func newSummarizer(h *hub.Store) *summarizer {
 		scoreSum:  map[string]string{},
 	}
 	ctx := context.Background()
-	if sets, err := h.CurrentBeatmapSets(ctx); err == nil {
-		for _, e := range sets {
-			s.setTitles[e.Set.Hash] = fmt.Sprintf("%s - %s（%s）", e.Set.Artist, e.Set.Title, e.Set.AuthorUsername)
+	// 标题索引覆盖全表而非仅链尾：待处理/冲突行指向的常是版本链的另一端
+	// （历史版本），只索引链尾会让这些行退化成短哈希。
+	if rows, err := h.DB().QueryContext(ctx,
+		`SELECT content_hash, payload FROM beatmap_set`); err == nil {
+		for rows.Next() {
+			var k, v string
+			if err := rows.Scan(&k, &v); err != nil {
+				break // 摘要尽力而为：单行失败退回内容键前缀
+			}
+			var bs struct{ Artist, Title, AuthorUsername string }
+			if json.Unmarshal([]byte(v), &bs) == nil && bs.Title != "" {
+				s.setTitles[k] = fmt.Sprintf("%s - %s（%s）", bs.Artist, bs.Title, bs.AuthorUsername)
+			}
 		}
+		rows.Close()
 	}
 	if rows, err := h.DB().QueryContext(ctx,
 		`SELECT content_hash, payload FROM skin`); err == nil {

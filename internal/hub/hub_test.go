@@ -263,6 +263,38 @@ func TestHB1StrongKeyVersionChain(t *testing.T) {
 	}
 }
 
+// --- HB1：旧版本回扫不成环（环会让整条链退出当前版本集合）---
+
+func TestHB1RescanOldVersionKeepsChain(t *testing.T) {
+	s := openMem(t)
+	applySnap(t, s, Snapshot{
+		ForkID: "A", CollectedAt: t0,
+		BeatmapSets: []BeatmapSet{mkSet("hv1", 100, "AR", "TI", "AU", "Easy")},
+	})
+	applySnap(t, s, Snapshot{
+		ForkID: "B", CollectedAt: t0.Add(time.Hour),
+		BeatmapSets: []BeatmapSet{mkSet("hv2", 100, "AR", "TI", "AU", "Easy", "Hard")},
+	})
+	// A 端仍持旧版，下一轮收集把 hv1 再送进来。
+	res := applySnap(t, s, Snapshot{
+		ForkID: "A", CollectedAt: t0.Add(2 * time.Hour),
+		BeatmapSets: []BeatmapSet{mkSet("hv1", 100, "AR", "TI", "AU", "Easy")},
+	})
+	if res.VersionLinksCreated != 0 {
+		t.Errorf("旧版回扫 VersionLinksCreated = %d，期望 0", res.VersionLinksCreated)
+	}
+	if got := queryNullString(t, s, `SELECT superseded_by FROM beatmap_set WHERE content_hash='hv1'`); !got.Valid || got.String != "hv2" {
+		t.Errorf("hv1.superseded_by = %+v，期望 hv2（链向不变）", got)
+	}
+	if got := queryNullString(t, s, `SELECT superseded_by FROM beatmap_set WHERE content_hash='hv2'`); got.Valid {
+		t.Errorf("hv2.superseded_by = %q，期望 NULL（链尾仍在 hv2，不成环）", got.String)
+	}
+	sets, err := s.CurrentBeatmapSets(context.Background())
+	if err != nil || len(sets) != 1 || sets[0].Set.Hash != "hv2" {
+		t.Fatalf("当前版本集合 = (%d,%v)，期望仅 hv2", len(sets), err)
+	}
+}
+
 // --- HB1：弱键不自动建链（需用户确认），确认后才建 ---
 
 func TestHB1WeakKeyNeedsConfirmation(t *testing.T) {

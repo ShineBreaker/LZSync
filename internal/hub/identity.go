@@ -95,6 +95,19 @@ VALUES(?,?)`, ikey, bs.Hash); err != nil {
 			return 0, nil // 弱键未拍板：不建链
 		}
 	}
+	// 本次版本若已是历史版本（superseded_by 非 NULL），说明这是某端仍持有
+	// 的旧版回扫：把链尾指向它会与既有链尾互指成环（两端各持一个版本时
+	// 反复收集即触发），链上再无行是 NULL，整条链退出当前版本集合。收集
+	// 只增不改，保持既有链方向即可。
+	var self sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT superseded_by FROM beatmap_set WHERE content_hash=?`, bs.Hash).Scan(&self); err != nil {
+		if err != sql.ErrNoRows {
+			return 0, fmt.Errorf("hub: 读版本链态 %q: %w", bs.Hash, err)
+		}
+	} else if self.Valid && self.String != "" {
+		return 0, nil
+	}
 	// 本次版本成为同身份键下全部既有链尾的新后继（收集序定链方向，链尾
 	// 语义只认指针，§4.4——不用 DateAdded 也不用收集序做「最新」判定）。
 	res, err := tx.ExecContext(ctx, `

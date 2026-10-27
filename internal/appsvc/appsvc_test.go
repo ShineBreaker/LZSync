@@ -8,6 +8,7 @@ package appsvc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -818,6 +819,36 @@ func TestPlanItemFromVersionUpdate(t *testing.T) {
 	}
 }
 
+
+// TestSummarizerCoversHistoricalVersions 摘要索引覆盖历史版本：待处理行
+// 指向的常是版本链旧端（superseded_by 非 NULL），只索引链尾会让这类行
+// 退化成「谱面集 <短哈希>」。
+func TestSummarizerCoversHistoricalVersions(t *testing.T) {
+	h, err := hub.Open(filepath.Join(t.TempDir(), "hub.db"))
+	if err != nil {
+		t.Fatalf("hub.Open: %v", err)
+	}
+	t.Cleanup(func() { h.Close() })
+	ins := func(hash, title string, superseded *string) {
+		payload := fmt.Sprintf(`{"Hash":%q,"Artist":"AR","Title":%q,"AuthorUsername":"AU"}`, hash, title)
+		if _, err := h.DB().Exec(
+			`INSERT INTO beatmap_set(content_hash,payload,origin_guid,origin_fork,superseded_by,first_seen,updated_at)
+VALUES(?,?,?,?,?,0,0)`, hash, payload, "g-"+hash, "lazer", superseded); err != nil {
+			t.Fatalf("插谱面集 %s: %v", hash, err)
+		}
+	}
+	ins("hh-tail", "T1", nil)
+	tail := "hh-tail"
+	ins("hh-hist", "T2", &tail)
+
+	sum := newSummarizer(h)
+	if got := sum.summary(hub.KindBeatmapSet, "hh-hist"); got != "AR - T2（AU）" {
+		t.Errorf("历史版本摘要 = %q，期望 AR - T2（AU）", got)
+	}
+	if got := sum.summary(hub.KindBeatmapSet, "hh-tail"); got != "AR - T1（AU）" {
+		t.Errorf("链尾摘要 = %q，期望 AR - T1（AU）", got)
+	}
+}
 
 // TestRealComparePreviewSettingsKinds M3 设置类三类的预演面（「不可见即
 // 不可勾选投放」的缺口闭合验收，§6.2 八类 Tab）：三类各一形态——键位
