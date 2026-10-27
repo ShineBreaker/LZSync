@@ -449,7 +449,7 @@ select.input option { background: var(--bg-card); color: var(--text-hi); }
 .irow .iholders .fdot.base.dim { opacity: .55; } /* 配置默认基准预览（未拍板） */
 .irow .ichev { color: var(--text-low); transition: transform 0.15s; }
 .irow.open .ichev { transform: rotate(180deg); }
-.irow .ichoice { display: flex; align-items: center; gap: 4px; color: var(--brand); font-size: var(--fs-badge); font-weight: 700; }
+
 
 .idetail {
   grid-column: 1 / -1;
@@ -472,8 +472,7 @@ select.input option { background: var(--bg-card); color: var(--text-hi); }
 .vcard:hover { border-color: var(--border-strong); }
 .vcard.disabled { opacity: 0.45; cursor: default; }
 .vcard.disabled:hover { border-color: var(--border); }
-.vcard.keep { border-style: dashed; border-color: var(--border-strong); }
-.vcard.keep:hover { border-color: var(--text-low); }
+
 .vcard.sel { border-color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
 .vcard.pre { border-color: var(--border-strong); } /* 默认预选端弱化高亮（未拍板） */
 .vcard.single { border-color: var(--warn); }

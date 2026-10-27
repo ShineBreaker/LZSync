@@ -231,9 +231,7 @@ export function renderLibrary(root: HTMLElement, kind: EntityKind): () => void {
         }
       });
       const pick = (a: DecideAction): void => {
-        if (a.action === "keep") {
-          staged.put({ kind: it.Kind, contentKey: it.ContentKey, label: it.Summary || it.ContentKey, action: "keep", winner: "" });
-        } else if (a.action === "winner") {
+        if (a.action === "winner") {
           staged.put({ kind: it.Kind, contentKey: it.ContentKey, label: it.Summary || it.ContentKey, action: "winner", winner: a.winner });
         } else {
           staged.put({ kind: it.Kind, contentKey: it.ContentKey, label: it.Summary || it.ContentKey, action: "select", winner: "" });

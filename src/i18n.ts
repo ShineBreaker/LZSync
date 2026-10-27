@@ -39,7 +39,6 @@ const zh: Record<string, string> = {
   "client.remove": "移除",
   "client.restoreAt": "还原 {0}",
 
-  "decide.keep": "保留差异",
   "decide.update": "更新为新版本",
   "decide.restore": "恢复",
 
@@ -131,7 +130,6 @@ const en: Record<string, string> = {
   "client.remove": "Remove",
   "client.restoreAt": "Restore {0}",
 
-  "decide.keep": "Keep difference",
   "decide.update": "Update to new version",
   "decide.restore": "Restore",
 

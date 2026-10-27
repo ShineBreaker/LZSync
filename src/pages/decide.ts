@@ -3,13 +3,12 @@
 // 待确认 → 单卡「更新为新版本」；删除行 → 单卡「恢复」。
 // 中枢行不提供（§0-B12 后 UI 不再给「以库为准」选项）。
 
-import { t, trBackend } from "../i18n";
+import { t } from "../i18n";
 import type { CompareService } from "../mygo";
 import { el, forkDot, text } from "../ui";
 
 export type DecideAction =
   | { action: "winner"; winner: string }
-  | { action: "keep" }
   | { action: "select" };
 
 type ConflictDetail = Awaited<ReturnType<typeof CompareService.unitConflict>>;
@@ -58,7 +57,4 @@ export function singleCard(label: string, onPick: (a: DecideAction) => void): HT
   return box;
 }
 
-/** reasonLine 后端原因行（悬浮层/决策卡下的原因附行，可省）。 */
-export function reasonLine(reason: string): HTMLElement {
-  return el("div", { class: "vdiffs" }, [text(trBackend(reason))]);
-}
+/** singleCard 单卡处置（待确认「更新为新版本」/ 删除行「恢复」）。 */

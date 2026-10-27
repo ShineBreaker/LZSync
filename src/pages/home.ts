@@ -556,7 +556,7 @@ export function renderHome(root: HTMLElement): () => void {
     for (const item of items) inboxBox.append(inboxRow(item));
   }
 
-  /** orderedHolders 持有端排序：基准端排最前，其余保持字母序。 */
+  /** orderedHolders 持有端排序：基准端排最前（凸显默认值），其余字母序。 */
   function orderedHolders(item: InboxItem): string[] {
     if (!item.baselineFork) return item.holders;
     return [item.baselineFork, ...item.holders.filter((f) => f !== item.baselineFork)];
@@ -572,10 +572,8 @@ export function renderHome(root: HTMLElement): () => void {
       el("span", { class: "ikind" }, [text(kindLabel(item.kind))]),
       el("span", { class: "ilabel" }, [text(item.label)]),
       holdersEl,
-      el("span", { class: "ichoice" }),
       el("span", { class: "ichev" }, [icon("chevron")]),
     );
-    const choice = row.querySelector<HTMLElement>(".ichoice")!;
     check.addEventListener("click", (e) => e.stopPropagation()); // 不触发展开
 
     // 外环：staged winner 实环（已拍板）；未拍板时配置基准端弱化预览。
@@ -593,7 +591,6 @@ export function renderHome(root: HTMLElement): () => void {
         if (f === marked) {
           d.classList.add("base");
           if (!markedByUser) d.classList.add("dim"); // 默认基准弱化预览
-          d.title = `${f} · ${t("inbox.baseline")}`;
         }
         holdersEl.append(d);
       }
@@ -615,8 +612,6 @@ export function renderHome(root: HTMLElement): () => void {
       } else {
         staged.remove(item.kind, item.key);
       }
-      const e = stagedEntry();
-      paintChoice(choice, e?.action === "winner" ? e.winner : e?.action);
       paintHolders();
     });
 
@@ -645,15 +640,11 @@ export function renderHome(root: HTMLElement): () => void {
     });
 
     function pick(a: import("./decide").DecideAction): void {
-      if (a.action === "keep") {
-        staged.put({ kind: item.kind, contentKey: item.key, label: item.label, action: "keep", winner: "" });
-      } else if (a.action === "winner") {
+      if (a.action === "winner") {
         staged.put({ kind: item.kind, contentKey: item.key, label: item.label, action: "winner", winner: a.winner });
       } else {
         staged.put({ kind: item.kind, contentKey: item.key, label: item.label, action: "select", winner: "" });
       }
-      const e = stagedEntry();
-      paintChoice(choice, e?.action === "winner" ? e.winner : e?.action);
       paintHolders();
       syncCheck(); // 点卡自动勾
       // 就地更新卡选中态（不重建，.sel 跟随最新 staged winner）
@@ -666,19 +657,10 @@ export function renderHome(root: HTMLElement): () => void {
       detail.classList.add("hidden");
       row.classList.remove("open");
     }
-    const e0 = stagedEntry();
-    paintChoice(choice, e0?.action === "winner" ? e0.winner : e0?.action);
     return row;
   }
 
-  function paintChoice(node: HTMLElement, sel: string | undefined): void {
-    clear(node);
-    if (!sel || sel === "select") return; // 外环已标记选中端，select/未选不显示
-    if (sel === "keep") {
-      node.append(text("="));
-    }
-    // winner 不画重复点——holders 外环已标。
-  }
+  // ---------- 订阅与清理 ----------
 
   // ---------- 订阅与清理 ----------
 
