@@ -33,9 +33,10 @@ type mockBackend struct {
 	mode  string
 	reasn string
 
-	mu    sync.Mutex
-	scope *SyncScope      // 内存态同步范围（M-4 冒烟，不落盘）
-	kept  map[string]bool // KeepDifference 已「接受差异」的 kind\x00key（ListConflicts 过滤）
+	mu       sync.Mutex
+	scope    *SyncScope      // 内存态同步范围（M-4 冒烟，不落盘）
+	kept     map[string]bool // KeepDifference 已「接受差异」的 kind\x00key（ListConflicts 过滤）
+	baseline string          // 内存态基准端（演示）
 }
 
 func newMockBackend(mode, reason string, prog ProgressSink) *Backend {
@@ -337,10 +338,11 @@ func (m *mockCompare) DeletedEntries(target string) ([]DiffRow, error) {
 // ListConflicts mock：演示冲突清单（两条固定行，无真实 hub）；「保留差
 // 异」处置过的键（kept）不再枚举——处置语义与真实后端一致。
 func (m *mockCompare) ListConflicts() ([]ConflictRow, error) {
+	bl := m.b.getBaseline()
 	rows := []ConflictRow{
-		{Kind: string(hub.KindBeatmapSet), ContentKey: "hash-conflict-0004", Label: "IA - Suna no Wakusei（nhato）", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
-		{Kind: string(hub.KindRulesetSetting), ContentKey: hub.RulesetSettingContentKey("osu", 0, "hud_position"), Label: "osu · 变体 0 · hud_position", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true},
-		{Kind: "game_ini", ContentKey: "ShowFpsDisplay", Label: "game.ini · ShowFpsDisplay", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: false},
+		{Kind: string(hub.KindBeatmapSet), ContentKey: "hash-conflict-0004", Label: "IA - Suna no Wakusei（nhato）", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true, BaselineFork: bl},
+		{Kind: string(hub.KindRulesetSetting), ContentKey: hub.RulesetSettingContentKey("osu", 0, "hud_position"), Label: "osu · 变体 0 · hud_position", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: true, BaselineFork: bl},
+		{Kind: "game_ini", ContentKey: "ShowFpsDisplay", Label: "game.ini · ShowFpsDisplay", Forks: []string{"delta", "lazer"}, Values: 2, CanPickHub: false, BaselineFork: bl},
 	}
 	m.b.mu.Lock()
 	kept := m.b.kept
@@ -1027,6 +1029,7 @@ func (b *mockBackend) Get() (SettingsInfo, error) {
 		LinkNote:     "Mock 探测结果（真实后端按 §5.3 现场探测）",
 		NativeLibOK:  false,
 		NativeLibErr: "Mock 后端不加载 native 库（M-4 冒烟模式）",
+		BaselineFork: b.getBaseline(),
 	}, nil
 }
 
@@ -1064,6 +1067,29 @@ func (b *mockBackend) getScope() SyncScope {
 	}
 	sort.Slice(out.Forks, func(i, j int) bool { return out.Forks[i].ForkID < out.Forks[j].ForkID })
 	return out
+}
+
+// getBaseline 内存态基准端（默认 lazer）。
+func (b *mockBackend) getBaseline() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.baseline == "" {
+		b.baseline = "lazer"
+	}
+	return b.baseline
+}
+
+// GetBaseline 基准端。
+func (b *mockBackend) GetBaseline() string {
+	return b.getBaseline()
+}
+
+// SetBaseline 持久化基准端（mock：内存态）。
+func (b *mockBackend) SetBaseline(forkID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.baseline = forkID
+	return nil
 }
 
 // GetSyncScope 同步范围（§0-G1 mock：内存态）。

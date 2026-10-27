@@ -599,7 +599,7 @@ func (s *realCompare) ListConflicts() ([]ConflictRow, error) {
 		if row == nil {
 			continue // 纯基线残留单位（无 presence）——面板无可展示值
 		}
-		cr := conflictRowFor(uk, row, out.in, sum)
+		cr := conflictRowFor(uk, row, out.in, sum, s.cfg.baseline())
 		if cr.ContentKey == "" {
 			continue
 		}
@@ -626,8 +626,8 @@ func (s *realCompare) ListConflicts() ([]ConflictRow, error) {
 }
 
 // conflictRowFor 判定单位 → 清单行（ContentKey 保证回填 Selection/
-// UnitConflict 归并到同一单位）。
-func conflictRowFor(uk unitKey, row *unitRow, in *decideInput, sum *summarizer) ConflictRow {
+// UnitConflict 归并到同一单位）。baselineFork = 配置基准端（空 = 无默认）。
+func conflictRowFor(uk unitKey, row *unitRow, in *decideInput, sum *summarizer, baselineFork string) ConflictRow {
 	cr := ConflictRow{Kind: uk.kind, CanPickHub: true}
 	fps := map[string]bool{}
 	for f, v := range row.cur {
@@ -637,25 +637,38 @@ func conflictRowFor(uk unitKey, row *unitRow, in *decideInput, sum *summarizer) 
 	sort.Strings(cr.Forks)
 	cr.Values = len(fps)
 
-	// 基准端：首个「当前值 = 上轮基线」的未改动端（§0.3 未改动端即基线
-	// 保持者）。全端自行改动或无基线时留空。
-	seenF := map[string]bool{}
-	for _, f := range append(append([]string{}, in.targets...), in.sources...) {
-		if seenF[f] {
-			continue
+	// 基准端：优先配置端（持有该单位时）；否则回退候选首端（有同步史时
+	// 首个「当前值≠基线」的来源端；无同步史时首个持值来源端）。
+	if baselineFork != "" {
+		if _, ok := row.cur[baselineFork]; ok {
+			cr.BaselineFork = baselineFork
 		}
-		seenF[f] = true
-		b, hasB := row.base[f]
-		if !hasB {
-			continue
+	}
+	if cr.BaselineFork == "" {
+		eqVal := func(a, b string) bool {
+			return a == b || (absentEq(uk.kind, a) && absentEq(uk.kind, b))
 		}
-		v := hub.BaselineAbsent
-		if cv, ok := row.cur[f]; ok {
-			v = cv.fp
+		curOf := func(f string) string {
+			if cv, ok := row.cur[f]; ok {
+				return cv.fp
+			}
+			return hub.BaselineAbsent
 		}
-		if v == b || (absentEq(uk.kind, v) && absentEq(uk.kind, b)) {
-			cr.BaselineFork = f
-			break
+		if len(row.base) > 0 {
+			for _, f := range in.sources {
+				b, hasB := row.base[f]
+				if hasB && !eqVal(curOf(f), b) && !absentEq(uk.kind, curOf(f)) {
+					cr.BaselineFork = f
+					break
+				}
+			}
+		} else {
+			for _, f := range in.sources {
+				if !absentEq(uk.kind, curOf(f)) {
+					cr.BaselineFork = f
+					break
+				}
+			}
 		}
 	}
 

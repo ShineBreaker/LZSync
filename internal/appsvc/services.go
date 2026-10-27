@@ -143,8 +143,8 @@ type ConflictRow struct {
 	ContentKey string   // 勾选/详情键（谱面集=持有版本哈希、键位=一条四段内容键、ini=键名）
 	Label      string   // 人话摘要
 	Forks      []string // 持有该单位的端
-	// BaselineFork 基准端：首个「当前值=上轮基线」的未改动端（§0.3 三方
-	// 判定的基线保持者）；全端自行改动或无同步史时为空。
+	// BaselineFork 基准端：用户视角「以谁为准」——优先配置端（设置页），
+	// 否则回退判定候选首端；空 = 无基准可标（全端缺席等）。
 	BaselineFork string
 	Values     int  // 异值种数（>1 即分歧）
 	CanPickHub bool // 同 ConflictDetail.CanPickHub
@@ -201,6 +201,8 @@ type SettingsInfo struct {
 	LinkNote     string // 探测说明（如「不可用时自动降级复制」）
 	NativeLibOK  bool   // librealm 加载状态（P-2 诊断）
 	NativeLibErr string
+	// BaselineFork 基准端（设置页可改，收件箱外环 + 冲突处置默认参照）。
+	BaselineFork string
 }
 
 // LibraryService 库管理（§6.1）。
@@ -313,6 +315,10 @@ type SettingsService interface {
 	// SetSyncScope 持久化同步范围（校验：未知 Section 报错、未注册
 	// ForkID 报错）。
 	SetSyncScope(scope SyncScope) error
+	// GetBaseline 基准端（设置页下拉初值 + 收件箱外环默认参照）。
+	GetBaseline() string
+	// SetBaseline 持久化基准端（校验：必须已注册端；"" = 自动回退）。
+	SetBaseline(forkID string) error
 }
 
 // Backend 聚合服务（main 装配后逐字段 BindAs 暴露给前端）。

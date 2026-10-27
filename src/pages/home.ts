@@ -511,7 +511,7 @@ export function renderHome(root: HTMLElement): () => void {
     key: string;
     label: string;
     holders: string[];
-    /** 基准端（冲突行=持有上轮基线值的未改动端）；confirm 行无基准留空。 */
+    /** 基准端（配置端优先 / 判定候选首端回退）；confirm 行无基准留空。 */
     baselineFork?: string;
   }
 
@@ -564,24 +564,37 @@ export function renderHome(root: HTMLElement): () => void {
 
   function inboxRow(item: InboxItem): HTMLElement {
     const row = el("div", { class: `irow ${item.mode}` });
+    const holdersEl = el("span", { class: "iholders" });
     row.append(
       el("span", { class: "ibar" }),
       el("span", { class: "ikind" }, [text(kindLabel(item.kind))]),
       el("span", { class: "ilabel" }, [text(item.label)]),
-      el("span", { class: "iholders" }, orderedHolders(item).map((f) => {
-        const d = forkDot(f, 10);
-        if (f === item.baselineFork) {
-          d.classList.add("base");
-          d.title = `${f} · ${t("inbox.baseline")}`;
-        }
-        return d;
-      })),
+      holdersEl,
       el("span", { class: "ichoice" }),
       el("span", { class: "ichev" }, [icon("chevron")]),
     );
     const choice = row.querySelector<HTMLElement>(".ichoice")!;
-    const entry = staged.get(item.kind, item.key);
-    paintChoice(choice, entry?.action === "winner" ? entry.winner : entry?.action);
+
+    // 外环：staged winner 实环（已拍板）；未拍板时配置基准端弱化预览。
+    const stagedWinner = (): string | undefined => {
+      const e = staged.get(item.kind, item.key);
+      return e?.action === "winner" ? e.winner : undefined;
+    };
+    function paintHolders(): void {
+      clear(holdersEl);
+      const marked = stagedWinner() ?? item.baselineFork;
+      const markedByUser = stagedWinner() !== undefined;
+      for (const f of orderedHolders(item)) {
+        const d = forkDot(f, 10);
+        if (f === marked) {
+          d.classList.add("base");
+          if (!markedByUser) d.classList.add("dim"); // 默认基准弱化预览
+          d.title = `${f} · ${t("inbox.baseline")}`;
+        }
+        holdersEl.append(d);
+      }
+    }
+    paintHolders();
 
     const detail = el("div", { class: "idetail hidden" });
     row.append(detail);
@@ -598,7 +611,7 @@ export function renderHome(root: HTMLElement): () => void {
         CompareService.unitConflict(item.kind as EntityKind, item.key)
           .then((cd) => {
             clear(detail);
-            detail.append(conflictCards(cd, (a) => pick(a)));
+            detail.append(conflictCards(cd, (a) => pick(a), stagedWinner()));
           })
           .catch((e) => {
             clear(detail);
@@ -610,17 +623,19 @@ export function renderHome(root: HTMLElement): () => void {
     function pick(a: import("./decide").DecideAction): void {
       if (a.action === "keep") {
         staged.put({ kind: item.kind, contentKey: item.key, label: item.label, action: "keep", winner: "" });
-        paintChoice(choice, "keep");
       } else if (a.action === "winner") {
         staged.put({ kind: item.kind, contentKey: item.key, label: item.label, action: "winner", winner: a.winner });
-        paintChoice(choice, a.winner);
       } else {
         staged.put({ kind: item.kind, contentKey: item.key, label: item.label, action: "select", winner: "" });
-        paintChoice(choice, "select");
       }
+      const e = staged.get(item.kind, item.key);
+      paintChoice(choice, e?.action === "winner" ? e.winner : e?.action);
+      paintHolders(); // 外环跟随 staged
       detail.classList.add("hidden");
       row.classList.remove("open");
     }
+    const e0 = staged.get(item.kind, item.key);
+    paintChoice(choice, e0?.action === "winner" ? e0.winner : e0?.action);
     return row;
   }
 

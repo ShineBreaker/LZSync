@@ -72,6 +72,7 @@ export function forkColor(forkID: string): string {
 export function forkDot(forkID: string, size = 10): HTMLElement {
   const d = el("span", { class: "fdot" });
   d.style.background = forkColor(forkID);
+  d.style.color = forkColor(forkID); // currentColor 供 .fdot.base 同色描边
   d.style.width = `${size}px`;
   d.style.height = `${size}px`;
   return d;

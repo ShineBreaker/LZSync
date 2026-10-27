@@ -70,6 +70,8 @@ const zh: Record<string, string> = {
 
   "set.title": "设置",
   "set.lang": "语言",
+  "set.baseline": "基准端",
+  "set.baselineSaved": "基准端已保存",
   "set.storage": "存储",
   "set.dataDir": "数据目录",
   "set.hubDb": "库数据库",
@@ -160,6 +162,8 @@ const en: Record<string, string> = {
 
   "set.title": "Settings",
   "set.lang": "Language",
+  "set.baseline": "Baseline fork",
+  "set.baselineSaved": "Baseline saved",
   "set.storage": "Storage",
   "set.dataDir": "Data directory",
   "set.hubDb": "Hub database",

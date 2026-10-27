@@ -1225,16 +1225,31 @@ func (s *realSettings) SetSyncScope(scope SyncScope) error {
 	})
 }
 
+// GetBaseline 基准端。
+func (s *realSettings) GetBaseline() string {
+	return s.cfg.baseline()
+}
+
+// SetBaseline 持久化基准端（校验注册端）。
+func (s *realSettings) SetBaseline(forkID string) error {
+	known := map[string]bool{}
+	for _, ref := range s.reg.all() {
+		known[ref.ForkID] = true
+	}
+	return s.cfg.setBaseline(forkID, known)
+}
+
 // Get 组装设置页数据（§6.4 M1 骨架，只读显示）。
 func (s *realSettings) Get() (SettingsInfo, error) {
 	info := SettingsInfo{
-		Mode:       "real",
-		DataDir:    s.deps.DataDir,
-		HubDBPath:  filepath.Join(s.deps.DataDir, "hub.db"),
-		BackupsDir: "",
-		GuardNames: []string{},
-		LinkNote:   "按 §5.3 自动分级：符号链接 → 硬链接（同卷）→ 复制兜底；探测不可用时逐级降级",
-		NativeLibOK: true,
+		Mode:         "real",
+		DataDir:      s.deps.DataDir,
+		HubDBPath:    filepath.Join(s.deps.DataDir, "hub.db"),
+		BackupsDir:   "",
+		GuardNames:   []string{},
+		LinkNote:     "按 §5.3 自动分级：符号链接 → 硬链接（同卷）→ 复制兜底；探测不可用时逐级降级",
+		NativeLibOK:  true,
+		BaselineFork: s.cfg.baseline(),
 	}
 	if s.deps.Backups != nil {
 		info.BackupsDir = s.deps.Backups.Dir

@@ -66,6 +66,9 @@ type syncConfig struct {
 	Forks    []ForkRole         `json:"forks"`
 	Sections map[Section]bool   `json:"sections"`
 	Ignored  []string           `json:"ignored"` // 用户移除过的 RealmPath，自动发现不再加回
+	// BaselineFork 基准端（§3.5 收件箱外环 + 冲突处置默认参照端）：
+	// 空 = 未设；设置页可改。默认 lazer（官方端）。
+	BaselineFork string `json:"baseline_fork"`
 }
 
 // configStore 同步范围配置的持久化载体（Deps.DataDir/config.json）。
@@ -87,6 +90,7 @@ func defaultSyncConfig() syncConfig {
 		Forks:    []ForkRole{},
 		Sections: sections,
 		Ignored:  []string{},
+		BaselineFork: "lazer",
 	}
 }
 
@@ -141,6 +145,9 @@ func loadSyncConfig(dataDir string) (*configStore, error) {
 	}
 	if cfg.Ignored == nil {
 		cfg.Ignored = []string{}
+	}
+	if cfg.BaselineFork == "" {
+		cfg.BaselineFork = "lazer" // 默认官方端
 	}
 	c.cfg = cfg
 	return c, nil
@@ -353,6 +360,24 @@ func (c *configStore) discoverFork(ref forks.LibraryRef) (bool, error) {
 		ForkID: ref.ForkID, RealmPath: ref.RealmPath, Source: true, Target: true,
 	})
 	return true, c.save()
+}
+
+// baseline 返回基准端 ForkID（空 = 未设）。
+func (c *configStore) baseline() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg.BaselineFork
+}
+
+// setBaseline 设置基准端（校验：必须已注册端）。
+func (c *configStore) setBaseline(forkID string, knownForks map[string]bool) error {
+	if forkID != "" && !knownForks[forkID] {
+		return fmt.Errorf("appsvc: 基准端 %q 未注册", forkID)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg.BaselineFork = forkID
+	return c.save()
 }
 
 // removeFork 解除端管理：删配置条目并把 RealmPath 记入 ignored（自动发现

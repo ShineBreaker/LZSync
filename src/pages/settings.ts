@@ -36,6 +36,23 @@ export function renderSettings(root: HTMLElement): () => void {
     });
     list.append(row(t("set.lang"), "", sel));
 
+    // 基准端（收件箱外环 + 冲突处置默认参照；默认 lazer）
+    const blSel = el("select", { class: "input" }) as HTMLSelectElement;
+    void SettingsService.getSyncScope()
+      .then((scope) => {
+        for (const fr of scope.Forks) {
+          blSel.append(el("option", { value: fr.ForkID }, [text(fr.ForkID)]));
+        }
+        blSel.value = info.BaselineFork || "lazer";
+      })
+      .catch(() => undefined);
+    blSel.addEventListener("change", () => {
+      void SettingsService.setBaseline(blSel.value)
+        .then(() => toast("ok", t("set.baselineSaved")))
+        .catch((e) => toast("err", errText(e)));
+    });
+    list.append(row(t("set.baseline"), "", blSel));
+
     // 存储
     list.append(row(t("set.dataDir"), info.DataDir));
     list.append(row(t("set.hubDb"), info.HubDBPath));

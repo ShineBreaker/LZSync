@@ -438,7 +438,8 @@ select.input option { background: var(--bg-card); color: var(--text-hi); }
   white-space: nowrap;
 }
 .irow .iholders { display: flex; align-items: center; gap: 7px; flex: none; }
-.irow .iholders .fdot.base { outline: 2px solid var(--warn); outline-offset: 1.5px; }
+.irow .iholders .fdot.base { outline: 2px solid currentColor; outline-offset: 1.5px; }
+.irow .iholders .fdot.base.dim { opacity: .55; } /* 配置默认基准预览（未拍板） */
 .irow .ichev { color: var(--text-low); transition: transform 0.15s; }
 .irow.open .ichev { transform: rotate(180deg); }
 .irow .ichoice { display: flex; align-items: center; gap: 4px; color: var(--brand); font-size: var(--fs-badge); font-weight: 700; }
@@ -466,6 +467,7 @@ select.input option { background: var(--bg-card); color: var(--text-hi); }
 .vcard.disabled:hover { border-color: var(--border); }
 .vcard.keep { border-style: dashed; border-color: var(--border-strong); }
 .vcard.keep:hover { border-color: var(--text-low); }
+.vcard.sel { border-color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
 .vcard.single { border-color: var(--warn); }
 .vcard .vhead { display: flex; align-items: center; gap: 7px; font-size: var(--fs-aux); font-weight: 700; color: var(--text-hi); }
 .vcard .vval {

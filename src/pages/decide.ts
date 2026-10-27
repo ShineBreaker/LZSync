@@ -14,11 +14,13 @@ export type DecideAction =
 
 type ConflictDetail = Awaited<ReturnType<typeof CompareService.unitConflict>>;
 
-/** conflictCards 冲突展开卡集：每变体一卡 + 「保留差异」虚线卡。 */
-export function conflictCards(cd: ConflictDetail, onPick: (a: DecideAction) => void): HTMLElement {
+/** conflictCards 冲突展开卡集：每变体一卡 + 「保留差异」虚线卡；
+ * selected = 已拍板 winner（加 .sel 选中态）。 */
+export function conflictCards(cd: ConflictDetail, onPick: (a: DecideAction) => void, selected?: string): HTMLElement {
   const box = el("div", { class: "vcards" });
   for (const v of cd.Variants) {
-    const card = el("div", { class: `vcard${v.Has ? "" : " disabled"}` });
+    const isSel = selected === v.ForkID;
+    const card = el("div", { class: `vcard${v.Has ? "" : " disabled"}${isSel ? " sel" : ""}` });
     card.append(el("div", { class: "vhead" }, [forkDot(v.ForkID), text(v.ForkID)]));
     card.append(el("div", { class: "vval" }, [text(v.Value || "—")]));
     if (v.Has) {

@@ -48,8 +48,8 @@ export interface ConflictRow {
   /** 持有该单位的端 */
   Forks: string[];
   /**
-   * BaselineFork 基准端：首个「当前值=上轮基线」的未改动端（§0.3 三方
-   * 判定的基线保持者）；全端自行改动或无同步史时为空。
+   * BaselineFork 基准端：用户视角「以谁为准」——优先配置端（设置页），
+   * 否则回退判定候选首端；空 = 无基准可标（全端缺席等）。
    */
   BaselineFork: string;
   /** 异值种数（>1 即分歧） */
@@ -405,6 +405,8 @@ export interface SettingsInfo {
   /** librealm 加载状态（P-2 诊断） */
   NativeLibOK: boolean;
   NativeLibErr: string;
+  /** BaselineFork 基准端（设置页可改，收件箱外环 + 冲突处置默认参照）。 */
+  BaselineFork: string;
 }
 
 export interface SkipStat {
@@ -632,9 +634,17 @@ export const SettingsService = {
   get(): Promise<SettingsInfo> {
     return call("SettingsService.Get");
   },
+  /** GetBaseline 基准端。 */
+  getBaseline(): Promise<string> {
+    return call("SettingsService.GetBaseline");
+  },
   /** GetSyncScope 同步范围（§0-G1）。 */
   getSyncScope(): Promise<SyncScope> {
     return call("SettingsService.GetSyncScope");
+  },
+  /** SetBaseline 持久化基准端（校验注册端）。 */
+  setBaseline(forkID: string): Promise<void> {
+    return call("SettingsService.SetBaseline", forkID);
   },
   /**
    * SetSyncScope 校验并持久化同步范围：未知板块报错；未注册端报错；落盘
