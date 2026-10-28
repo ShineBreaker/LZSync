@@ -282,7 +282,10 @@ func (l *Library) Version() string {
 	return l.realmGetLibraryVersion()
 }
 
-// cbAlwaysOnThread 是注入 realm-core 的唯一 Go 回调：无状态、恒真、不重入
+// cbAlwaysOnThread 是注入 realm-core 的唯一 Go 回调：无状态、恒真、不重入。
+// 返回值必须是 uintptr 而非 bool：Windows 上 purego.NewCallback 落到
+// syscall.NewCallback，只接受恰好一个 uintptr 大小的返回值（C 侧 is_on_thread
+// 读 _Bool 即 RAX 低字节 AL，返 1 恒为 true，ABI 兼容）。
 // （realm.h:346 realm_scheduler_is_on_thread_func_t）。之所以必须：
 // 本构建（Linux、无 UV/CF/ALOOPER）没有平台默认 scheduler，
 // realm_open 内部 Scheduler::make_platform_default 会直接 REALM_TERMINATE
@@ -291,7 +294,7 @@ func (l *Library) Version() string {
 // can_invoke→false（仅 async 事务/通知投递需要，同步路径不依赖），
 // notify→NULL（invoke 变 no-op，通知闭包被丢弃，PoC 不用通知）。
 // 组合语义等同 realm-core 自带的 DummyScheduler（scheduler.cpp:78-92）。
-var cbAlwaysOnThread = purego.NewCallback(func(unsafe.Pointer) bool { return true })
+var cbAlwaysOnThread = purego.NewCallback(func(unsafe.Pointer) uintptr { return 1 })
 
 // newDummyScheduler 构造无通知、无线程限制的 scheduler（每次打开一个）。
 func (l *Library) newDummyScheduler() (unsafe.Pointer, error) {
