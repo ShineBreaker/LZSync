@@ -1,0 +1,2 @@
+# CI 脚本须在 windows runner 的 git-bash 下可执行：钉死 LF，防 autocrlf 换 CRLF
+*.sh text eol=lf

@@ -97,6 +97,17 @@ print_status() {
     sha256sum "$OUT_ERRCODES"
 }
 
+# install_resource 把已就位的 .so 同步到 mygo 平台资源目录：
+# resources/linux-amd64/ 的内容随 linux/amd64 应用打包（可执行文件同目录，
+# realmc 打包路径解析命中），本地 `mygo build`/`just build` 由此产出
+# 可直接分发的目录形态。
+install_resource() {
+    local res="$REPO_ROOT/resources/linux-amd64/librealm-ffi.so"
+    mkdir -p "$(dirname "$res")"
+    cp "$OUT_LIB" "$res"
+    echo "[resource] $res"
+}
+
 # ── 幂等快路径：产物已就位 ───────────────────────────────────────
 if [ -f "$OUT_LIB" ] && [ -f "$OUT_HEADER" ] && [ -f "$OUT_ERRCODES" ]; then
     actual_sha="$(sha256sum "$OUT_LIB" | cut -d' ' -f1)"
@@ -105,6 +116,7 @@ if [ -f "$OUT_LIB" ] && [ -f "$OUT_HEADER" ] && [ -f "$OUT_ERRCODES" ]; then
             echo "[skip] librealm-ffi.so 已就位，sha256 与 pin 一致且符号自检通过，跳过获取/构建"
             echo "[done] 产物状态："
             print_status
+            install_resource
             exit 0
         fi
         echo "[fail] 产物 sha256 与 pin 一致但符号自检未过（异常态），转入重建流程"
@@ -117,6 +129,7 @@ if [ -f "$OUT_LIB" ] && [ -f "$OUT_HEADER" ] && [ -f "$OUT_ERRCODES" ]; then
             echo "       如需固化新产物，请更新脚本 PINNED_SO_SHA256 与 docs/dev-native.md"
             echo "[done] 产物状态："
             print_status
+            install_resource
             exit 0
         fi
         echo "[fail] 符号自检未过，产物疑似损坏，转入重建流程"
@@ -175,4 +188,5 @@ fi
 
 echo "[done] 产物状态："
 print_status
+install_resource
 echo "若 sha256 与脚本 PINNED_SO_SHA256 / docs/dev-native.md 记录不一致，请同步更新两处。"

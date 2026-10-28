@@ -65,6 +65,18 @@ flowchart LR
 3. **差异对比。** 进入**差异对比**页，选择「投放预览：中枢到目标库」或「跨端对比：源库与目标库」，按分类审视并勾选条目，点击**生成投放计划**。
 4. **投放。** 返回**收集与投放**页，确认进程检查与备份路径无误后点击**开始投放**。
 
+## 下载安装
+
+预编译包发布在 [Releases](https://github.com/ShineBreaker/LZSync/releases) 页面：
+
+| 平台 | 包 |
+|---|---|
+| **Windows**（x64） | `LZSync Setup *.exe` 安装程序、免安装 `.zip` |
+| **macOS**（Apple Silicon + Intel） | universal `.dmg`（ad-hoc 签名：首次打开请右键 → 打开） |
+| **Linux**（x86_64） | `.deb`、`.rpm`、`.AppImage`、`.tar.gz` + `install.sh` |
+
+Linux 包依赖 GTK 3 与 WebKitGTK 4.1/4.0（Debian/Ubuntu 上为 `libwebkit2gtk-4.1-0`，Fedora 上为 `webkit2gtk4.1`）：`.deb`/`.rpm` 已声明依赖；`.AppImage` 与 `install.sh` 假定系统已装。
+
 ## 快速开始与构建
 
 LZSync 后端采用 Go 编写并通过 `purego` 绑定 `realm-core` C API，前端采用基于 [MyGo](https://github.com/egoist/mygo) 的 TypeScript + Vite 桌面界面。

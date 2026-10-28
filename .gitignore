@@ -7,4 +7,9 @@ node_modules/
 mygo_windows_*.syso
 /lzsync
 
+# 打包装配的 native 库（scripts/build-librealm.sh、fetch-librealm.sh 产物）
+/resources/linux-amd64/
+/resources/windows-amd64/
+/resources/darwin/
+
 reference

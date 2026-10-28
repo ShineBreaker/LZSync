@@ -98,33 +98,102 @@ var (
 	loadErr  error
 )
 
-// defaultLibPath 按任务约定返回默认库路径：
-// 相对仓库根的 build/native/linux-amd64/librealm-ffi.so。
-// go test 的进程 cwd 是包目录，故以本源文件位置推导仓库根。
-func defaultLibPath() (string, error) {
+// libFileName 是本平台打包形态里 realm-core 共享库的文件名（对齐
+// realm-core CMake OUTPUT_NAME realm-ffi + 平台 lib 前缀惯例）。
+func libFileName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "realm-ffi.dll"
+	case "darwin":
+		return "librealm-ffi.dylib"
+	default:
+		return "librealm-ffi.so"
+	}
+}
+
+// repoNativeDir 是 build/native/ 下本平台的产物目录名
+// （dev-native.md §6 的目录形态约定：linux-amd64/windows-x64/macos-universal）。
+func repoNativeDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "windows-x64"
+	case "darwin":
+		return "macos-universal"
+	default:
+		return "linux-amd64"
+	}
+}
+
+// bundledLibPath 返回随应用打包的库路径：Windows/Linux 与可执行文件同目录，
+// macOS 在 .app 的 Contents/Resources（与 mygo PathResources 的解析同规则）。
+func bundledLibPath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
+	}
+	dir := filepath.Dir(exe)
+	if runtime.GOOS == "darwin" &&
+		filepath.Base(dir) == "MacOS" && filepath.Base(filepath.Dir(dir)) == "Contents" {
+		dir = filepath.Join(filepath.Dir(dir), "Resources")
+	}
+	return filepath.Join(dir, libFileName()), nil
+}
+
+// repoLibPath 返回开发/测试态库路径：相对仓库根的
+// build/native/<平台目录>/<库名>。go test 的进程 cwd 是包目录，
+// 故以本源文件位置推导仓库根（-trimpath 下该路径失配，回退给调用方）。
+func repoLibPath() (string, error) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		return "", errors.New("realmc: 无法定位源码路径以推导仓库根")
 	}
 	root := filepath.Dir(filepath.Dir(filepath.Dir(file))) // .../internal/realmc/lib.go -> 仓库根
-	return filepath.Join(root, "build", "native", "linux-amd64", "librealm-ffi.so"), nil
+	return filepath.Join(root, "build", "native", repoNativeDir(), libFileName()), nil
 }
 
-// Load 加载 realm-core 共享库（进程内单例）。优先级：
-// LZSYNC_LIBREALM 环境变量 > 仓库根默认路径 > cwd 相对默认路径。
+// libPathCandidates 按优先级列出库候选路径：
+// 应用打包资源目录 > 仓库根默认路径 > cwd 相对默认路径。
+// 只返回实际存在的路径。
+func libPathCandidates() []string {
+	var candidates []string
+	if p, err := bundledLibPath(); err == nil {
+		candidates = append(candidates, p)
+	}
+	if p, err := repoLibPath(); err == nil {
+		candidates = append(candidates, p)
+	}
+	if p, err := filepath.Abs(filepath.Join("build", "native", repoNativeDir(), libFileName())); err == nil {
+		candidates = append(candidates, p)
+	}
+	var found []string
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			found = append(found, p)
+		}
+	}
+	return found
+}
+
+// Load 加载 realm-core 共享库（进程内单例）。LZSYNC_LIBREALM 设置时为显式
+// 约定路径，必须命中（缺失/打不开直接报错，不回退）；否则按序取第一个
+// 存在的候选。
 func Load() (*Library, error) {
 	loadOnce.Do(func() {
 		path := os.Getenv("LZSYNC_LIBREALM")
 		if path == "" {
-			if p, err := defaultLibPath(); err == nil {
-				path = p
-			} else if p, err2 := filepath.Abs("build/native/linux-amd64/librealm-ffi.so"); err2 == nil {
-				path = p
+			candidates := libPathCandidates()
+			if len(candidates) == 0 {
+				loadErr = fmt.Errorf("realmc: 未找到 realm-core 共享库（期望文件名 %s；可置 LZSYNC_LIBREALM 指定路径）", libFileName())
+				return
 			}
+			path = candidates[0]
 		}
-		handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		handle, err := openLibrary(path)
 		if err != nil {
-			loadErr = fmt.Errorf("realmc: Dlopen %s: %w", path, err)
+			loadErr = fmt.Errorf("realmc: 加载 %s: %w", path, err)
 			return
 		}
 		lib := &Library{handle: handle}

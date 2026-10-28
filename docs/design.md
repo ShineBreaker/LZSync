@@ -85,12 +85,12 @@ LZSync 本体是一座**收全的仓库**（hub），每个 fork 都是它的导
 | G4 | 收集只增不改（B2）；仅目标端只刷快照、仅来源端不回链（B9） | ✅ 2026-10-26 已落地（insert-if-absent、`collect.Mode`、`Snapshot.Kinds/PresenceOnly`）；原状：hub upsert 整行覆盖并改写 `origin_fork`（HB3） |
 | G5 | 冲突默认不动（B4） | ✅ 2026-10-26 已落地（冲突默认不勾、`deploy.BuildPlan` 冲突→skip；数据页显式勾选 = 选定 hub 变体）；原状：冲突项默认勾选、动作 = hub 覆盖目标（`planItemFrom` conflict → update） |
 | G6 | 全局交集（B3） | ✅ 2026-10-26 已落地（`Plan.Intersection`：成绩/Mod 预设/键位枚举域/game.ini 键）；原状：兼容规则按（源, 目标）逐对判定 |
-| G7 | 基线表 + 三方判定（§0.3）；键位同步身份改三段键、值为组合集合；收藏逐成员；版本链退为历史 | 对账 = canonical vs 目标 presence；键位内容键含 KeyCombination；当前版本由收集先后决定 |
-| G8 | game.ini 逐键三方 + 交集 | 源 = 快照最新的非目标端（LastWrite 近似） |
-| G9 | S8 判据改为「同 ServerRealm 来源端的 presence 值」 | 依赖 `origin_fork`，B2 后它只代表首见来源 |
-| G10 | 端本地字段数据化、永不覆盖目标值（B7） | 冲突字段含 StatusInt 等本地字段；设计曾留 LastWrite-wins 选项 |
-| G11 | hub 收全（B1）：fork 专有皮肤等入 hub，由导出交集排除 | 投影阶段即跳过 fork 专有皮肤 |
-| G12 | 数据页状态与 x/y 改用三方判定结果（冲突/需确认/交集外） | 状态取各端预演的最差分类 |
+| G7 | 基线表 + 三方判定（§0.3）；键位同步身份改三段键、值为组合集合；收藏逐成员；版本链退为历史 | ✅ 2026-10-26 已落地（hub schema v4 `baseline` 表 + 三方判定引擎接入一轮同步 37213ae/45bcf68）；原状：对账 = canonical vs 目标 presence；键位内容键含 KeyCombination；当前版本由收集先后决定 |
+| G8 | game.ini 逐键三方 + 交集 | ✅ 2026-10-26 已落地（决定值载荷/来源端透传、ActionDelete 与逐键 ini b3c1616/45bcf68）；原状：源 = 快照最新的非目标端（LastWrite 近似） |
+| G9 | S8 判据改为「同 ServerRealm 来源端的 presence 值」 | ✅ 2026-10-26 已落地（d02e2c0 按决定值来源端判域 + fbdbdde identity_version 注册表锚定）；原状：依赖 `origin_fork`，B2 后它只代表首见来源 |
+| G10 | 端本地字段数据化、永不覆盖目标值（B7） | ✅ 2026-10-26 已落地（d02e2c0 B7 端本地字段不覆写）；原状：冲突字段含 StatusInt 等本地字段；设计曾留 LastWrite-wins 选项 |
+| G11 | hub 收全（B1）：fork 专有皮肤等入 hub，由导出交集排除 | ✅ 2026-10-26 已落地（93c0789 hub 收全 + 出口全局交集）；原状：投影阶段即跳过 fork 专有皮肤 |
+| G12 | 数据页状态与 x/y 改用三方判定结果（冲突/需确认/交集外） | ✅ 2026-10-26 已落地（93c0789 数据页三方判定行态）；原状：状态取各端预演的最差分类 |
 | G13 | B12「接受差异」处置入口：选中单位各端基线推进为当前值 | ✅ 2026-10-27 `SyncService.KeepDifference`（UI：待处理取值卡「保留差异」）；原状：冲突只能选定变体推平，无法保留差异 |
 
 ---

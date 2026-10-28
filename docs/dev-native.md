@@ -89,8 +89,24 @@ realm_get_last_error  realm_release
 - 动态查询/列表面（M2 写路径需要）：`realm_results_*`（get/filter/sort/find/delete_all 等）、`realm_list_*`（insert/set/get_list/insert_embedded 等）全套；
 - 注意 API 命名：**v20 无 `realm_open_local`**（统一为 `realm_open`）、事务取消是 **`realm_rollback`**（无 `realm_cancel_transaction`）、类查找是 `realm_find_class`/`realm_find_property`（无 `realm_find`）——绑定层命名以此为准，勿按旧版 SDK 想当然。
 
-## 6. 其他平台（待 CI 扩展，本仓库暂不实现）
+## 6. 其他平台（CI 已实现）
 
-- **windows-x64** → `build/native/windows-x64/realm.dll`：需 MSVC 工具链（Guix 无），规划走 GitHub Actions Windows runner；
-- **macos-universal** → `build/native/macos-universal/librealm-ffi.dylib`：`-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`，需 macOS 构建机（成本待定项见 design.md §8.3 T9）；
-- 三平台目标与产物目录形态见 design.md §1.3 P-1、CI 流水线规划见 §3.1 `tools/build-librealm`；两平台就位前，M1 的「linux-amd64 实机 Dlopen 验证」先行。
+跨平台构建入口是 `scripts/build-librealm.sh <target>`（GitHub Actions
+`release.yml` 三 runner 调用；产物同时落 `build/native/<target>/` 与
+`resources/<平台目录>/`，后者随 `mygo build` 进应用包）：
+
+- **windows-x64** → `realm-ffi.dll`：windows-latest + MSVC（VS2022 生成器）；
+  VC++ 运行库 dll 随包分发（/MD 动态链接）；
+- **macos-universal** → `librealm-ffi.dylib`：macos-latest +
+  `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`，`resources/darwin/` 对所有
+  darwin 目标生效；
+- **linux-amd64** → `librealm-ffi.so`：ubuntu-latest + gcc-13（本地开发仍
+  走 `fetch-librealm.sh` 的 guix 构建，产物同样同步进 resources/）。
+
+产物目录形态对齐 design.md §1.3 P-1（每平台产物目录 = Go 二进制 +
+realm-core 共享库 + 资源）。realmc 运行时解析顺序：
+`LZSYNC_LIBREALM` > 打包资源目录（exe 同目录 / Contents/Resources）>
+仓库 `build/native/` 默认路径 > cwd 相对路径。
+
+realm 版本升档 = 两脚本同步改 `REALM_VERSION`/`TARBALL_SHA256` 并重建；
+CI 侧 actions/cache 键含版本号自动隔离。

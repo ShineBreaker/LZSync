@@ -1,0 +1,197 @@
+# release.yml — 推送 v* 标签即三平台构建并自动发布 GitHub Release。
+#
+# 流水线：
+#   version-check  校验标签与 mygo.config.ts version 一致（tag 触发时）
+#   linux          ubuntu-latest：realm-core(gcc-13) → mygo build linux/amd64
+#                  → .deb + .tar.gz + install.sh，再装 .rpm / .AppImage
+#   windows        windows-latest：realm-core(MSVC) → mygo build windows/amd64
+#                  → NSIS Setup.exe（mygo 自带下载）+ 便携 zip
+#   macos          macos-latest：realm-core(universal) → mygo build
+#                  darwin/universal → ad-hoc 签名 .app + .dmg
+#   release        汇总三端产物，CHANGELOG.md 摘该版本节为 notes，gh release
+#
+# realm-core 版本钉死 20.1.1（design.md §1.1 S5a），构建产物经
+# actions/cache 跨 run 复用——仅首次/版本升档时真编译（约 15-30 min）。
+#
+# 未签名说明：Windows 无代码签名证书、macOS ad-hoc 签名无公证——用户首启
+# 需过 SmartScreen / Gatekeeper（右键打开）。配证书后可在 mygo.config.ts
+# 的 windows.certificate / macos.signingIdentity + notarize 接通。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # 手动触发只构建产物，不发 Release（release job 有 if 守卫）
+
+permissions:
+  contents: write
+
+env:
+  REALM_VERSION: "20.1.1"
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          version=$(sed -n 's/.*version: *"\([^"]*\)".*/\1/p' mygo.config.ts | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::标签 $GITHUB_REF_NAME 与 mygo.config.ts version=$version 不一致——发版前两处同步修改"
+            exit 1
+          fi
+
+  linux:
+    needs: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: 打包工具链（rpmbuild、realm-core 编译链）
+        run: sudo apt-get update && sudo apt-get install -y rpm cmake ninja-build gcc-13 g++-13
+      - name: 缓存 realm-core 产物
+        uses: actions/cache@v4
+        with:
+          path: build/native
+          key: librealm-${{ env.REALM_VERSION }}-linux-amd64-${{ hashFiles('scripts/build-librealm.sh') }}
+      - name: 构建 librealm-ffi.so 并装入 resources/linux-amd64/
+        run: bash scripts/build-librealm.sh linux-amd64
+      - name: 门禁（vet + 全量测试；realmc 测试需要上面的 .so）
+        run: go vet ./... && go test ./... -count=1
+      - name: mygo build（linux/amd64：deb + tar.gz + install.sh）
+        run: bunx mygo build -platform linux/amd64
+      - name: 装配 RPM
+        run: bash scripts/package-rpm.sh
+      - name: 装配 AppImage
+        run: bash scripts/package-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: |
+            build/linux-amd64/*.deb
+            build/linux-amd64/*.rpm
+            build/linux-amd64/*.AppImage
+            build/linux-amd64/*.tar.gz
+            build/linux-amd64/install.sh
+          if-no-files-found: error
+
+  windows:
+    needs: version-check
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: 缓存 realm-core 产物
+        uses: actions/cache@v4
+        with:
+          path: build/native
+          key: librealm-${{ env.REALM_VERSION }}-windows-x64-${{ hashFiles('scripts/build-librealm.sh') }}
+      - name: 构建 realm-ffi.dll（MSVC）并装入 resources/windows-amd64/
+        run: bash scripts/build-librealm.sh windows-x64
+      - name: 随附 VC++ 运行库（realm-ffi.dll 为 /MD 动态链接）
+        run: |
+          redist=$(find "/c/Program Files/Microsoft Visual Studio" -type d -name "Microsoft.VC143.CRT" -path "*x64*" 2>/dev/null | head -1)
+          if [ -n "$redist" ]; then
+            cp "$redist"/*.dll resources/windows-amd64/ && ls resources/windows-amd64/
+          else
+            echo "::warning::未找到 VC143 CRT redist 目录，跳过随附运行库"
+          fi
+      - name: mygo build（windows/amd64：exe + NSIS 安装程序）
+        run: bunx mygo build -platform windows/amd64
+      - name: 便携 zip（免安装包）
+        shell: pwsh
+        run: |
+          $v = "${{ needs.version-check.outputs.version }}"
+          Get-ChildItem build/windows-amd64 -File |
+            Where-Object { $_.Name -notlike "*Setup*" } |
+            Compress-Archive -DestinationPath "build/windows-amd64/LZSync-$v-windows-amd64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            build/windows-amd64/*.exe
+            build/windows-amd64/*.zip
+          if-no-files-found: error
+
+  macos:
+    needs: version-check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: 缓存 realm-core 产物
+        uses: actions/cache@v4
+        with:
+          path: build/native
+          key: librealm-${{ env.REALM_VERSION }}-macos-universal-${{ hashFiles('scripts/build-librealm.sh') }}
+      - name: 构建 librealm-ffi.dylib（universal）并装入 resources/darwin/
+        run: |
+          command -v cmake >/dev/null || brew install cmake
+          bash scripts/build-librealm.sh macos-universal
+      - name: mygo build（darwin/universal：ad-hoc 签名 .app + .dmg）
+        run: bunx mygo build -platform darwin/universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: build/darwin-universal/*.dmg
+          if-no-files-found: error
+
+  release:
+    needs: [version-check, linux, windows, macos]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: 汇总产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: 从 CHANGELOG.md 摘取本版本发布说明
+        run: |
+          v="${{ needs.version-check.outputs.version }}"
+          awk -v ver="$v" '
+            /^## / {
+              if (in_sec) exit
+              line=$0; sub(/^## \[?/, "", line); sub(/\].*/, "", line)
+              split(line, f, /[ \t]/); if (f[1] == ver) in_sec=1; next
+            }
+            in_sec { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md 缺少 ## [$v] 或 ## $v 小节"
+            exit 1
+          fi
+          cat release-notes.md
+      - name: 创建 GitHub Release
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "LZSync ${{ github.ref_name }}" \
+            --notes-file release-notes.md \
+            dist/*

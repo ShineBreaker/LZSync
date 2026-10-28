@@ -2,8 +2,9 @@ import { defineConfig } from "mygo-cli";
 
 export default defineConfig({
   name: "LZSync",
-  identifier: "com.example.lzsync",
-  version: "0.1.0",
+  identifier: "io.github.shinebreaker.lzsync",
+  version: "1.0.0",
+  copyright: "Copyright © 2026 ShineBreaker",
   // `mygo dev` runs devCommand and loads devUrl; `mygo build` runs
   // buildCommand and embeds frontendDist into the app.
   devUrl: "http://localhost:5173",
@@ -14,4 +15,14 @@ export default defineConfig({
   frontendDist: "dist",
   bindings: "src/mygo.ts",
   out: "build",
+  linux: {
+    comment: "同步多个 osu!lazer fork 的数据：曲库、收藏夹、皮肤、成绩",
+    categories: ["Utility", "Game"],
+    // deb 在 /usr/bin 建 lzsync 链接、install.sh 在 ~/.local/bin 建链接
+    command: "lzsync",
+    maintainer: "ShineBreaker",
+  },
+  macos: {
+    dmgTitle: "LZSync",
+  },
 });

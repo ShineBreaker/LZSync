@@ -21,7 +21,8 @@ LZSync：管理同一台机器上多个 osu!lazer fork（官方 lazer、DeltaLaz
 | `docs/research/` | 四端差异的唯一事实源（自包含，reference/ 已删除） |
 | `GLOSSARY.md` / `docs/adr/` | 领域术语表与架构决策记录 |
 | `justfile` / `manifest.scm` / `lzsync.scm` | 开发指令封装 / guix 开发环境（direnv use guix 加载）/ guix 打包定义（`guix build -f lzsync.scm`） |
-| `scripts/fetch-librealm.sh` | native 库可复现获取（钉死 realm-core 20.1.1） |
+| `scripts/fetch-librealm.sh` / `build-librealm.sh` | native 库可复现获取（钉死 realm-core 20.1.1）/ CI 三平台构建 |
+| `.github/workflows/release.yml` | 推 `v*` tag 即发版：deb/rpm/AppImage/exe/dmg（CHANGELOG.md 摘 notes） |
 
 ## 常用命令（justfile，门禁）
 

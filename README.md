@@ -65,6 +65,18 @@ flowchart LR
 3. **Compare.** Open **Compare**, pick **Deploy Preview: Hub to Target** or **Fork Diff: Source vs Target**, inspect changes by category, and click **Create Plan**.
 4. **Deploy.** Return to **Sync**, review the pre-flight check, and click **Deploy**.
 
+## Download
+
+Prebuilt packages are published on the [Releases](https://github.com/ShineBreaker/LZSync/releases) page:
+
+| Platform | Packages |
+|---|---|
+| **Windows** (x64) | `LZSync Setup *.exe` installer, portable `.zip` |
+| **macOS** (Apple Silicon + Intel) | universal `.dmg` (ad-hoc signed: right-click → Open on first launch) |
+| **Linux** (x86_64) | `.deb`, `.rpm`, `.AppImage`, `.tar.gz` + `install.sh` |
+
+Linux packages depend on GTK 3 and WebKitGTK 4.1/4.0 (`libwebkit2gtk-4.1-0` on Debian/Ubuntu, `webkit2gtk4.1` on Fedora). The `.deb` and `.rpm` declare them; `.AppImage` and `install.sh` assume them present.
+
 ## Quick start & build
 
 LZSync uses a Go backend with `purego` FFI bindings to the `realm-core` C API and a TypeScript + Vite desktop UI built on [MyGo](https://github.com/egoist/mygo).
