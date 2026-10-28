@@ -154,14 +154,14 @@ windows-x64)
 	cmake --build "$BUILD" --target RealmFFI --config Release
 	;;
 macos-universal)
-	# vendored s2geometry 特化 std::is_pod——新版 libc++（Xcode 16+）将其
-	# 收进 removed type traits，特化即报错；两个 ENABLE 宏按 LLVM 版本各
-	# 覆盖一段，未用到的忽略
+	# vendored s2geometry 特化 std::is_pod——新版 libc++（Xcode 16+）对
+	# 该 trait 加了「禁止特化」的默认报错诊断（-Winvalid-specialization，
+	# ENABLE_REMOVED_TYPE_TRAITS 宏无法解除），用 -Wno- 降级为静默即可编译
 	cmake -S "$SRC" -B "$BUILD" \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
 		-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
-		"-DCMAKE_CXX_FLAGS=-D_LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS -D_LIBCPP_ENABLE_CXX26_REMOVED_TYPE_TRAITS" \
+		"-DCMAKE_CXX_FLAGS=-Wno-invalid-specialization -D_LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS -D_LIBCPP_ENABLE_CXX26_REMOVED_TYPE_TRAITS" \
 		-DREALM_ENABLE_SYNC=OFF \
 		-DREALM_NO_TESTS=ON
 	cmake --build "$BUILD" --target RealmFFI --parallel "$(sysctl -n hw.ncpu)"
