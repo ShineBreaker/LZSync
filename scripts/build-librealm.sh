@@ -111,6 +111,24 @@ else
 	tar -xzf "$TARBALL" -C "$WORKDIR"
 fi
 
+# GitHub 源码 tarball 不含 submodule 内容。Windows 无 OpenSSL 时 realm 回退
+# 内置 sha-1/sha-2（gitlink 钉定 commit 如下），缺文件会报
+# "Cannot find source file: ../external/sha-2/sha224.cpp"；test/catch 用不上
+# （REALM_NO_TESTS=ON）。commit 经 git ls-tree v20.1.1 src/external 确认。
+fetch_sub() {
+	# $1=GitHub repo（org/name）$2=commit sha $3=目标目录
+	if [ -n "$(ls -A "$3" 2>/dev/null)" ]; then
+		echo "[skip] submodule $1 已就位"
+		return
+	fi
+	mkdir -p "$3"
+	echo "[fetch] submodule $1@$2"
+	curl -fSL --retry 3 "https://github.com/$1/archive/$2.tar.gz" |
+		tar -xz --strip-components=1 -C "$3"
+}
+fetch_sub clibs/sha1 d9ae30f34095107ece9dceb224839f0dc2f9c1c7 "$SRC/src/external/sha-1"
+fetch_sub kalven/sha-2 0e9aebf34101c6aa89355fd76ac9cd886735dee1 "$SRC/src/external/sha-2"
+
 # ── 构建 ────────────────────────────────────────────────────────
 case "$TARGET" in
 linux-amd64)
@@ -136,10 +154,14 @@ windows-x64)
 	cmake --build "$BUILD" --target RealmFFI --config Release
 	;;
 macos-universal)
+	# vendored s2geometry 特化 std::is_pod——新版 libc++（Xcode 16+）将其
+	# 收进 removed type traits，特化即报错；两个 ENABLE 宏按 LLVM 版本各
+	# 覆盖一段，未用到的忽略
 	cmake -S "$SRC" -B "$BUILD" \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
 		-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+		"-DCMAKE_CXX_FLAGS=-D_LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS -D_LIBCPP_ENABLE_CXX26_REMOVED_TYPE_TRAITS" \
 		-DREALM_ENABLE_SYNC=OFF \
 		-DREALM_NO_TESTS=ON
 	cmake --build "$BUILD" --target RealmFFI --parallel "$(sysctl -n hw.ncpu)"
