@@ -1,13 +1,16 @@
 # lzsync.spec — LZSync 的 RPM 打包定义（Fedora/RHEL 系）。
 # 由 scripts/package-rpm.sh 驱动：payload 目录已按安装布局装配在
-# %{lzsync_payload}（默认 %{_builddir}/lzsync-payload），本 spec 只做
-# 复制与声明。版本经 rpmbuild --define "lzsync_version X.Y.Z" 注入。
+# lzsync_payload（默认 _builddir/lzsync-payload），本 spec 只做复制
+# 与声明。版本经 rpmbuild --define "lzsync_version X.Y.Z" 注入。
 #
 # 布局与 mygo deb 对齐：应用在 /opt/lzsync/（可执行文件 + realm-core
 # 共享库 + 资源同目录，realmc 打包路径解析命中），/usr/bin 建链接，
 # desktop 入口与 hicolor 图标进 share/。
 
+# 默认值仅在未 --define 时生效（spec 内 global 定义会覆盖命令行）
+%if ! %{defined lzsync_version}
 %global lzsync_version 0.0.0
+%endif
 %global lzsync_release 1%{?dist}
 %global lzsync_payload %{_builddir}/lzsync-payload
 
@@ -54,5 +57,5 @@ command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f /u
 /usr/share/icons/hicolor/1024x1024/apps/lzsync.png
 
 %changelog
-* Tue Oct 28 2026 ShineBreaker - 1.0.0-1
+* Wed Oct 28 2026 ShineBreaker - 1.0.0-1
 - 首个发布版本

@@ -18,8 +18,9 @@
 # 版本钉死 20.1.1 与 scripts/fetch-librealm.sh 同源（design.md §1.1 S5a：
 # 对齐四端 Realm NuGet 20.1.0 / file format v24），构建参数与已实测的
 # linux 参数一致（REALM_NO_TESTS=ON、sync 关闭）。Windows 需 MSVC
-# （GitHub windows-latest 自带 VS2022），macOS 需 Xcode CLT（macos-latest
-# 自带）；Linux 优先用 gcc-13/g++-13（与已验证产物同代，缺省回退 cc/c++）。
+# （windows-latest 自带 VS，CMake 自动选最高版本生成器），macOS 需 Xcode
+# CLT（macos-latest 自带）；Linux 优先用 gcc-13/g++-13（与已验证产物
+# 同代，缺省回退 cc/c++）。
 #
 # 本地开发只构建 linux-amd64 请走 fetch-librealm.sh（guix 环境）。
 
@@ -84,26 +85,29 @@ if [ "${FORCE:-}" != "1" ] && [ -f "$OUT_LIB" ] && [ "$(stat -c%s "$OUT_LIB" 2>/
 fi
 
 # ── 获取源码 ────────────────────────────────────────────────────
-# macOS 无 sha256sum，用 shasum -a 256 兜底（GNU coreutils 命名不同）
-sha256check() {
-	if command -v sha256sum >/dev/null 2>&1; then
-		echo "$1  $2" | sha256sum -c ${3:-}
-	else
-		echo "$1  $2" | shasum -a 256 -c ${3:-}
-	fi
+# 校验用「算哈希 + 字符串比较」，不走 sha256sum -c：macOS 自带的是 BSD 变体
+# （usage: sha256sum [-bctwz]，无 -c/--status），git-bash 的才是 GNU coreutils。
+sha256of() {
+	case "$(uname -s)" in
+	Darwin) shasum -a 256 "$1" | cut -d' ' -f1 ;;
+	*) sha256sum "$1" | cut -d' ' -f1 ;;
+	esac
 }
 
 mkdir -p "$WORKDIR"
 if [ -f "$SRC/src/realm.h" ]; then
 	echo "[skip] 源码已存在: $SRC"
 else
-	if [ -f "$TARBALL" ] && sha256check "$TARBALL_SHA256" "$TARBALL" --status; then
+	if [ -f "$TARBALL" ] && [ "$(sha256of "$TARBALL")" = "$TARBALL_SHA256" ]; then
 		echo "[skip] tarball 已存在且校验通过"
 	else
 		echo "[fetch] 下载 $TARBALL_URL"
 		curl -fSL --retry 3 -o "$TARBALL" "$TARBALL_URL"
 	fi
-	sha256check "$TARBALL_SHA256" "$TARBALL"
+	[ "$(sha256of "$TARBALL")" = "$TARBALL_SHA256" ] || {
+		echo "[fail] tarball sha256 不符: $(sha256of "$TARBALL")" >&2
+		exit 1
+	}
 	tar -xzf "$TARBALL" -C "$WORKDIR"
 fi
 
@@ -124,7 +128,9 @@ linux-amd64)
 	cmake --build "$BUILD" --target RealmFFI --parallel "$(nproc)"
 	;;
 windows-x64)
-	cmake -S "$SRC" -B "$BUILD" -G "Visual Studio 17 2022" -A x64 \
+	# 不钉死 -G：windows-latest 已迁 windows-2025/VS2026，无 -G 时
+	# CMake 经 vswhere 自动选最高版本 VS；多配置布局（Release/）不变。
+	cmake -S "$SRC" -B "$BUILD" -A x64 \
 		-DREALM_ENABLE_SYNC=OFF \
 		-DREALM_NO_TESTS=ON
 	cmake --build "$BUILD" --target RealmFFI --config Release
@@ -148,11 +154,21 @@ BUILT_LIB="$BUILD/src/realm/object-store/c_api/$LIB_SUBPATH"
 
 # ── 自检 ────────────────────────────────────────────────────────
 case "$LIB_NAME" in
-*.so | *.dylib)
-	# 导出符号自检（勿用 grep -q：SIGPIPE 在 pipefail 下假报缺失，见
-	# fetch-librealm.sh 注意 2）
+*.so)
+	# ELF：nm -D 读动态符号（勿用 grep -q：SIGPIPE 在 pipefail 下假报缺失）
 	for sym in realm_open realm_config_new realm_commit realm_get_last_error realm_release; do
 		nm -D "$BUILT_LIB" 2>/dev/null | grep " T ${sym}$" >/dev/null ||
+			{
+				echo "[fail] 缺失导出符号: $sym" >&2
+				exit 1
+			}
+	done
+	echo "[check] 导出符号自检通过"
+	;;
+*.dylib)
+	# Mach-O：nm -gU 列出全局定义符号，C 符号带 _ 前缀
+	for sym in realm_open realm_config_new realm_commit realm_get_last_error realm_release; do
+		nm -gU "$BUILT_LIB" 2>/dev/null | grep " T _${sym}$" >/dev/null ||
 			{
 				echo "[fail] 缺失导出符号: $sym" >&2
 				exit 1
