@@ -156,12 +156,14 @@ windows-x64)
 macos-universal)
 	# vendored s2geometry 特化 std::is_pod——新版 libc++（Xcode 16+）对
 	# 该 trait 加了「禁止特化」的默认报错诊断（-Winvalid-specialization，
-	# ENABLE_REMOVED_TYPE_TRAITS 宏无法解除），用 -Wno- 降级为静默即可编译
+	# ENABLE_REMOVED_TYPE_TRAITS 宏无法解除），用 -Wno- 降级为静默即可编译；
+	# 另新版 libc++ 收紧传递包含（cli_args.cpp 用 std::strtol 未引 <cstdlib>
+	# 直接报错），-include cstdlib 对全 TU 兜底此类缺失
 	cmake -S "$SRC" -B "$BUILD" \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
 		-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
-		"-DCMAKE_CXX_FLAGS=-Wno-invalid-specialization -D_LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS -D_LIBCPP_ENABLE_CXX26_REMOVED_TYPE_TRAITS" \
+		"-DCMAKE_CXX_FLAGS=-Wno-invalid-specialization -include cstdlib -D_LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS -D_LIBCPP_ENABLE_CXX26_REMOVED_TYPE_TRAITS" \
 		-DREALM_ENABLE_SYNC=OFF \
 		-DREALM_NO_TESTS=ON
 	cmake --build "$BUILD" --target RealmFFI --parallel "$(sysctl -n hw.ncpu)"
