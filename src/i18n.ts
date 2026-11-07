@@ -101,6 +101,8 @@ const zh: Record<string, string> = {
   "toast.restored": "已还原",
   "toast.assigned": "已识别",
   "toast.scanDone": "扫描完成",
+  "toast.scanNone": "未发现客户端，可 + → 选择文件夹… 手动添加",
+  "toast.scanFound": "发现 {0} 个客户端",
   "toast.registered": "已注册 {0}",
 };
 
@@ -192,6 +194,8 @@ const en: Record<string, string> = {
   "toast.restored": "Restored",
   "toast.assigned": "Assigned",
   "toast.scanDone": "Scan done",
+  "toast.scanNone": "No clients found — add one via + → Choose folder…",
+  "toast.scanFound": "Found {0} clients",
   "toast.registered": "Registered {0}",
 };
 

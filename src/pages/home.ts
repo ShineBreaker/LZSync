@@ -79,6 +79,19 @@ export function renderHome(root: HTMLElement): () => void {
 
   // ---------- 数据装载 ----------
 
+  // scanWithFeedback 扫描并按结果数量反馈：0 结果弹引导（此前静默无
+  // 操作，干净环境下用户无法分辨「没找到」与「按钮没反应」），命中则
+  // 告知数量，最后重载。
+  async function scanWithFeedback(): Promise<void> {
+    const found = await LibraryService.scan();
+    if (found.length === 0) {
+      toast("info", t("toast.scanNone"));
+    } else {
+      toast("ok", t("toast.scanFound", found.length));
+    }
+    await loadAll();
+  }
+
   async function loadAll(): Promise<void> {
     try {
       const settings = await SettingsService.get();
@@ -93,7 +106,7 @@ export function renderHome(root: HTMLElement): () => void {
       void loadInbox();
       if (cards.length === 0 && !scanTried) {
         scanTried = true;
-        void LibraryService.scan().then(loadAll).catch(() => undefined);
+        void scanWithFeedback().catch((e) => toast("err", errText(e)));
       }
     } catch (e) {
       toast("err", errText(e));
@@ -244,8 +257,7 @@ export function renderHome(root: HTMLElement): () => void {
         menuItem(t("client.scan"), "scan", async () => {
           closePopover();
           try {
-            await LibraryService.scan();
-            await loadAll();
+            await scanWithFeedback();
           } catch (e) {
             toast("err", errText(e));
           }
