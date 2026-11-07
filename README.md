@@ -52,6 +52,16 @@ LZSync connects all your installed osu! clients to a single local hub. Download 
 3. **Decide only when needed.** Unambiguous additions and edits flow on their own. When two clients edit the same setting or a beatmap has a newer version, a card appears under **Pending** so you can pick a client's version, update to the new beatmap version, or click **Keep difference**.
 4. **Browse your unified library.** Open Beatmap Sets, Collections, Skins, or Scores in the sidebar to search across every client at once. Colored dots on each row show which clients have the item, which will receive it on the next sync, and where conflicts exist.
 
+## Screenshots
+
+**Sync console.** Every connected client on one screen: each client pulls from and writes to a single local hub, with per-category switches and one Sync button.
+
+![LZSync sync console](docs/screenshots/sync-console.png)
+
+**Settings.** Language, baseline fork, storage paths, link mode, and the game process guard that holds writes while a client is still running.
+
+![LZSync settings](docs/screenshots/settings.png)
+
 ## Download
 
 Get the latest prebuilt release for your platform on the [GitHub Releases](https://github.com/ShineBreaker/LZSync/releases) page:

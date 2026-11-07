@@ -1,2 +1,6 @@
 # CI 脚本须在 windows runner 的 git-bash 下可执行：钉死 LF，防 autocrlf 换 CRLF
 *.sh text eol=lf
+
+# README 截图等位图素材走 Git LFS，避免仓库体积膨胀
+*.png filter=lfs diff=lfs merge=lfs -text
+*.jpg filter=lfs diff=lfs merge=lfs -text
