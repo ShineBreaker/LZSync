@@ -104,7 +104,7 @@ LZSYNC_MOCK=1 just dev
 ## Further reading
 
 - [Product behavior model and system design](./design.md)
-- [UI and interaction specification](./DESIGN.md)
+- [UI and interaction specification](./ui-spec.md)
 - [Native `librealm-ffi` build notes](./dev-native.md)
 - [Architecture Decision Records](./adr/)
 - [Client fork research notes](./research/)

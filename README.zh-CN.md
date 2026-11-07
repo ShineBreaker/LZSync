@@ -80,7 +80,7 @@ LZSync 将本机所有 osu! 客户端连接到同一个本地资料库。在任�
 
 - [技术与构建说明](./docs/technical.zh-CN.md)
 - [产品行为模型与同步体系设计](./docs/design.md)
-- [界面与交互设计准则](./docs/DESIGN.md)
+- [界面与交互设计准则](./docs/ui-spec.md)
 - [Native 动态库构建手册](./docs/dev-native.md)
 - [架构决策记录](./docs/adr/)
 - [各客户端差异调研笔记](./docs/research/)

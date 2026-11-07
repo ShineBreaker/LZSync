@@ -1,4 +1,4 @@
-// 资料库页（DESIGN.md §4）：全量库行（canonical ∪ 差异键），一次
+// 资料库页（ui-spec.md §4）：全量库行（canonical ∪ 差异键），一次
 // CompareService.library(kind)。搜索/分段过滤/懒加载 80 行一批；
 // 覆盖点悬浮详情；行内决策卡（decide.ts 共享组件）；勾演进暂存表。
 

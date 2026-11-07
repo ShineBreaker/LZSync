@@ -1,4 +1,4 @@
-// 共享态（DESIGN.md §5）：暂存处置表 + 一轮同步状态机 + 未识别客户端
+// 共享态（ui-spec.md §5）：暂存处置表 + 一轮同步状态机 + 未识别客户端
 // 列表。state 模块是各页之间的唯一共享面——页切换重建 DOM，暂存与
 // 运行态不丢；订阅者切页时必须退订（页面返回 unsubscribe）。
 
@@ -269,7 +269,7 @@ function afterDone(source: "all" | "selection"): void {
   }, 1800);
 }
 
-// ---------- 连线进度分派（ev.ForkID，DESIGN.md §3.2） ----------
+// ---------- 连线进度分派（ev.ForkID，ui-spec.md §3.2） ----------
 
 // 阶段 → 轨道比例区间：收集三段 / 写入五段（进度单调不减）。
 const PULL_STAGES: Record<string, [number, number]> = {

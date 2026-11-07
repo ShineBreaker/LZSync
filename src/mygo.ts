@@ -228,7 +228,7 @@ export interface LibraryCard {
 }
 
 /**
- * LibraryItem 资料库页一行（DESIGN.md §4.2）：库内全量条目 ∪ 各端预演/
+ * LibraryItem 资料库页一行（ui-spec.md §4.2）：库内全量条目 ∪ 各端预演/
  * 删除组键，逐端覆盖态。Forks 每注册端一条、按 ForkID 排序。
  */
 export interface LibraryItem {
@@ -294,7 +294,7 @@ export interface PlanItem {
 
 /**
  * ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。
- * ForkID 是连线进度的分派键（同步台按端填轨道，DESIGN.md §3.2）。
+ * ForkID 是连线进度的分派键（同步台按端填轨道，ui-spec.md §3.2）。
  */
 export interface ProgressEvent {
   /** "collect" | "deploy" | "run" */
@@ -436,7 +436,8 @@ export type VersionSource = string;
 export const LibraryService = {
   /**
    * AssignFork 用户指认 fork 身份（绝不猜，§6.1）；指认后按 Profile 解码版本。
-   * path 与 Register 同样接受数据目录或库文件。
+   * path 与 Register 同样接受数据目录或库文件。stable 指认要求目录确含
+   * osu!.db（目录特征即身份，stable-legacy §0）。
    */
   assignFork(path: string, forkID: string): Promise<LibraryRef> {
     return call("LibraryService.AssignFork", path, forkID);
@@ -448,7 +449,8 @@ export const LibraryService = {
   /**
    * Register 手动注册：path 可给数据目录或库文件本身；识别失败返回 ForkID
    * 为空串的 ref（携带解析后的 RealmPath 与原始版本供 UI 指认，§6.1）；
-   * 只有路径不可访问等硬错误走 error。
+   * 只有路径不可访问等硬错误走 error。stable 安装目录（含 osu!.db）直接
+   * 命中第五端身份（stable-legacy §0），先于 realm 定位链。
    */
   register(path: string): Promise<LibraryRef> {
     return call("LibraryService.Register", path);
@@ -490,7 +492,7 @@ export const CompareService = {
     return call("CompareService.CompareForks", source, target);
   },
   /**
-   * CoverImage 谱面集封面图（DESIGN.md：bg/background 优先，否则 Files[0]
+   * CoverImage 谱面集封面图（ui-spec.md：bg/background 优先，否则 Files[0]
    * 中的第一张图片；filestore 拿字节、转 data URL 喂前端 <img>）。找不到或
    * 仓里没这份哈希就返回空串（行降级为纯色块，不报错）。
    */

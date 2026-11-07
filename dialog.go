@@ -1,4 +1,4 @@
-// DialogService 系统文件对话框（DESIGN.md §9：选择文件夹注册客户端、
+// DialogService 系统文件对话框（ui-spec.md §9：选择文件夹注册客户端、
 // 还原…选择备份文件）。挂在主窗口下；取消返回空串不报错。
 package main
 

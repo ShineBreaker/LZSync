@@ -104,7 +104,7 @@ LZSYNC_MOCK=1 just dev
 ## 延伸阅读
 
 - [产品行为模型与同步体系设计](./design.md)
-- [界面与交互设计准则](./DESIGN.md)
+- [界面与交互设计准则](./ui-spec.md)
 - [Native 动态库构建手册](./dev-native.md)
 - [架构决策记录](./adr/)
 - [各客户端差异调研笔记](./research/)

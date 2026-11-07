@@ -31,7 +31,7 @@ var ErrBusy = errors.New("appsvc: 已有同步任务在执行，请等待完成�
 var ErrNoPlan = errors.New("appsvc: 尚无投放计划，请先在对比预览页勾选并生成计划")
 
 // ProgressEvent 长任务进度事件（M-2：同步执行不阻塞 UI 线程）。
-// ForkID 是连线进度的分派键（同步台按端填轨道，DESIGN.md §3.2）。
+// ForkID 是连线进度的分派键（同步台按端填轨道，ui-spec.md §3.2）。
 type ProgressEvent struct {
 	Service string // "collect" | "deploy" | "run"
 	Stage   string // collect/deploy 的 Stage 字符串值
@@ -158,7 +158,7 @@ type ForkPresenceEntry struct {
 	CollectedAt int64 // Unix 毫秒
 }
 
-// LibraryItem 资料库页一行（DESIGN.md §4.2）：库内全量条目 ∪ 各端预演/
+// LibraryItem 资料库页一行（ui-spec.md §4.2）：库内全量条目 ∪ 各端预演/
 // 删除组键，逐端覆盖态。Forks 每注册端一条、按 ForkID 排序。
 type LibraryItem struct {
 	Kind        hub.EntityKind
@@ -236,7 +236,7 @@ type CompareService interface {
 	// ForkPresence 某 kind 全部 fork×content_key 的 presence 快照。
 	// 数据浏览页 x/y 聚合（「几端持有此项」）的数据源。
 	ForkPresence(kind hub.EntityKind) ([]ForkPresenceEntry, error)
-	// CoverImage 谱面集封面图 data URL（DESIGN.md §数据行：bg/background
+	// CoverImage 谱面集封面图 data URL（ui-spec.md §数据行：bg/background
 	// 优先，否则第一张图；无图返回空串）。data:image/*;base64,... 形态，
 	// 前端直接喂 <img src> 或 background-image。
 	CoverImage(contentKey string) (string, error)
@@ -249,7 +249,7 @@ type CompareService interface {
 	// HubCounts 库内各类条目数（侧栏与库卡板块胶囊）：键 = "beatmap_set"|
 	// "collection"|"skin"|"score"；beatmap_set 只计当前版本（链尾）。
 	HubCounts() (map[string]int, error)
-	// Library 资料库页行集（DESIGN.md §4）：库内全量条目 ∪ 各端预演/删除
+	// Library 资料库页行集（ui-spec.md §4）：库内全量条目 ∪ 各端预演/删除
 	// 组键，逐端覆盖态 + 行级 worst-state。仅四数据类（beatmap_set/
 	// collection/skin/score）。
 	Library(kind hub.EntityKind) ([]LibraryItem, error)

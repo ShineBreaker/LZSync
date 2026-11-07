@@ -1,6 +1,6 @@
 package appsvc
 
-// buildLibrary 纯函数单测（DESIGN.md §4.2）：覆盖态规则 a–g 逐条、
+// buildLibrary 纯函数单测（ui-spec.md §4.2）：覆盖态规则 a–g 逐条、
 // 行级 worst-state 排序（conflict > confirm > incoming > ok）、Deleted/
 // DeletedAt 累计与 Summary 排序。real/mock 共用同一推导——这里直测规则面。
 

@@ -80,7 +80,7 @@ Architecture details, sync decision rules, database safety invariants, and sourc
 
 - [Technical & build guide](./docs/technical.md)
 - [Product behavior model & system design](./docs/design.md)
-- [UI & interaction specification](./docs/DESIGN.md)
+- [UI & interaction specification](./docs/ui-spec.md)
 - [Native `librealm-ffi` build guide](./docs/dev-native.md)
 - [Architecture Decision Records](./docs/adr/)
 - [Client fork research notes](./docs/research/)

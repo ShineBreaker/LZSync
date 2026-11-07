@@ -1,4 +1,4 @@
-// 双语文案（DESIGN.md §7）：页面只放允许词表内的短词，无解释句。
+// 双语文案（ui-spec.md §7）：页面只放允许词表内的短词，无解释句。
 // t(key, ...args) 支持 {0}{1} 占位；trBackend 直译后端返回词。
 
 export type Lang = "zh" | "en";

@@ -1,4 +1,4 @@
-// 通用 UI 助手（DESIGN.md §9）：DOM 构造、内联 SVG 图标、悬浮层、
+// 通用 UI 助手（ui-spec.md §9）：DOM 构造、内联 SVG 图标、悬浮层、
 // 右下角瞬态 toast、fork 色点。错误只走 toast/popover——页面上不放
 // 解释句（§1）。
 
@@ -37,7 +37,7 @@ export function errText(e: unknown): string {
   return String(e);
 }
 
-// ---------- 图标（DESIGN.md §6.4 内联 SVG 几何图标） ----------
+// ---------- 图标（ui-spec.md §6.4 内联 SVG 几何图标） ----------
 
 const ICONS: Record<string, string> = {
   chevron: `<svg viewBox="0 0 12 12" width="12" height="12"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`,
@@ -56,7 +56,7 @@ export function icon(name: keyof typeof ICONS, cls = ""): HTMLElement {
   return span;
 }
 
-// ---------- fork 色彩（DESIGN.md §6.2） ----------
+// ---------- fork 色彩（ui-spec.md §6.2） ----------
 
 export const FORK_COLORS: Record<string, string> = {
   lazer: "#66CCFF",

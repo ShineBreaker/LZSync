@@ -617,7 +617,7 @@ func (s *realCompare) ForkPresence(kind hub.EntityKind) ([]ForkPresenceEntry, er
 	return out, nil
 }
 
-// CoverImage 谱面集封面图（DESIGN.md：bg/background 优先，否则 Files[0]
+// CoverImage 谱面集封面图（ui-spec.md：bg/background 优先，否则 Files[0]
 // 中的第一张图片；filestore 拿字节、转 data URL 喂前端 <img>）。找不到或
 // 仓里没这份哈希就返回空串（行降级为纯色块，不报错）。
 func (s *realCompare) CoverImage(contentKey string) (string, error) {
