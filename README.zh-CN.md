@@ -1,114 +1,80 @@
+<div align="center">
+
+<img src="./docs/design-mockup/icon-master.svg" width="88" height="88" alt="LZSync" />
+
 # LZSync
+
+**一台设备，五个 osu! 客户端，共用同一套曲库与配置。**
+
+[![Release](https://img.shields.io/github/v/release/ShineBreaker/LZSync?label=Release&color=7C6CF0)](https://github.com/ShineBreaker/LZSync/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/ShineBreaker/LZSync/release.yml?label=Build)](https://github.com/ShineBreaker/LZSync/actions/workflows/release.yml)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-2E3540)](https://github.com/ShineBreaker/LZSync/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/ShineBreaker/LZSync?color=00ADD8)](./go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-3DDC97.svg)](./LICENSE)
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/lzsync)
 
 [English](./README.md) | **简体中文**
 
-在同一台设备上同步多个 osu!lazer 客户端的谱面、收藏夹、皮肤、成绩与设置，支持官方 lazer、DeltaLazer、Ez2Lazer 与 g0v0，零重复磁盘占用，不破坏数据库结构。
+</div>
 
 ---
 
-## 为什么需要 LZSync？
+## 告别一份谱面导入五遍
 
-同时游玩官方 **osu!lazer** 与 **DeltaLazer**、**Ez2Lazer**、**g0v0** 等衍生客户端时，每个客户端都维护着独立的数据目录、`client.realm` 数据库与动辄数十 GB 的 `files/` 资源目录。跨端重复导入 `.osz` 会成倍消耗硬盘空间；直接拷贝数据库文件则会因各端 schema 版本、自定义列与私服 ID 差异导致客户端无法启动甚至清空建库。
+同时游玩官方 osu!lazer、DeltaLazer、Ez2Lazer、g0v0 与旧版 osu!stable 时，每个客户端都维护着独立的数据目录。把 30 GB 的曲库分别导入五个客户端会占用 150 GB 磁盘空间；手动拷贝 `client.realm` 数据库又会丢失衍生端专属列、混入私服在线 ID，甚至因数据库版本号不同触发客户端删库重建。
 
-**LZSync** 采用中枢辐射架构，将各端数据收集至本地 SQLite 中枢 `hub.db` 与单一的 SHA-256 内容寻址文件仓 `store/`，再通过符号链接或硬链接按需投放到任意目标客户端。
+LZSync 将本机所有 osu! 客户端连接到同一个本地资料库。在任意客户端下载新谱面、整理收藏夹或修改键位后，点击一次「同步」，即可将其余客户端更新到位，且磁盘上只占一份文件空间。
 
-```mermaid
-flowchart LR
-    subgraph Forks["osu!lazer 客户端"]
-        L["osu!lazer v52"]
-        D["DeltaLazer v51"]
-        E["Ez2Lazer v52011"]
-        G["g0v0 v52"]
-    end
-    subgraph Hub["LZSync 本地中枢"]
-        DB[("hub.db SQLite")]
-        Store[("store/ SHA-256 文件仓")]
-    end
-    Forks -- "1. 收集：只读提取 + 文件归档" --> Hub
-    Hub -- "2. 投放：建立链接 + 批量写入" --> Forks
-```
+## 核心亮点
 
-## 核心特性
-
-**多端共享单份文件，零重复占用。** 收集时，LZSync 将客户端新导入的音频、背景与 `.osu`/`.osr` 文件归档至中枢 `store/`，并在原位置替换为指向文件仓的链接；向其他客户端投放时直接建立链接，四个客户端共享同一份物理字节。
-
-**覆盖 8 类核心数据。** 支持同步谱面集与全部难度及元数据、收藏夹、用户皮肤、本地成绩与 `.osr` 回放、键位绑定、规则集设置、Mod 预设，以及跨端通用的 `game.ini` 配置项。
-
-**针对各端差异的自动兼容适配。** 不同客户端拥有各自的数据库列、专属规则集与服务器命名空间，LZSync 在写入前自动完成转换与过滤：
-- **Ez2Lazer `client_52011.realm`。** 自动将版本号 `52011` 解码为官方基线 52 加 Ez 修订 11，就地更新时完整保留 Ez 专属的 10 个扩展列；向非 Ez 端投放时自动跳过 BMS 规则集、外部托管谱面与专属判定成绩。
-- **g0v0。** 严格隔离 `g0v0.top` 私服与官方服务器的 `OnlineID` 命名空间，防止私服 ID 污染官方端；自动过滤 `OnlineID >= 10` 的服务器市场规则集数据。
-- **DeltaLazer。** 自动检测含 `[BeatmapSectionGimmicks]` 或 `[BeatmapHitObjectGimmicks]` 的谱面并在投放报告中发出醒目提示，防止在非 Delta 端编辑器中保存时丢失专属数据。
-- **键位与 Mod 白名单。** 按源端与目标端枚举范围交集过滤键位 `ActionInt`，自动剔除目标端不支持的 `StatisticsJson` 判定键，并校验成绩与预设中的 Mod 缩写。
-
-**谱面版本链与防复活删除追踪。** 谱面更新后，LZSync 通过 `OnlineID` 或曲名、曲师、谱师元数据匹配识别同谱面的新旧版本，投放时只写入最新版、将旧版标记为 `DeletePending = true` 并安全解绑旧难度上的本地成绩。您在任一客户端内删除的条目会记录为该端的删除标记，后续同步默认不再重新投放，除非您在对比页的「已删除」筛选下主动勾选恢复。
-
-**多重数据库安全防线。** 官方 osu!lazer 一旦遇到损坏或版本不匹配的 `client.realm` 会直接删库重建，LZSync 在每一步提供保护：
-- **绝不篡改数据库版本。** 基于 `realm-core 20.1.1` 与文件格式 v24 动态模式读写，保持磁盘 schema 版本号原封不动。
-- **进程监控与占用拦截。** 检测到任一客户端运行或持有数据库锁时立即拒绝读写。
-- **写前自动备份与一键还原。** 每次投放前自动在 `backups/` 生成带时间戳的数据库备份，支持随时在界面内还原。
-- **批次事务与结构防漂移。** 按批次开启事务，提交前比对写前与写后表结构快照，任何异常立即整批回滚。
-- **容器导出兜底。** 支持在「差异对比」页将任意谱面集、皮肤或成绩直接打包导出为标准的 `.osz` / `.osk` / `.osr` 文件并调用默认程序打开，无需写入 `.realm` 数据库。
+- **五端共用一份磁盘空间。** 音频、背景图、`.osu` 谱面、皮肤与 `.osr` 回放文件全部按 SHA-256 哈希存入本地文件仓，各客户端通过系统原生的硬链接或符号链接挂载读取，五个客户端只占一份硬盘容量。
+- **打通 lazer 衍生端与旧版 osu!stable。** 同一次同步即可在基于 Realm 数据库的四个 lazer 客户端与基于 `Songs/`、`Skins/`、`collection.db` 的 osu!stable 之间双向同步谱面集、收藏夹与皮肤。
+- **覆盖 8 类游戏数据。** 支持谱面集与全部难度、收藏夹、用户皮肤、本地成绩与回放、键位绑定、规则集设置、Mod 预设及通用 `game.ini` 选项，可在主界面按板块独立开关。
+- **三方基线变更识别。** LZSync 记录每个客户端上次同步后的状态。单端新增收藏或修改键位会传播至其他客户端；若两个客户端把同一项改成了不同内容，LZSync 会暂停该项并交由你选择以哪一端为准，或保留两端差异。
+- **删除操作不复活。** 在某个客户端内删除的谱面会记入该端的删除记录，后续同步不会将其重新写回，需要时可在资料库的「已删除」筛选下恢复。
+- **跨端差异自动转换。** 写入前按目标客户端规则完成适配：保留 Ez2Lazer 的 10 个扩展列，隔离 `g0v0.top` 私服与官方服的在线 ID，对含 Gimmick 段落的 DeltaLazer 谱面给出跨端编辑提醒，并跳过目标端不支持的规则集与 Mod。
+- **多重数据库安全保护。** 永不改动任何客户端的 `client.realm` 磁盘版本号，也永不写入 `osu!.db`。每次写入前检查游戏进程是否关闭、生成带时间戳的数据库备份供随时还原，并在事务提交前校验表结构完整性。
 
 ## 支持的客户端
 
-| 客户端 | 默认数据目录 | 数据库文件 | Schema 版本 | 适配说明 |
-|---|---|---|---|---|
-| **osu!lazer** | `osu` | `client.realm` | `52` | 官方上游基线 |
-| **DeltaLazer** | `deltalazer` | `client.realm` | `51` | Gimmick 段落检测与跨端编辑提醒 |
-| **Ez2Lazer** | `osu-Ez2Lazer` | `client_52011.realm` | `52011` | 保留 10 个扩展列；过滤 BMS 与外部托管谱面 |
-| **g0v0** | `g0v0` | `client.realm` | `52` | `g0v0.top` 在线 ID 隔离；过滤市场规则集 |
+| 客户端 | 同步数据范围 | 存储格式 | 专属适配策略 |
+|---|---|---|---|
+| **osu!lazer** | 全部 8 类数据 | `client.realm` v52 | 官方 Bancho 基线 |
+| **DeltaLazer** | 全部 8 类数据 | `client.realm` v51 | 检测 Gimmick 谱面段落，按版本范围过滤编辑器键位 |
+| **Ez2Lazer** | 全部 8 类数据 | `client_52011.realm` v52011 | 保留 10 个扩展列，向其他客户端导出时跳过 BMS 与外部托管谱面 |
+| **g0v0** | 全部 8 类数据 | `client.realm` v52 | 隔离 `g0v0.top` 私服在线 ID，过滤市场第三方规则集 |
+| **osu!stable** | 谱面集、收藏夹、皮肤 | `osu!.db`、`collection.db`、`Songs/`、`Skins/` | 链接式生成 `Songs/` 曲目目录并原子更新 `collection.db`，不触碰 `osu!.db` |
 
-## 四步使用流程
+## 如何使用
 
-1. **客户端库。** 点击**自动扫描**发现系统数据目录下的客户端库，或手动输入 `client.realm` 路径添加。
-2. **收集。** 在**收集与投放**页点击对应客户端右侧的**收集**，将最新数据读取至中枢并将实体文件归档入仓。
-3. **差异对比。** 进入**差异对比**页，选择「投放预览：中枢到目标库」或「跨端对比：源库与目标库」，按分类审视并勾选条目，点击**生成投放计划**。
-4. **投放。** 返回**收集与投放**页，确认进程检查与备份路径无误后点击**开始投放**。
+1. **连接客户端。** 启动后自动扫描系统默认数据目录，也可将客户端文件夹拖入窗口。每个客户端通过上下两条轨道连接资料库，点击上轨切换「拉取」，点击下轨切换「写入」。
+2. **点击同步。** 点击主按钮后，LZSync 读取各端变动并在轨道上显示待写入数量，主按钮变为「写入 N 项」，再次点击即完成写入。
+3. **按需拍板分歧。** 无歧义的新增与改动自动流转；遇到两端同时修改同一配置或发现同名谱面新版本时，主界面下方会浮现「待处理」卡片，点选任一客户端取值、更新为新版本或点击「保留差异」即可。
+4. **全局浏览与管理。** 在侧栏切换谱面集、收藏、皮肤或成绩，即时搜索全部库存。每行右侧的彩色圆点展示哪些客户端已拥有该条目、哪些将在下次同步时写入，并支持勾选单条记录单独同步或恢复已删曲目。
 
 ## 下载安装
 
-预编译包发布在 [Releases](https://github.com/ShineBreaker/LZSync/releases) 页面：
+前往 [GitHub Releases](https://github.com/ShineBreaker/LZSync/releases) 页面获取对应平台的预编译安装包：
 
-| 平台 | 包 |
-|---|---|
-| **Windows**（x64） | `LZSync Setup *.exe` 安装程序、免安装 `.zip` |
-| **macOS**（Apple Silicon + Intel） | universal `.dmg`（ad-hoc 签名：首次打开请右键 → 打开） |
-| **Linux**（x86_64） | `.deb`、`.rpm`、`.AppImage`、`.tar.gz` + `install.sh` |
+| 平台 | 安装包类型 | 说明 |
+|---|---|---|
+| **Windows x64** | `LZSync Setup *.exe` 安装包、便携版 `.zip` | 已内置所需运行库 |
+| **macOS Universal** | Apple Silicon 与 Intel 通用 `.dmg` | 采用 ad-hoc 签名，首次启动请右键点击应用并选择「打开」 |
+| **Linux x86_64** | `.deb`、`.rpm`、`.AppImage`、`.tar.gz` + `install.sh` | 依赖 GTK 3 与 WebKitGTK 4.1 或 4.0 |
 
-Linux 包依赖 GTK 3 与 WebKitGTK 4.1/4.0（Debian/Ubuntu 上为 `libwebkit2gtk-4.1-0`，Fedora 上为 `webkit2gtk4.1`）：`.deb`/`.rpm` 已声明依赖；`.AppImage` 与 `install.sh` 假定系统已装。
+软件内置简体中文与英文界面，首次启动自动匹配系统语言，也可随时在「设置」中切换。
 
-## 快速开始与构建
+## 技术与开发文档
 
-LZSync 后端采用 Go 编写并通过 `purego` 绑定 `realm-core` C API，前端采用基于 [MyGo](https://github.com/egoist/mygo) 的 TypeScript + Vite 桌面界面。
+存储架构、三方判定细节、各端兼容规则、安全约束与源码构建流程已拆分为独立文档：
 
-### 环境依赖
-
-- Go 1.24+、Bun 与 WebKitGTK，使用 GNU Guix + `direnv` 时由仓库内的 `manifest.scm` 自动声明加载。
-- `librealm-ffi.so`，钉死 `realm-core 20.1.1`，通过 `./scripts/fetch-librealm.sh` 自动拉取并构建。
-
-### 构建与运行
-
-```bash
-# 1. 获取并构建 realm-core 20.1.1 动态库
-./scripts/fetch-librealm.sh
-
-# 2. 运行四道门禁：Go 编译与静态检查、全量集成测试、TypeScript 检查、应用打包
-just gates
-
-# 3. 启动 LZSync 桌面端
-just run
-```
-
-若当前环境未准备游戏数据或 native 库，可使用内置演示模式启动并体验完整交互：
-
-```bash
-LZSYNC_MOCK=1 just dev
-```
-
-### 语言切换
-
-内置**简体中文**与 **English** 双语界面。首次启动自动匹配系统语言，也可随时在**设置 → 界面语言 / Language** 中一键切换。
+- [技术与构建说明](./docs/technical.zh-CN.md)
+- [产品行为模型与同步体系设计](./docs/design.md)
+- [界面与交互设计准则](./docs/DESIGN.md)
+- [Native 动态库构建手册](./docs/dev-native.md)
+- [架构决策记录](./docs/adr/)
+- [各客户端差异调研笔记](./docs/research/)
 
 ## 许可证
 
-MIT
+[MIT](./LICENSE)

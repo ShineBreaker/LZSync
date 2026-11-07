@@ -1,114 +1,80 @@
+<div align="center">
+
+<img src="./docs/design-mockup/icon-master.svg" width="88" height="88" alt="LZSync" />
+
 # LZSync
+
+**One beatmap library across every osu! client on your machine.**
+
+[![Release](https://img.shields.io/github/v/release/ShineBreaker/LZSync?label=Release&color=7C6CF0)](https://github.com/ShineBreaker/LZSync/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/ShineBreaker/LZSync/release.yml?label=Build)](https://github.com/ShineBreaker/LZSync/actions/workflows/release.yml)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-2E3540)](https://github.com/ShineBreaker/LZSync/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/ShineBreaker/LZSync?color=00ADD8)](./go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-3DDC97.svg)](./LICENSE)
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/lzsync)
 
 **English** | [简体中文](./README.zh-CN.md)
 
-Sync beatmaps, collections, skins, scores, and settings across multiple osu!lazer forks on one machine without duplicating gigabytes of files or breaking your databases.
+</div>
 
 ---
 
-## Why LZSync?
+## Stop importing the same beatmaps five times
 
-Running official **osu!lazer** alongside forks like **DeltaLazer**, **Ez2Lazer**, and **g0v0** means maintaining separate data directories. Each client keeps its own `client.realm` database and its own multi-gigabyte `files/` directory. Manually re-importing `.osz` archives across clients wastes disk space, fragments your collections, and risks schema corruption if you copy database files directly.
+Running official osu!lazer alongside DeltaLazer, Ez2Lazer, g0v0, and classic osu!stable splits your beatmaps and settings across separate folders. Importing a 30 GB song folder into five clients eats 150 GB of disk space. Copying `client.realm` by hand strips custom fork columns, mixes private server IDs with Bancho IDs, or triggers a database reset when schema versions differ.
 
-**LZSync** solves this with a hub-and-spoke architecture. It collects data from any registered fork into a local SQLite hub, `hub.db`, and a single SHA-256 content-addressed file store, then deploys your chosen items to any target fork using native file links.
+LZSync connects all your installed osu! clients to a single local hub. Download a beatmap, build a collection, or change your key bindings in one client, click **Sync**, and play in every other client with zero duplicate files on disk.
 
-```mermaid
-flowchart LR
-    subgraph Forks["osu!lazer Clients"]
-        L["osu!lazer v52"]
-        D["DeltaLazer v51"]
-        E["Ez2Lazer v52011"]
-        G["g0v0 v52"]
-    end
-    subgraph Hub["LZSync Local Hub"]
-        DB[("hub.db SQLite")]
-        Store[("store/ SHA-256 blobs")]
-    end
-    Forks -- "1. Collect: read + archive" --> Hub
-    Hub -- "2. Deploy: link + batch write" --> Forks
-```
+## Why players use LZSync
 
-## Key capabilities
-
-**Zero duplicate storage.** During collection, LZSync moves raw beatmap, skin, and replay files into its central `store/` and replaces the originals with symlinks or hardlinks. Deploying to another fork creates links to the same store, so four clients share one physical copy of every audio track, background, and `.osu` file.
-
-**Full-fidelity sync across 8 data types.** Sync Beatmap Sets with all difficulties and metadata, Collections, Skins, Scores with `.osr` replays, Key Bindings, Ruleset Settings, Mod Presets, and shared `game.ini` preferences.
-
-**Cross-fork compatibility engine.** Each fork has its own schema version, custom columns, and custom rulesets. LZSync adapts data automatically before writing to the target client:
-- **Ez2Lazer `client_52011.realm`.** Decodes version `52011` as upstream 52 plus Ez revision 11, preserves Ez2Lazer's 10 custom columns on in-place updates, and filters out BMS ruleset items, external-hosted sets, and custom judgement scores when deploying to other clients.
-- **g0v0.** Isolates server-specific `OnlineID` values on `g0v0.top` so private-server IDs never overwrite official Bancho IDs, and filters out custom market rulesets with `OnlineID >= 10`.
-- **DeltaLazer.** Detects `.osu` files containing `[BeatmapSectionGimmicks]` or `[BeatmapHitObjectGimmicks]` and warns you before deploying to non-Delta clients where saving in the editor would strip gimmick data.
-- **Key binding & mod filtering.** Filters `ActionInt` key bindings to the intersection of source and target enum ranges, drops unknown `StatisticsJson` hit result keys, and validates mod acronyms against the target fork's whitelist.
-
-**Beatmap version chain & deletion tracking.** When a beatmap set updates, LZSync pairs the old and new versions by `OnlineID` or by title, artist, and mapper metadata with your confirmation. It deploys only the latest version, marks the superseded set with `DeletePending = true`, and unbinds old local scores cleanly. Items you delete in a client are recorded as per-fork tombstones so future syncs never resurrect deleted beatmaps unless you explicitly check them under the *Deleted* filter.
-
-**Database safety guards.** Official osu!lazer resets `client.realm` from scratch if it detects corruption or an unknown schema version. LZSync protects your data at every step:
-- **Never migrates schema versions.** Opens `client.realm` in `realm-core` dynamic mode, pinned to `realm-core 20.1.1` and file format v24, leaving the disk schema version untouched.
-- **Process guard & lock detection.** Blocks sync while any osu!lazer fork is running.
-- **Automatic timestamped backups.** Backs up the target `client.realm` before every deploy, with one-click restore in the UI.
-- **Batch transactions with DriftGuard.** Snapshots the database schema before and after every batch transaction and rolls back immediately if any structural drift occurs.
-- **Container export fallback.** Exports any beatmap set, skin, or score directly from the Compare view as `.osz`, `.osk`, or `.osr` and opens it with your system's default handler without touching the target `.realm` file.
+- **Five clients, one disk footprint.** LZSync stores every audio track, background image, `.osu` chart, skin element, and `.osr` replay once in a SHA-256 content-addressed store. Each client holds native hardlinks or symlinks to that store, so five clients use the disk space of one.
+- **Sync across lazer forks and osu!stable.** Move beatmap sets, collections, and skins both ways between Realm-based lazer clients and classic osu!stable `Songs/`, `Skins/`, and `collection.db` folders in the same run.
+- **Eight data categories.** Sync beatmap sets with all difficulties, collections, user skins, local scores with replays, key bindings, ruleset settings, mod presets, and shared `game.ini` options. Toggle each category on or off on the home screen.
+- **Three-way change tracking.** LZSync remembers what each client had at the end of the last sync. If you add maps to a collection or rebind a key in one client, that update propagates to the others. If two clients change the same item in different ways, LZSync pauses that item and lets you choose which client wins or keep both versions separate.
+- **Deletions stay deleted.** Removing a beatmap inside a client records a per-client deletion marker. Future syncs will not bring deleted beatmaps back unless you restore them from the Deleted view.
+- **Client-aware translation.** LZSync adapts records for each target client before writing. It keeps Ez2Lazer's 10 custom columns intact, isolates `g0v0.top` private server IDs from Bancho, warns before DeltaLazer gimmick charts go to editors that drop gimmick sections, and filters out unsupported rulesets or mods.
+- **Built-in database protection.** LZSync never alters a client's `client.realm` schema version and never writes to `osu!.db`. Before every write, it verifies that the game is closed, saves a timestamped database backup that you can restore in two clicks, and checks the database structure before committing.
 
 ## Supported clients
 
-| Client | Data directory | Database file | Schema version | Notes |
-|---|---|---|---|---|
-| **osu!lazer** | `osu` | `client.realm` | `52` | Official upstream baseline |
-| **DeltaLazer** | `deltalazer` | `client.realm` | `51` | Gimmick section detection & editor warning |
-| **Ez2Lazer** | `osu-Ez2Lazer` | `client_52011.realm` | `52011` | Preserves 10 custom columns; filters BMS & external sets |
-| **g0v0** | `g0v0` | `client.realm` | `52` | `g0v0.top` `OnlineID` isolation; filters market rulesets |
+| Client | Synced categories | Storage format | Client-specific handling |
+|---|---|---|---|
+| **osu!lazer** | All 8 categories | `client.realm` v52 | Official Bancho baseline |
+| **DeltaLazer** | All 8 categories | `client.realm` v51 | Detects gimmick chart sections and filters editor key ranges |
+| **Ez2Lazer** | All 8 categories | `client_52011.realm` v52011 | Preserves 10 custom columns and skips BMS or external sets on export |
+| **g0v0** | All 8 categories | `client.realm` v52 | Isolates `g0v0.top` online IDs and skips market rulesets |
+| **osu!stable** | Beatmap sets, collections, skins | `osu!.db`, `collection.db`, `Songs/`, `Skins/` | Links song folders and updates `collection.db` via temp-file rename without touching `osu!.db` |
 
-## How it works in 4 steps
+## How a sync run works
 
-1. **Libraries.** Click **Auto Scan** to discover installed forks in your platform data root: `~/.local/share`, `%APPDATA%`, or `~/Library/Application Support`. You can also add a custom `client.realm` path manually.
-2. **Collect.** On the **Sync** page, click **Collect** for each fork you want to read into the Hub. LZSync projects all entities into `hub.db` and archives their files into `store/`.
-3. **Compare.** Open **Compare**, pick **Deploy Preview: Hub to Target** or **Fork Diff: Source vs Target**, inspect changes by category, and click **Create Plan**.
-4. **Deploy.** Return to **Sync**, review the pre-flight check, and click **Deploy**.
+1. **Connect your clients once.** Launch LZSync to scan default data folders on Windows, macOS, and Linux, or drag any client folder into the window. Each client connects to the hub through a **Pull** track on top and a **Write** track on the bottom.
+2. **Click Sync.** LZSync reads changes from your enabled clients, displays exact item counts on each client's write track, and switches the main button to **Write N items**. Click a second time to write.
+3. **Decide only when needed.** Unambiguous additions and edits flow on their own. When two clients edit the same setting or a beatmap has a newer version, a card appears under **Pending** so you can pick a client's version, update to the new beatmap version, or click **Keep difference**.
+4. **Browse your unified library.** Open Beatmap Sets, Collections, Skins, or Scores in the sidebar to search across every client at once. Colored dots on each row show which clients have the item, which will receive it on the next sync, and where conflicts exist.
 
 ## Download
 
-Prebuilt packages are published on the [Releases](https://github.com/ShineBreaker/LZSync/releases) page:
+Get the latest prebuilt release for your platform on the [GitHub Releases](https://github.com/ShineBreaker/LZSync/releases) page:
 
-| Platform | Packages |
-|---|---|
-| **Windows** (x64) | `LZSync Setup *.exe` installer, portable `.zip` |
-| **macOS** (Apple Silicon + Intel) | universal `.dmg` (ad-hoc signed: right-click → Open on first launch) |
-| **Linux** (x86_64) | `.deb`, `.rpm`, `.AppImage`, `.tar.gz` + `install.sh` |
+| Platform | Packages | Notes |
+|---|---|---|
+| **Windows x64** | `LZSync Setup *.exe`, portable `.zip` | Includes required runtime libraries |
+| **macOS Universal** | `.dmg` for Apple Silicon and Intel | Ad-hoc signed; right-click and choose Open on first launch |
+| **Linux x86_64** | `.deb`, `.rpm`, `.AppImage`, `.tar.gz` + `install.sh` | Requires GTK 3 and WebKitGTK 4.1 or 4.0 |
 
-Linux packages depend on GTK 3 and WebKitGTK 4.1/4.0 (`libwebkit2gtk-4.1-0` on Debian/Ubuntu, `webkit2gtk4.1` on Fedora). The `.deb` and `.rpm` declare them; `.AppImage` and `install.sh` assume them present.
+LZSync includes full English and Simplified Chinese interfaces. It matches your system language on first launch, and you can switch languages at any time in **Settings**.
 
-## Quick start & build
+## Technical documentation
 
-LZSync uses a Go backend with `purego` FFI bindings to the `realm-core` C API and a TypeScript + Vite desktop UI built on [MyGo](https://github.com/egoist/mygo).
+Architecture details, sync decision rules, database safety invariants, and source build instructions live in separate docs:
 
-### Prerequisites
-
-- Go 1.24+, Bun, and WebKitGTK, declared in `manifest.scm` for GNU Guix + `direnv`.
-- `librealm-ffi.so` from `realm-core 20.1.1`, fetched and built reproducibly via `./scripts/fetch-librealm.sh`.
-
-### Build and run
-
-```bash
-# 1. Fetch and build realm-core 20.1.1 C API shared library
-./scripts/fetch-librealm.sh
-
-# 2. Run all verification gates: Go build/vet, integration tests, TypeScript check, bundle
-just gates
-
-# 3. Launch LZSync desktop app
-just run
-```
-
-To try the UI without `librealm-ffi.so` or real game libraries, launch in demo mode with sample forks and diffs:
-
-```bash
-LZSYNC_MOCK=1 just dev
-```
-
-### Language support
-
-LZSync includes full English and Simplified Chinese interfaces. It detects your system language on first launch, and you can switch languages anytime under **Settings → Language**.
+- [Technical & build guide](./docs/technical.md)
+- [Product behavior model & system design](./docs/design.md)
+- [UI & interaction specification](./docs/DESIGN.md)
+- [Native `librealm-ffi` build guide](./docs/dev-native.md)
+- [Architecture Decision Records](./docs/adr/)
+- [Client fork research notes](./docs/research/)
 
 ## License
 
-MIT
+[MIT](./LICENSE)
