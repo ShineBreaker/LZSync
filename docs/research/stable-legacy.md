@@ -103,11 +103,29 @@ Double（仅 Target Practice 启用时存在）。
 
 | 锚点 | stable 侧 | lazer 侧 | 结论 |
 |---|---|---|---|
-| 集内容哈希 | 集 .osu 内容按文件名排序拼接的 SHA-256（对 Songs/ 目录复算） | `BeatmapSetInfo.Hash` 同算法（lazer-baseline §6.1） | **同一谱面两端同键** |
-| 难度内容键 | .osu 文件 MD5（= osu!.db 谱面 MD5 字段） | `BeatmapInfo.MD5Hash` | 同键 |
+| 集内容哈希 | 集 .osu 内容按文件名排序拼接的 SHA-256（对 Songs/ 目录复算） | `BeatmapSetInfo.Hash` 同算法（lazer-baseline §6.1） | **同一谱面两端同键**（实测 4/5 共有集精确一致，见下「stale 集哈希」） |
+| 难度内容键 | .osu 文件 MD5（= osu!.db 谱面 MD5 字段） | `BeatmapInfo.MD5Hash` | 同键（真机 208/208 一致） |
+| 难度 Hash | .osu 文件 SHA-256 | `BeatmapInfo.Hash` | 同键（真机 6/6 逐字节一致，147962 全难度） |
 | 集身份键 | `online:<Songs 目录名数字前缀>`（BeatmapSetID） | `online:<BeatmapSetInfo.OnlineID>` | 同键（S8：stable 连 ppy 官方服，同域） |
 | 收藏 | collection.db (名称, MD5 列表) | BeatmapCollection (Name, BeatmapMD5Hashes) | 同构 |
 | 皮肤 | 目录名 / skin.ini `[General] Name` | SkinInfo.Name；但 Hash = .ini+.json 拼接 SHA-256，stable 无 .json，**无法复算** | 内容键不同构 → 跨端配对走 Name 弱键（同谱面身份键第二层模式） |
+
+### 4.1 实测注记（2026-11-07 真机对拍，collect 侧已按此施工）
+
+- **lazer 集哈希是导入时缓存**：谱面在线更新后不重算。实测 147962 两端
+  全部 .osu 字节一致（逐文件 SHA-256 相同）但集哈希不同。对策：判定层
+  在集哈希不等时以**难度 Hash（或 MD5）集合比对**兜底，集合全同视为同
+  版本不投放；收集层两端各自如实报键。
+- **同内容重复目录**：真机 Songs/ 66 目录去重后 65 集（同一谱面装成两
+  个目录），收集侧按内容键去重保留首个（与 realm 投影同防线）。
+- **NaN 净化**：osu!.db 星数表与难度值存在 NaN（真机实测），JSON 无法
+  序列化，收集侧一律归零（均为展示字段、非判定键）。
+- **目录名规范化**：stable 目录名剥离 artist 中的句点（`feat.` →
+  `feat`）等字符；投放构造目录名时 `<setID> <artist> - <title>` 按同规则
+  规范化（P3）。
+- **Windows 进程同名歧义**：stable 与 lazer 在 Windows 上镜像同名
+  `osu!.exe`，进程名无法消歧；Linux（wine）下进程名带 `.exe` 与原生
+  lazer 精确匹配天然区分。
 
 ## 5. 占用与写安全
 

@@ -1,7 +1,8 @@
-// Package forks 承载四端 fork 的静态元数据注册表（ForkProfile）、库身份
-// 识别与结构档案仓库（design.md §3.1、§4.3）。内核不内置任何具体 fork
-// 知识——全部「Ez 怎样、g0v0 怎样」的差异只存在于本包的 Profile 数据与
-// 运行时结构档案中：新增第五个 fork = 新增一份 Profile，不改内核。
+// Package forks 承载各端（四个 lazer 系 fork + stable 旧版端）的静态元数据
+// 注册表（ForkProfile）、库身份识别与结构档案仓库（design.md §3.1、§4.3）。
+// 内核不内置任何具体 fork 知识——全部「Ez 怎样、g0v0 怎样、stable 怎样」
+// 的差异只存在于本包的 Profile 数据与运行时结构档案中：新增端 = 新增
+// 一份 Profile，不改内核。
 //
 // 全部静态数据固化自 docs/research/ 的字段级摘录（C-1 自包含纪律）：
 // fork-comparison §0/§1（四端速览与总览矩阵）、fork-delta §1–§4、
@@ -18,6 +19,19 @@ type SkinFingerprint struct {
 	Guid    string // 行 Guid 的 hex（无连字符小写），固定常量类专有皮肤用
 }
 
+// StorageKind 端存储载体类型：realm 库端（四端）或 legacy 文件系统端
+//（stable——osu!.db 二进制索引 + Songs/Skins 解包目录，无 realm 库，
+// stable-legacy §0）。collect 按 StorageRealm 投影 realm、按 StorageLegacy
+// 扫描目录与 db；deploy 同理分派写入后端。
+type StorageKind int
+
+const (
+	// StorageRealm 是 client.realm 库端（默认零值，四端）。
+	StorageRealm StorageKind = iota
+	// StorageLegacy 是 stable 的文件系统端。
+	StorageLegacy
+)
+
 // IniKeyPolicy 是 game.ini 键策略（S10 红灯排除 + M3 白名单同步）。
 type IniKeyPolicy struct {
 	Shared []string // 四端共有白名单键
@@ -27,8 +41,9 @@ type IniKeyPolicy struct {
 
 // ForkProfile 是单个 fork 的静态差异声明（design.md §4.3）。
 type ForkProfile struct {
-	ID           string // "lazer" | "delta" | "ez2lazer" | "g0v0"
-	DataDirName  string // osu / deltalazer / osu-Ez2Lazer / g0v0
+	ID           string // "lazer" | "delta" | "ez2lazer" | "g0v0" | "stable"
+	Storage      StorageKind
+	DataDirName  string // osu / deltalazer / osu-Ez2Lazer / g0v0；stable 空（不参与数据根发现）
 	RealmFilePat string // client.realm；Ez 为 client_<diskVersion>.realm + 前驱链
 	ProcessNames []string
 	// DecodeVersion 解码磁盘 schema 版本：Ez 为 v>=1000 ? v/1000, v%1000 : v, 0。
@@ -252,6 +267,26 @@ var profiles = []ForkProfile{
 		//（0..120）；规则集 Action 含 Editor* 段（最大 10005）。
 		KeyBindingAction: KeyBindingActionDomain{GlobalMax: 121, RulesetMax: 10006},
 		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys}, // OsuSetting 枚举与官方一致（fork-ez2lazer §3.1）
+	},
+	{
+		// stable（旧版 osu!，wine 运行）：legacy 文件系统端——数据形态为
+		// osu!.db 二进制索引 + Songs//Skins/ 解包目录 + collection.db
+		//（stable-legacy §0），无任何 realm 文件。realm 族字段全零值：
+		// RealmFilePat 空、DiskVersion 0、无专有表列/规则集/皮肤指纹。
+		// 不参与数据根发现（安装目录任意，如 ~/Games/osu!，用户手动
+		// 注册）；DataDirName 留空使 profileByDirName 天然不命中。
+		// 版本分叉知识在 internal/legacydb（osu!.db 头部自带版本）。
+		ID:      "stable",
+		Storage: StorageLegacy,
+		// wine 下进程名带 .exe 后缀；guard 的 Unix 精确匹配使其与 lazer
+		// 的 "osu!" 天然消歧（Windows 上两端镜像同名 osu!.exe，守卫层
+		// 需按可执行路径消歧，平台固有项，stable-legacy §5）。
+		ProcessNames: []string{"osu!.exe"},
+		ServerRealm:  "ppy", // 连官方服，S8 同域可携 OnlineID（stable-legacy §4）
+		// 同步板块（谱面/收藏/皮肤）全部官方基线语义，无 fork 专有面。
+		ModAcronyms:    officialModAcronyms,
+		StatisticsKeys: officialStatisticsKeys,
+		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys},
 	},
 	{
 		// g0v0!：Realm schema 与官方 52 完全一致（零结构改动），差异全在

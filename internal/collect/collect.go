@@ -97,15 +97,16 @@ func (r *Runner) Collect(ctx context.Context, target forks.LibraryRef, prog Prog
 	return r.CollectWith(ctx, target, Options{GameIni: true}, prog)
 }
 
-// CollectWith 对 target 库执行收集：
+// CollectWith 对 target 端执行收集：
 //  1. 逐端守卫拦截（§0-B1/G3：只检测该 fork 的进程名；游戏运行中直接报
 //     guard.ErrGameRunning；呈现缓存快照的回退策略属 appsvc，不在本层）——
 //     收集只读不惧并发，但 realm 开库在游戏运行时会因进程锁失败
 //     （go-realm-options §1.3-7），守卫把这一失败提前为友好提示；
 //  2. 动态只读投影（跳过规则 §4.1；跳过项计数入 Report.Skips——不静默吞）；
+//     stable 端（StorageLegacy）分派到 legacy.go（目录扫描 + osu!.db）；
 //  3. hub.ApplySnapshot 单事务入仓（部分失败不产生 tombstone，HB2；
 //     §0-B2 首见即定——insert-if-absent，后到端取值留在 presence）；
-//  4. 顺手采集结构档案（同版本只留首份，§4.3）；
+//  4. 顺手采集结构档案（同版本只留首份，§4.3；stable 无库，跳过）；
 //  5. 文件面按 Mode：ModeFull = 收仓 + 回链（HB4：能力探测 + 首文件试探
 //     失败 → 该 fork 整体跳过收仓、文件留原地 + 计数——纯增益操作，
 //     跳过只损失磁盘节约）；ModeSourceOnly = 只入仓不回链（fork 的
@@ -116,6 +117,9 @@ func (r *Runner) CollectWith(ctx context.Context, target forks.LibraryRef, opts 
 	report := Report{}
 	if err := ctx.Err(); err != nil {
 		return report, err
+	}
+	if profile, ok := forks.Profile(target.ForkID); ok && profile.Storage == forks.StorageLegacy {
+		return r.collectLegacyWith(ctx, target, opts, prog)
 	}
 	if target.ForkID == "" || target.RealmPath == "" {
 		return report, fmt.Errorf("collect: 目标库未解析（ForkID/RealmPath 为空）")

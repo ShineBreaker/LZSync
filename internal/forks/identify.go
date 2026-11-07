@@ -172,6 +172,19 @@ func IdentifyCached(realmPath string, snaps *SnapshotStore) (LibraryRef, error) 
 	return buildRef("", dir, realmPath, 0, VersionUnknownRunning), ErrUnidentified
 }
 
+// IdentifyLegacyDir 识别 stable 安装目录（手动注册路径；stable 不参与
+// 数据根 Discover——安装目录任意，如 ~/Games/osu!）：目录含 osu!.db 即
+// 认定（强特征，stable-legacy §0；Songs/ 单独存在不作数——普通音乐目录
+// 也会叫 Songs）。无 realm 库可探测，目录特征即身份；RealmPath 恒空、
+// DiskVersion 恒 0、VersionSource 恒空（stable 的版本号在 osu!.db 头部，
+// 由 legacydb 解析层消费）。
+func IdentifyLegacyDir(dir string) (LibraryRef, bool) {
+	if _, err := os.Stat(filepath.Join(dir, "osu!.db")); err != nil {
+		return LibraryRef{}, false
+	}
+	return LibraryRef{ForkID: "stable", DataDir: dir}, true
+}
+
 // buildRef 组装 LibraryRef，并按命中 profile 的 DecodeVersion 解码。
 func buildRef(forkID, dataDir, realmPath string, v uint64, src VersionSource) LibraryRef {
 	ref := LibraryRef{

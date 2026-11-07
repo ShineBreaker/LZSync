@@ -5,10 +5,10 @@ import "testing"
 // 数据断言全部锚定调研摘录：fork-comparison §1.1（目录/文件名/版本矩阵）、
 // fork-delta §1–§3、fork-ez2lazer §1–§2、fork-g0v0 §1–§3。
 
-func TestAllRegistersFourForks(t *testing.T) {
+func TestAllRegistersAllForks(t *testing.T) {
 	all := All()
-	if len(all) != 4 {
-		t.Fatalf("All() 返回 %d 份 Profile，期望 4", len(all))
+	if len(all) != 5 {
+		t.Fatalf("All() 返回 %d 份 Profile，期望 5（四端 realm + stable）", len(all))
 	}
 	seenID := map[string]bool{}
 	seenDir := map[string]bool{}
@@ -16,12 +16,16 @@ func TestAllRegistersFourForks(t *testing.T) {
 		if seenID[p.ID] {
 			t.Errorf("Profile ID 重复: %s", p.ID)
 		}
-		if seenDir[p.DataDirName] {
-			t.Errorf("DataDirName 重复: %s", p.DataDirName)
+		if p.DataDirName != "" {
+			if seenDir[p.DataDirName] {
+				t.Errorf("DataDirName 重复: %s", p.DataDirName)
+			}
+			seenDir[p.DataDirName] = true
 		}
 		seenID[p.ID] = true
-		seenDir[p.DataDirName] = true
-		if p.DecodeVersion == nil {
+		// realm 族断言只对 realm 端（stable 无库：DecodeVersion 恒 nil、
+		// DataDirName 恒空，stable-legacy §0）。
+		if p.Storage == StorageRealm && p.DecodeVersion == nil {
 			t.Errorf("%s: DecodeVersion 为 nil", p.ID)
 		}
 		if p.ServerRealm == "" {
@@ -31,15 +35,38 @@ func TestAllRegistersFourForks(t *testing.T) {
 			t.Errorf("%s: IniKeys.Locked 为空（S10 红灯键缺失）", p.ID)
 		}
 	}
-	for _, id := range []string{"lazer", "delta", "ez2lazer", "g0v0"} {
+	for _, id := range []string{"lazer", "delta", "ez2lazer", "g0v0", "stable"} {
 		if !seenID[id] {
-			t.Errorf("缺少四端之一的 Profile: %s", id)
+			t.Errorf("缺少端 Profile: %s", id)
 		}
 	}
 	// 拷贝语义：改写 All() 结果不得影响注册表。
 	all[0].DataDirName = "tampered"
 	if again := All(); again[0].DataDirName == "tampered" {
 		t.Error("All() 返回了注册表本体，改写外泄")
+	}
+}
+
+// TestStableProfile 是 stable 端（legacy 文件系统载体）的静态差异断言
+//（stable-legacy §0/§4/§5）。
+func TestStableProfile(t *testing.T) {
+	p, ok := Profile("stable")
+	if !ok {
+		t.Fatal(`Profile("stable") 不存在`)
+	}
+	if p.Storage != StorageLegacy {
+		t.Errorf("Storage = %d，期望 StorageLegacy", p.Storage)
+	}
+	if p.DataDirName != "" || p.RealmFilePat != "" || p.DiskVersion != 0 {
+		t.Errorf("realm 族字段应为零值: DataDirName=%q RealmFilePat=%q DiskVersion=%d",
+			p.DataDirName, p.RealmFilePat, p.DiskVersion)
+	}
+	if p.ServerRealm != "ppy" {
+		t.Errorf("ServerRealm = %q，期望 ppy（stable 连官方服，S8 同域）", p.ServerRealm)
+	}
+	// wine 进程名带 .exe；与 lazer 的 "osu!" 精确匹配消歧（§5）。
+	if len(p.ProcessNames) != 1 || p.ProcessNames[0] != "osu!.exe" {
+		t.Errorf("ProcessNames = %v，期望 [osu!.exe]", p.ProcessNames)
 	}
 }
 

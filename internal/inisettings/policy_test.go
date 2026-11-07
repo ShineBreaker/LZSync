@@ -27,10 +27,11 @@ func TestSharedKeysCount(t *testing.T) {
 }
 
 func TestRedLightLockedAllCombinations(t *testing.T) {
-	// S10 红灯键在任何收集/同步入口都不可被勾选：四端全部 16 组合断言。
+	// S10 红灯键在任何收集/同步入口都不可被勾选：全部端（四 realm 端 +
+	// stable，stable 的 IniKeys 同基线红灯集）两两组合断言。
 	profiles := forks.All()
-	if len(profiles) != 4 {
-		t.Fatalf("fork 注册表 = %d 端，期望 4", len(profiles))
+	if len(profiles) != 5 {
+		t.Fatalf("fork 注册表 = %d 端，期望 5", len(profiles))
 	}
 	for _, src := range profiles {
 		if got := CollectableKeys(src); got["Token"] || got["Username"] || got["ReleaseStream"] {

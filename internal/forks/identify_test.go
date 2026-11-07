@@ -453,3 +453,31 @@ func TestLocateRealmFile(t *testing.T) {
 		}
 	})
 }
+
+// TestIdentifyLegacyDir 是 stable 安装目录的识别（osu!.db 强特征；
+// Songs/ 单独存在不作数——普通音乐目录也会叫 Songs，stable-legacy §0）。
+func TestIdentifyLegacyDir(t *testing.T) {
+	dir := t.TempDir()
+	if _, ok := IdentifyLegacyDir(dir); ok {
+		t.Fatal("空目录不应识别为 stable")
+	}
+	if err := os.Mkdir(filepath.Join(dir, "Songs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := IdentifyLegacyDir(dir); ok {
+		t.Fatal("仅 Songs/ 不应识别为 stable")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "osu!.db"), []byte{1}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, ok := IdentifyLegacyDir(dir)
+	if !ok {
+		t.Fatal("含 osu!.db 的目录应识别为 stable")
+	}
+	if ref.ForkID != "stable" || ref.DataDir != dir {
+		t.Fatalf("ref = %+v", ref)
+	}
+	if ref.RealmPath != "" || ref.DiskVersion != 0 {
+		t.Errorf("stable 的 realm 字段应恒零: %+v", ref)
+	}
+}
