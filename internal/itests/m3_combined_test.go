@@ -23,7 +23,6 @@ import (
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
 	"lzsync/internal/forks"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 	"lzsync/internal/inisettings"
 )
@@ -138,7 +137,7 @@ func TestM3CombinedRoundtrip(t *testing.T) {
 
 	// ---- 投放：三类落地 + 三条跳过分支计数 + gimmick 报告与预演一致 ----
 	report, err := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	}).Deploy(ctx, plan, nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v（report=%+v）", err, report)
@@ -188,7 +187,7 @@ func TestM3CombinedRoundtrip(t *testing.T) {
 		t.Fatalf("读目标 game.ini: %v", err)
 	}
 	iniRes, err := deploy.SyncGameIniValues(refDst, iniValsFromStore(t, iniStore, "delta"),
-		nil, e.backups, guard.NewGuard(nil))
+		nil, e.backups, hermeticGuard())
 	if err != nil {
 		t.Fatalf("SyncGameIniValues: %v", err)
 	}

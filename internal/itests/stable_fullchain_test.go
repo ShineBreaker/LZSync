@@ -15,7 +15,6 @@ import (
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
 	"lzsync/internal/forks"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 )
 
@@ -51,7 +50,7 @@ func TestStableCrossEndRoundTrip(t *testing.T) {
 	// stable 投放需链接引擎（realm 端 runner 无 Files——按需自建，与
 	// fullchain 同款就地装配先例）。
 	dr := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 	report, err := dr.Deploy(ctx, deploy.Plan{
 		TargetFork: "stable",

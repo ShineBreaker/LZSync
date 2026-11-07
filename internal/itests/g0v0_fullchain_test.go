@@ -19,7 +19,6 @@ import (
 	"lzsync/internal/collect"
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
 )
@@ -29,7 +28,7 @@ func TestG0v0CompatFullChain(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
 	runner := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 
 	// ---- ① g0v0 座 A 收集：市场规则集行过滤（D8）----
@@ -138,12 +137,12 @@ func TestG0v0CompatFullChain(t *testing.T) {
 	}
 	defer h2.Close()
 	if _, err := collect.NewRunner(collect.Deps{
-		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: guard.NewGuard(nil),
+		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: hermeticGuard(),
 	}).Collect(ctx, refC, nil); err != nil {
 		t.Fatalf("收集 C(lazer): %v", err)
 	}
 	runner2 := deploy.NewRunner(deploy.Deps{
-		Hub: h2, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: h2, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 
 	// D 座：同键现场行带 g0v0 域独有 OnlineID（播种直设——副本赋值不回写）。

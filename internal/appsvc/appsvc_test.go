@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -302,7 +303,7 @@ func newRealInDir(t *testing.T, dataRoot, dir string) (*Backend, *hub.Store) {
 	deps := Deps{
 		Hub:       h,
 		Backups:   &guard.Backups{Dir: filepath.Join(dir, "backups")},
-		Guard:     guard.NewGuard(nil),
+		Guard:     guard.NewNoScanGuard(), // hermetic：不吃宿主机进程现场
 		DataRoot:  dataRoot,
 		DataDir:   dir,
 	}
@@ -331,12 +332,19 @@ func TestRealLibraryScanAndRegister(t *testing.T) {
 	}
 }
 
-// TestExpandHome 手动注册输入框的 ~ 展开（GUI 不经 shell）。
+// TestExpandHome 手动注册输入框的 ~ 展开（GUI 不经 shell）。os.UserHomeDir
+// 在 Windows 读 USERPROFILE、其余平台读 HOME，测试按平台设对应变量。
 func TestExpandHome(t *testing.T) {
-	t.Setenv("HOME", "/home/u")
+	home := "/home/u"
+	if runtime.GOOS == "windows" {
+		home = `C:\Users\u`
+		t.Setenv("USERPROFILE", home)
+	} else {
+		t.Setenv("HOME", home)
+	}
 	cases := map[string]string{
-		"~":           "/home/u",
-		"~/a/b":       "/home/u/a/b",
+		"~":           home,
+		"~/a/b":       filepath.Join(home, "a", "b"),
 		"/abs/path":   "/abs/path",
 		"relative/x":  "relative/x",
 		"~otheruser":  "~otheruser",

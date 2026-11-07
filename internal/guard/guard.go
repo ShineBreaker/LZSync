@@ -29,11 +29,23 @@ var ErrGameRunning = errors.New("guard: 目标游戏进程正在运行，请先�
 // 进程名为 g0v0! 带感叹号，不可想当然去掉）。
 type Guard struct {
 	ProcessNames []string
+
+	// Enumerate 进程枚举注入缝（nil = 平台枚举）。itests 注入恒空枚举
+	// 保证 hermetic：EnsureClearFork 按 ForkProfile 名单检测时，宿主机上
+	// 恰好运行名单内进程（如真实的 osu!.exe）不再误拦集成测试。
+	Enumerate func() map[string]bool
 }
 
 // NewGuard 创建守卫。
 func NewGuard(processNames []string) *Guard {
 	return &Guard{ProcessNames: processNames}
+}
+
+// NewNoScanGuard 返回不做进程枚举的恒放行守卫——测试的 hermetic 形态：
+// 结果不吃宿主机进程现场（开发者本机恰好运行名单内进程时，走
+// ForkProfile 名单的 EnsureClearFork 不再误拦用例）。生产环境用 NewGuard。
+func NewNoScanGuard() *Guard {
+	return &Guard{Enumerate: func() map[string]bool { return nil }}
 }
 
 // Running 返回当前正在运行的名单内进程名（全平台枚举）。返回按名排序，
@@ -55,8 +67,12 @@ func (g *Guard) RunningAmong(names []string) []string {
 	if len(wanted) == 0 {
 		return nil
 	}
+	enumerate := g.Enumerate
+	if enumerate == nil {
+		enumerate = listProcessNames
+	}
 	var hit []string
-	for proc := range listProcessNames() {
+	for proc := range enumerate() {
 		if matchProcess(proc, wanted) {
 			hit = append(hit, proc)
 		}

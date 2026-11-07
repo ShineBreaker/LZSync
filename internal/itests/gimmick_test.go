@@ -12,7 +12,6 @@ import (
 
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 )
 
@@ -58,7 +57,7 @@ func TestDeltaGimmickWarningFullChain(t *testing.T) {
 
 	// 执行：报告计数与预演一致（恰 1 条 gimmick 集），动作照常提交。
 	runner := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 	report, err := runner.Deploy(ctx, plan, nil)
 	if err != nil {

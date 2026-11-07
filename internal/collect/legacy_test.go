@@ -39,7 +39,7 @@ func newLegacyHarness(t *testing.T) (*Runner, *hub.Store, string) {
 	return NewRunner(Deps{
 		Hub:   h,
 		Files: filestore.NewEngine(store),
-		Guard: guard.NewGuard(nil),
+		Guard: guard.NewNoScanGuard(), // hermetic：不吃宿主机进程现场
 	}), h, dir
 }
 

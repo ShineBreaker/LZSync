@@ -75,16 +75,23 @@ func newEnv(t *testing.T) *env {
 	return &env{t: t, dir: dir, hub: h, engine: filestore.NewEngine(store), snaps: snaps, backups: backups}
 }
 
-// collectRunner 空名单守卫（恒放行——占用场景由专门测试注入）。
+// hermeticGuard 恒空枚举守卫：集成测试不吃宿主机进程现场——开发者本机
+// 恰好运行名单内进程（如真实的 osu!.exe）时，走 ForkProfile 名单的
+// EnsureClearFork（stable 等端）不再误拦用例。
+func hermeticGuard() *guard.Guard {
+	return guard.NewNoScanGuard()
+}
+
+// collectRunner 恒放行守卫（占用场景由专门测试注入）。
 func (e *env) collectRunner() *collect.Runner {
 	return collect.NewRunner(collect.Deps{
-		Hub: e.hub, Files: e.engine, Snapshots: e.snaps, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Snapshots: e.snaps, Guard: hermeticGuard(),
 	})
 }
 
 // deployRunner 集中备份目录形态（S2）。
 func (e *env) deployRunner() *deploy.Runner {
-	return deploy.NewRunner(deploy.Deps{Hub: e.hub, Backups: e.backups, Guard: guard.NewGuard(nil)})
+	return deploy.NewRunner(deploy.Deps{Hub: e.hub, Backups: e.backups, Guard: hermeticGuard()})
 }
 
 // buildLib fixture 造库（§8.2：测试库是 LZSync 自产合成产物）。

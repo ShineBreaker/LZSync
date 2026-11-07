@@ -16,7 +16,6 @@ import (
 
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
 )
@@ -259,7 +258,7 @@ func TestFullChainAllKindsBothLibraries(t *testing.T) {
 	snapBefore := e.canonSnapshot(t)
 	schemaBefore := schemaSnapshotOf(t, lib, refB.RealmPath)
 	runner := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 	report, err := runner.Deploy(ctx, plan, nil)
 	if err != nil {

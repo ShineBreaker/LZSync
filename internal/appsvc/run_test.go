@@ -66,7 +66,7 @@ func newRunBackend(t *testing.T, aSeed, bSeed fixture.Seed) (*Backend, *hub.Stor
 	b, err := NewRealBackend(Deps{
 		Hub: h, Files: filestore.NewEngine(store), Snapshots: snaps,
 		Backups: mustBackups(t, filepath.Join(dir, "backups")),
-		Guard:   guard.NewGuard(nil), GameIni: iniStore,
+		Guard:   guard.NewNoScanGuard(), GameIni: iniStore, // hermetic：不吃宿主机进程现场
 		DataRoot: dataRoot, DataDir: dir,
 	}, nil)
 	if err != nil {

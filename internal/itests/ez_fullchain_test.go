@@ -22,7 +22,6 @@ import (
 	"lzsync/internal/collect"
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
 )
@@ -183,7 +182,7 @@ func TestEzCompatFullChain(t *testing.T) {
 	}
 	defer h2.Close()
 	if _, err := collect.NewRunner(collect.Deps{
-		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: guard.NewGuard(nil),
+		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: hermeticGuard(),
 	}).Collect(ctx, refLazer, nil); err != nil {
 		t.Fatalf("h2 收集 lazer: %v", err)
 	}
@@ -205,7 +204,7 @@ func TestEzCompatFullChain(t *testing.T) {
 	}
 
 	runner := deploy.NewRunner(deploy.Deps{
-		Hub: h2, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: h2, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 	report, err := runner.Deploy(ctx, plan2, nil)
 	if err != nil {

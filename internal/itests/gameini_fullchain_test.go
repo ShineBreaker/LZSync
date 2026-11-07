@@ -18,7 +18,6 @@ import (
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
 	"lzsync/internal/forks"
-	"lzsync/internal/guard"
 	"lzsync/internal/inisettings"
 )
 
@@ -109,7 +108,7 @@ func TestGameIniFullChain(t *testing.T) {
 	targetIniPath := filepath.Join(dst.DataDir, "game.ini")
 	beforeTarget, _ := os.ReadFile(targetIniPath)
 	res, err := deploy.SyncGameIniValues(dst, iniValsFromStore(t, store, "lazer"),
-		nil, env.backups, guard.NewGuard(nil))
+		nil, env.backups, hermeticGuard())
 	if err != nil {
 		t.Fatalf("SyncGameIniValues: %v", err)
 	}
@@ -166,7 +165,7 @@ func TestGameIniFullChain(t *testing.T) {
 
 	// ③ 幂等重跑：值已一致 → no-op（零落地零新备份）。
 	res2, err := deploy.SyncGameIniValues(dst, iniValsFromStore(t, store, "lazer"),
-		nil, env.backups, guard.NewGuard(nil))
+		nil, env.backups, hermeticGuard())
 	if err != nil {
 		t.Fatalf("重跑 SyncGameIniValues: %v", err)
 	}
@@ -202,7 +201,7 @@ func TestGameIniTargetNeverLaunched(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := deploy.SyncGameIniValues(ref, iniValsFromStore(t, store, "lazer"),
-		nil, env.backups, guard.NewGuard(nil))
+		nil, env.backups, hermeticGuard())
 	if err != nil {
 		t.Fatalf("SyncGameIniValues: %v", err)
 	}
@@ -222,7 +221,7 @@ func (e *env) collectIntoWithIni(store *inisettings.Store, ref forks.LibraryRef)
 	e.t.Helper()
 	r := collect.NewRunner(collect.Deps{
 		Hub: e.hub, Files: e.engine, Snapshots: e.snaps,
-		Guard: guard.NewGuard(nil), GameIni: store,
+		Guard: hermeticGuard(), GameIni: store,
 	})
 	rep, err := r.Collect(context.Background(), ref, nil)
 	if err != nil {

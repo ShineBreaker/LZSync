@@ -42,7 +42,7 @@ func newLegacyDeployDeps(t *testing.T) *legacyDeps {
 	return &legacyDeps{
 		hub:    h,
 		engine: engine,
-		runner: NewRunner(Deps{Hub: h, Files: engine, Guard: guard.NewGuard(nil)}),
+		runner: NewRunner(Deps{Hub: h, Files: engine, Guard: guard.NewNoScanGuard()}), // hermetic：不吃宿主机进程现场
 	}
 }
 

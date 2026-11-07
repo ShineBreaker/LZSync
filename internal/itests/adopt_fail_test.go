@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -27,6 +28,15 @@ func skipIfRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("root 环境忽略 DAC 权限，权限注入失效（§8.2-6 破坏性场景需非 root）")
+	}
+}
+
+// skipIfWindows 权限注入在 Windows 无效：os.Chmod 仅映射只读属性，
+// 无法表达目录写权限剥夺/文件不可读（等价注入需 ACL，暂跳过）。
+func skipIfWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod 在 Windows 仅切换只读属性，权限注入失效（等价注入需 ACL）")
 	}
 }
 
@@ -123,6 +133,7 @@ func assertIntact(t *testing.T, path, wantContent string) {
 //（次文件的完整副本按 HB4 语义保留——非半成品）。
 func TestAdoptSingleFileFailure(t *testing.T) {
 	skipIfRoot(t)
+	skipIfWindows(t)
 	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
 	if err != nil {
 		t.Fatalf("filestore.Open: %v", err)
@@ -165,6 +176,7 @@ func TestAdoptSingleFileFailure(t *testing.T) {
 // → 剩余实体文件整体跳过计数（Aborted）、全部留原地、Adopted=0。
 func TestAdoptAbortOnProbeFailure(t *testing.T) {
 	skipIfRoot(t)
+	skipIfWindows(t)
 	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
 	if err != nil {
 		t.Fatalf("filestore.Open: %v", err)
@@ -201,6 +213,7 @@ func TestAdoptAbortOnProbeFailure(t *testing.T) {
 // 跳过时投影快照不受影响（§3.2——收仓是纯增益操作，跳过只损失磁盘节约）。
 func TestCollectAdoptAbortCounted(t *testing.T) {
 	skipIfRoot(t)
+	skipIfWindows(t)
 	mustLib(t)
 	e := newEnv(t)
 

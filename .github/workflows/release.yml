@@ -2,12 +2,14 @@
 #
 # 流水线：
 #   version-check  校验标签与 mygo.config.ts version 一致（tag 触发时）
-#   linux          ubuntu-latest：realm-core(gcc-13) → mygo build linux/amd64
+#   linux          ubuntu-latest：realm-core(gcc-13) → 门禁（vet + 全量
+#                  测试）→ mygo build linux/amd64
 #                  → .deb + .tar.gz + install.sh，再装 .rpm / .AppImage
-#   windows        windows-latest：realm-core(MSVC) → mygo build windows/amd64
+#   windows        windows-latest：realm-core(MSVC) → 门禁（vet + 全量
+#                  测试）→ mygo build windows/amd64
 #                  → NSIS Setup.exe（mygo 自带下载）+ 便携 zip
-#   macos          macos-latest：realm-core(universal) → mygo build
-#                  darwin/universal → ad-hoc 签名 .app + .dmg
+#   macos          macos-latest：realm-core(universal) → 门禁（vet + 全量
+#                  测试）→ mygo build darwin/universal → ad-hoc 签名 .app + .dmg
 #   release        汇总三端产物，CHANGELOG.md 摘该版本节为 notes，gh release
 #
 # realm-core 版本钉死 20.1.1（design.md §1.1 S5a），构建产物经
@@ -114,6 +116,8 @@ jobs:
           else
             echo "::warning::未找到 VC143 CRT redist 目录，跳过随附运行库"
           fi
+      - name: 门禁（vet + 全量测试；realmc 测试需要上面的 .dll）
+        run: go vet ./... && go test ./... -count=1
       - name: mygo build（windows/amd64：exe + NSIS 安装程序）
         run: bunx mygo build -platform windows/amd64
       - name: 便携 zip（免安装包）
@@ -151,6 +155,8 @@ jobs:
         run: |
           command -v cmake >/dev/null || brew install cmake
           bash scripts/build-librealm.sh macos-universal
+      - name: 门禁（vet + 全量测试；realmc 测试需要上面的 .dylib）
+        run: go vet ./... && go test ./... -count=1
       - name: mygo build（darwin/universal：ad-hoc 签名 .app + .dmg）
         run: bunx mygo build -platform darwin/universal
       - uses: actions/upload-artifact@v4

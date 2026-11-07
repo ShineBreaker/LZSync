@@ -16,7 +16,6 @@ import (
 
 	"lzsync/internal/collect"
 	"lzsync/internal/deploy"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 )
 
@@ -115,7 +114,7 @@ func TestCollectionFullChainRoundtrip(t *testing.T) {
 	}
 	defer h2.Close()
 	if _, err := collect.NewRunner(collect.Deps{
-		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: guard.NewGuard(nil),
+		Hub: h2, Files: e.engine, Snapshots: e.snaps, Guard: hermeticGuard(),
 	}).Collect(ctx, src2, nil); err != nil {
 		t.Fatalf("h2 收集 g0v0: %v", err)
 	}
@@ -129,7 +128,7 @@ func TestCollectionFullChainRoundtrip(t *testing.T) {
 	}
 	plan2.Target = dstRef
 	report2, err := deploy.NewRunner(deploy.Deps{
-		Hub: h2, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: h2, Backups: e.backups, Guard: hermeticGuard(),
 	}).Deploy(ctx, plan2, nil)
 	if err != nil {
 		t.Fatalf("Deploy#2: %v", err)

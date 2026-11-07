@@ -21,7 +21,6 @@ import (
 
 	"lzsync/internal/deploy"
 	"lzsync/internal/fixture"
-	"lzsync/internal/guard"
 	"lzsync/internal/hub"
 	"lzsync/internal/realmc"
 )
@@ -90,7 +89,7 @@ func TestVersionReplaceUnbindsLocalScores(t *testing.T) {
 	putToStore(t, e, seedV2.Files)
 
 	runner := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 	report, err := runner.Deploy(ctx, plan, nil)
 	if err != nil {
@@ -160,7 +159,7 @@ func TestVersionReplaceRepointed(t *testing.T) {
 	insertBareSetRow(t, lib, refB.RealmPath, v2.Hash)
 
 	runner := deploy.NewRunner(deploy.Deps{
-		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: guard.NewGuard(nil),
+		Hub: e.hub, Files: e.engine, Backups: e.backups, Guard: hermeticGuard(),
 	})
 	report, err := runner.Deploy(ctx, plan, nil)
 	if err != nil {
