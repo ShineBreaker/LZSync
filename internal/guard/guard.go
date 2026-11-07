@@ -66,18 +66,18 @@ func (g *Guard) RunningAmong(names []string) []string {
 }
 
 // matchProcess 判断枚举到的进程名是否命中名单：精确相等；Windows 的
-// tasklist 输出带 .exe 后缀而名单按程序集名登记（osu! vs osu!.exe），
-// 追加后缀匹配（大小写不敏感，Win32 映像名语义）。
+// tasklist 映像名自带 .exe 后缀而名单按程序集名登记（osu! vs osu!.exe），
+// 故把 .exe 追加到名单名上对齐枚举名（追加方向不能反：proc 已带 .exe，
+// 再加成 osu!.exe.exe 永远匹配不上名单），大小写不敏感（Win32 映像名
+// 语义）。
 func matchProcess(proc string, names map[string]bool) bool {
 	if names[proc] {
 		return true
 	}
 	if runtime.GOOS == "windows" {
-		if withExe := proc + ".exe"; !names[withExe] {
-			for n := range names {
-				if strings.EqualFold(n, withExe) {
-					return true
-				}
+		for n := range names {
+			if strings.EqualFold(proc, n+".exe") {
+				return true
 			}
 		}
 	}

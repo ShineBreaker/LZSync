@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,37 @@ func TestGuardEmptyListNeverBlocks(t *testing.T) {
 	g := NewGuard(nil)
 	if got := g.Running(); got != nil {
 		t.Fatalf("Running() = %v，期望 nil（空名单恒放行）", got)
+	}
+}
+
+// TestMatchProcess 后缀对齐表驱动（Windows 语义在 Linux 上不可达，期望
+// 值按平台表达——Windows 门禁接入后于该平台真跑同一断言）。
+func TestMatchProcess(t *testing.T) {
+	win := runtime.GOOS == "windows"
+	cases := []struct {
+		name string
+		proc string
+		list []string
+		want bool
+	}{
+		{"精确命中", "osu!", []string{"osu!"}, true},
+		{"无关进程", "chrome", []string{"osu!"}, false},
+		{"stable 名单自带 exe 精确命中", "osu!.exe", []string{"osu!.exe"}, true},
+		{"exe 后缀对齐名单名", "osu!.exe", []string{"osu!"}, win},
+		{"exe 后缀大小写不敏感", "EZ2LAZER.EXE", []string{"Ez2Lazer"}, win},
+		{"g0v0 感叹号名对齐", "g0v0!.exe", []string{"g0v0!"}, win},
+		// 回归锚：旧实现把后缀加在枚举名上（osu!.exe.exe），此方向必须恒 false。
+		{"双后缀名单不命中", "osu!.exe", []string{"osu!.exe.exe"}, false},
+	}
+	for _, c := range cases {
+		names := make(map[string]bool, len(c.list))
+		for _, n := range c.list {
+			names[n] = true
+		}
+		if got := matchProcess(c.proc, names); got != c.want {
+			t.Errorf("%s: matchProcess(%q, %v) = %v，期望 %v",
+				c.name, c.proc, c.list, got, c.want)
+		}
 	}
 }
 
