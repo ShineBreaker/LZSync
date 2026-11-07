@@ -123,6 +123,11 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	if r.deps.Hub == nil {
 		return report, fmt.Errorf("deploy: Deps.Hub 未配置")
 	}
+	// stable 端（StorageLegacy）分派到文件系统后端（legacy.go）——无
+	// realm 库可开，RealmPath 校验与其后的会话/事务链均不适用。
+	if profile, ok := forks.Profile(plan.TargetFork); ok && profile.Storage == forks.StorageLegacy {
+		return r.deployLegacy(ctx, plan, prog)
+	}
 	target := plan.Target
 	if target.RealmPath == "" {
 		return report, fmt.Errorf("deploy: 计划缺目标库引用（plan.Target 未解析，RealmPath 为空）")
