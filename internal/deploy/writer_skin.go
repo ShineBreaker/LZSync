@@ -185,12 +185,50 @@ func (w *skinWriter) exec(sk hub.Skin, action Action, restore bool) (applied, sk
 		return applied{action: action}, skipStat{}, repoint, nil
 	}
 
+	// 新建前跨端 Name 弱键防线：同名不同内容键 → 疑似同一皮肤的两端
+	// 变体，跳过防重复（stable-legacy §4；判不准就不动，B4）。
+	if dup, derr := w.sameNameDifferentHash(sk); derr == nil && dup {
+		return applied{}, skipStat{
+			reason: fmt.Sprintf("目标已有同名皮肤 %q（不同内容键，疑跨端同皮肤变体），跳过防重复；确需导入请改名", sk.Name),
+			count:  1,
+		}, repoint, nil
+	}
+
 	obj, err := w.createSkin(sk)
 	if err != nil {
 		return applied{}, skipStat{}, "", err
 	}
 	w.r.ReleaseObject(obj)
 	return applied{action: ActionCreate}, skipStat{}, repoint, nil
+}
+
+// sameNameDifferentHash 判定目标库是否已有同名但不同内容键的皮肤行
+//（跨端 Name 弱键防线，stable-legacy §4：皮肤内容键两端不同构——
+// lazer .ini+.json vs stable 目录规范化哈希，同名不同键的投放大概率是
+// 同一皮肤的两端变体，落地即重复皮肤。判不准就不动（B4 精神），确需
+// 导入可改名后重投）。
+func (w *skinWriter) sameNameDifferentHash(sk hub.Skin) (bool, error) {
+	nameKey, ok := w.skinCols["Name"]
+	if !ok {
+		return false, nil
+	}
+	hashKey, ok := w.skinCols["Hash"]
+	if !ok {
+		return false, nil
+	}
+	dup, err := w.r.FindFirstByString(w.skinCK, nameKey, sk.Name)
+	if err != nil || dup == nil {
+		if dup != nil {
+			w.r.ReleaseObject(dup)
+		}
+		return false, err
+	}
+	defer w.r.ReleaseObject(dup)
+	existingHash, err := w.r.GetString(dup, hashKey)
+	if err != nil {
+		return false, err
+	}
+	return existingHash != sk.Hash, nil
 }
 
 // createSkin 新建皮肤行全链（行 + 标量白名单 + Files usage）。同 Guid 主键

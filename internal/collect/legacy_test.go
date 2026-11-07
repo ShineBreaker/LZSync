@@ -75,6 +75,18 @@ func buildStableDir(t *testing.T) (root, setDir string, osu1, osu2 []byte) {
 	if err := os.WriteFile(filepath.Join(root, "collection.db"), legacydb.WriteCollectionDB(col), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// 皮肤目录（skin.ini 目录特征）。
+	skinDir := filepath.Join(root, "Skins", "test-skin")
+	if err := os.MkdirAll(skinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skinDir, "skin.ini"),
+		[]byte("[General]\r\nName:test-skin\r\nCreator:tester\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skinDir, "cursor.png"), []byte("png-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return root, setDir, osu1, osu2
 }
 
@@ -87,11 +99,11 @@ func TestLegacyCollectFullChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectWith: %v", err)
 	}
-	if report.Entities[hub.KindBeatmapSet] != 1 || report.Entities[hub.KindCollection] != 1 {
+	if report.Entities[hub.KindBeatmapSet] != 1 || report.Entities[hub.KindCollection] != 1 || report.Entities[hub.KindSkin] != 1 {
 		t.Fatalf("实体计数 = %+v", report.Entities)
 	}
-	if report.FilesAdopted != 3 {
-		t.Fatalf("收仓文件数 = %d，期望 3", report.FilesAdopted)
+	if report.FilesAdopted != 5 {
+		t.Fatalf("收仓文件数 = %d，期望 5（集 3 + 皮肤 2）", report.FilesAdopted)
 	}
 
 	// 集哈希 = .osu 内容按文件名序拼接的 SHA-256（跨端同键，§4）。
@@ -152,7 +164,7 @@ func TestLegacyCollectFullChain(t *testing.T) {
 		t.Errorf("难度名 = %v", gotVersions)
 	}
 
-	// 收仓回链：Songs/ 下三文件全部变链接且指向仓内源。
+	// 收仓回链：Songs/ 与 Skins/ 下文件全部变链接且指向仓内源。
 	for _, name := range []string{"a (Sotarks) [Expert].osu", "a (Sotarks) [Normal].osu", "audio.mp3"} {
 		path := filepath.Join(setDir, name)
 		info, lerr := os.Lstat(path)
@@ -162,6 +174,28 @@ func TestLegacyCollectFullChain(t *testing.T) {
 		if info.Mode()&os.ModeSymlink == 0 {
 			t.Errorf("%s 未回链（仍是普通文件）", name)
 		}
+	}
+	for _, name := range []string{"skin.ini", "cursor.png"} {
+		path := filepath.Join(root, "Skins", "test-skin", name)
+		info, lerr := os.Lstat(path)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("皮肤文件 %s 未回链（仍是普通文件）", name)
+		}
+	}
+	// 皮肤投影：Name=目录名、Creator 取 skin.ini、Files 含两文件。
+	var skinPayload string
+	if err := h.DB().QueryRow(
+		`SELECT payload FROM skin LIMIT 1`).Scan(&skinPayload); err != nil {
+		t.Fatal(err)
+	}
+	if got := extractJSONString(skinPayload, "Name"); got != "test-skin" {
+		t.Errorf("皮肤 Name = %q", got)
+	}
+	if got := extractJSONString(skinPayload, "Creator"); got != "tester" {
+		t.Errorf("皮肤 Creator = %q", got)
 	}
 
 	// 幂等：重跑不报错、不重复。

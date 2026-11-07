@@ -93,10 +93,10 @@ type legacyAdoptStats struct {
 	modes   map[filestore.LinkMode]int
 }
 
-// adoptLegacyFiles 收仓 Songs/ 下全部实体文件。ModeFull = 收仓 + 原位
-// 回链（AdoptFile 的 HB4 四步，与 realm 端 files/ 同语义——字节进仓、
-// 游戏侧换成指向仓的链接）；ModeSourceOnly = 只入仓不回链（链接文件
-// 直接跳过：能回链说明字节必已在仓）。
+// adoptLegacyFiles 收仓 Songs/ 与 Skins/ 下全部实体文件。ModeFull = 收仓
+// + 原位回链（AdoptFile 的 HB4 四步，与 realm 端 files/ 同语义——字节
+// 进仓、游戏侧换成指向仓的链接）；ModeSourceOnly = 只入仓不回链（链接
+// 文件直接跳过：能回链说明字节必已在仓）。
 func (r *Runner) adoptLegacyFiles(root string, mode Mode) legacyAdoptStats {
 	stats := legacyAdoptStats{modes: map[filestore.LinkMode]int{}}
 	// 链接能力探测（与 AdoptDir 同纪律）：失败 = 本环境不可收仓，整体
@@ -104,41 +104,44 @@ func (r *Runner) adoptLegacyFiles(root string, mode Mode) legacyAdoptStats {
 	if _, err := r.deps.Files.Probe(); err != nil {
 		return stats
 	}
-	songsDir := filepath.Join(root, "Songs")
-	_ = filepath.WalkDir(songsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // Songs/ 不存在（没下过谱面）等：正常态，整体静默
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
+	for _, dir := range []string{filepath.Join(root, "Songs"), filepath.Join(root, "Skins")} {
+		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil // 目录不存在（没下过谱面/皮肤）等：正常态，整体静默
+			}
+			if d.IsDir() || !d.Type().IsRegular() {
+				return nil
+			}
+			switch mode {
+			case ModeFull:
+				linkMode, aerr := r.deps.Files.AdoptFile(path)
+				if aerr != nil {
+					stats.skipped++
+					return nil
+				}
+				stats.adopted++
+				stats.modes[linkMode]++
+			case ModeSourceOnly:
+				if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+					return nil // 已回链文件：字节在仓
+				}
+				if perr := r.deps.Files.Store.Put(path); perr != nil {
+					stats.skipped++
+					return nil
+				}
+				stats.adopted++
+			}
 			return nil
-		}
-		switch mode {
-		case ModeFull:
-			linkMode, aerr := r.deps.Files.AdoptFile(path)
-			if aerr != nil {
-				stats.skipped++
-				return nil
-			}
-			stats.adopted++
-			stats.modes[linkMode]++
-		case ModeSourceOnly:
-			if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-				return nil // 已回链文件：字节在仓
-			}
-			if perr := r.deps.Files.Store.Put(path); perr != nil {
-				stats.skipped++
-				return nil
-			}
-			stats.adopted++
-		}
-		return nil
-	})
+		})
+	}
 	return stats
 }
 
 // legacyProject 把 stable 安装目录只读投影为 hub.Snapshot：
 //   - Songs/ 目录扫描 → BeatmapSets/Beatmaps（真相源；集哈希与难度 Hash
 //     按 lazer 同算法复算，跨端同键，stable-legacy §4）；
+//   - Skins/ 目录扫描 → Skins（皮肤名 = 目录名；内容键为目录规范化
+//     哈希——与 lazer 的 .ini+.json 哈希不同构、各端各为变体，B2）；
 //   - osu!.db → 难度补充字段（MD5、星数、AR/CS/HP/OD、音频名等），
 //     解析失败只计数不阻断（目录扫描自足）；
 //   - collection.db → Collections。
@@ -186,18 +189,34 @@ func legacyProject(root string, prog ProgressFunc) (hub.Snapshot, error) {
 	}
 
 	if data, err := os.ReadFile(filepath.Join(root, "collection.db")); err == nil {
-		if cdb, perr := legacydb.ParseCollectionDB(data); perr != nil {
-			count("collection.db 解析失败")
-		} else {
+		if cdb, perr := legacydb.ParseCollectionDB(data); perr == nil {
 			for _, c := range cdb.Collections {
 				snap.Collections = append(snap.Collections, hub.Collection{
 					Name:            c.Name,
 					BeatmapMD5Hashes: c.BeatmapMD5s,
 				})
 			}
+		} else {
+			count("collection.db 解析失败")
 		}
 	} else {
 		count("无 collection.db（从没建过收藏的正常态）")
+	}
+
+	// Skins/ 目录扫描：每目录一皮肤（stable 皮肤名即目录名）。skin.ini
+	// 存在才认（目录特征——.osk_FILES 之类的解包产物都含 skin.ini）。
+	skinsDir := filepath.Join(root, "Skins")
+	skinEntries, err := os.ReadDir(skinsDir)
+	if err != nil && !os.IsNotExist(err) {
+		return snap, fmt.Errorf("扫描 Skins/: %w", err)
+	}
+	for _, e := range skinEntries {
+		if !e.IsDir() {
+			continue
+		}
+		if skin := projectLegacySkin(filepath.Join(skinsDir, e.Name()), e.Name(), count); skin != nil {
+			snap.Skins = append(snap.Skins, *skin)
+		}
 	}
 
 	// 内容键去重（与 realm 投影同防线：同一谱面装成两个 Songs/ 目录时
@@ -336,6 +355,68 @@ func projectLegacySet(dir string, dbRows []legacydb.BeatmapEntry, count func(str
 	}
 	sort.Slice(bs.Files, func(i, j int) bool { return bs.Files[i].Filename < bs.Files[j].Filename })
 	return bs
+}
+
+// projectLegacySkin 投影单个 Skins/ 皮肤目录。内容键 = 规范化目录哈希
+//（全部文件按相对路径排序，每项 "relpath\n"+文件 SHA-256 拼接后整体
+// SHA-256）——与 lazer 的 .ini+.json 哈希不同构，stable 皮肤作为该端
+// 变体自有其键（B2 各端分别存；跨端配对走 Name 弱键，stable-legacy §4）。
+func projectLegacySkin(dir, name string, count func(string)) *hub.Skin {
+	if _, err := os.Stat(filepath.Join(dir, "skin.ini")); err != nil {
+		count("Skins/ 子目录无 skin.ini（非皮肤目录，跳过）")
+		return nil
+	}
+	type skinFile struct{ rel, hash string }
+	var files []skinFile
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		content, rerr := os.ReadFile(p)
+		if rerr != nil {
+			count("皮肤文件不可读（跳过该文件）")
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		files = append(files, skinFile{rel: rel, hash: fileSHA256Hex(content)})
+		return nil
+	})
+	if len(files) == 0 {
+		count("皮肤目录无实体文件（跳过）")
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+	hasher := sha256.New()
+	skin := &hub.Skin{Name: name, Creator: legacySkinIniField(filepath.Join(dir, "skin.ini"), "Creator")}
+	for _, f := range files {
+		hasher.Write([]byte(f.rel + "\n" + f.hash + "\n"))
+		skin.Files = append(skin.Files, hub.NamedFile{Hash: f.hash, Filename: f.rel})
+	}
+	skin.Hash = hex.EncodeToString(hasher.Sum(nil))
+	return skin
+}
+
+// legacySkinIniField 读 skin.ini [General] 节的指定键（缺失返回空）。
+func legacySkinIniField(path, key string) string {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	section := ""
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line
+			continue
+		}
+		if section != "[General]" {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(k) == key {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // parseOsuMetadata 是 .osu 文件元数据的最小解析面（[Metadata] 节 +

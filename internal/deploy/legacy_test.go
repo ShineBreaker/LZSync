@@ -259,6 +259,57 @@ func TestLegacyCollectionMergeKeepsOthers(t *testing.T) {
 	}
 }
 
+func TestLegacyDeploySkin(t *testing.T) {
+	d := newLegacyDeployDeps(t)
+	// 皮肤字节入库（skin.ini + 子目录元素文件）。
+	h1, f1 := seedFile(t, d, "skin.ini", []byte("[General]\r\nName:cool\r\n"))
+	h2, f2 := seedFile(t, d, "cursor.png", []byte("png"))
+	setHasher := sha256.New()
+	setHasher.Write([]byte("cursor.png\n" + h2 + "\n"))
+	setHasher.Write([]byte("skin.ini\n" + h1 + "\n"))
+	skin := hub.Skin{
+		Hash:    hex.EncodeToString(setHasher.Sum(nil)),
+		Name:    "cool skin: v2?",
+		Creator: "tester",
+		Files:   []hub.NamedFile{f2, f1},
+	}
+	snap := hub.Snapshot{ForkID: "lazer", CollectedAt: t0, Skins: []hub.Skin{skin}}
+	if _, err := d.hub.ApplySnapshot(context.Background(), snap); err != nil {
+		t.Fatal(err)
+	}
+	stableDir := t.TempDir()
+
+	plan := Plan{TargetFork: "stable",
+		Target: forks.LibraryRef{ForkID: "stable", DataDir: stableDir},
+		Items:  []PlanItem{{Kind: hub.KindSkin, ContentKey: skin.Hash, Action: ActionCreate}}}
+	report, err := d.runner.Deploy(context.Background(), plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(report.Applied) != 1 {
+		t.Fatalf("applied = %+v skipped = %+v", report.Applied, report.Skipped)
+	}
+	// 落地：目录名经 sanitize（非法字符折叠），文件为链接。
+	skinDir := filepath.Join(stableDir, "Skins", "cool skin v2")
+	for _, name := range []string{"skin.ini", "cursor.png"} {
+		info, serr := os.Lstat(filepath.Join(skinDir, name))
+		if serr != nil {
+			t.Fatalf("皮肤文件未落地 %s: %v", name, serr)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("%s 不是链接", name)
+		}
+	}
+	// 同名目录已存在 → 重投跳过（Name 弱键防线）。
+	report2, err := d.runner.Deploy(context.Background(), plan, nil)
+	if err != nil {
+		t.Fatalf("重投: %v", err)
+	}
+	if len(report2.Applied) != 0 || len(report2.Skipped) == 0 {
+		t.Fatalf("重投 applied=%+v skipped=%+v（期望跳过）", report2.Applied, report2.Skipped)
+	}
+}
+
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)

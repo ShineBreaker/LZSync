@@ -46,7 +46,7 @@ func (r *Runner) deployLegacy(ctx context.Context, plan Plan, prog ProgressFunc)
 		}
 	}
 
-	var setItems, collectionItems []PlanItem
+	var setItems, collectionItems, skinItems []PlanItem
 	skips := map[string]int{}
 	for _, it := range plan.Items {
 		if it.Action == ActionSkip {
@@ -58,8 +58,10 @@ func (r *Runner) deployLegacy(ctx context.Context, plan Plan, prog ProgressFunc)
 			setItems = append(setItems, it)
 		case hub.KindCollection:
 			collectionItems = append(collectionItems, it)
+		case hub.KindSkin:
+			skinItems = append(skinItems, it)
 		default:
-			skips["stable 端不支持该板块（P4 前仅谱面集/收藏）"]++
+			skips["stable 端不支持该板块（成绩/键位/设置不适用）"]++
 		}
 	}
 
@@ -85,7 +87,7 @@ func (r *Runner) deployLegacy(ctx context.Context, plan Plan, prog ProgressFunc)
 	}
 
 	// 谱面集面：逐集落地（端间独立，单集失败不中止后续；失败集计入
-	// FailedBatches 供重续）。
+	// FailedBatches 供重续）。皮肤面同款逐项落地（Skins/ 链接目录）。
 	for i, item := range setItems {
 		if err := ctx.Err(); err != nil {
 			report.NotRun = append(report.NotRun, setItems[i:]...)
@@ -101,6 +103,27 @@ func (r *Runner) deployLegacy(ctx context.Context, plan Plan, prog ProgressFunc)
 				Reason: err.Error(), Items: []PlanItem{item},
 			})
 			report.NotRun = append(report.NotRun, setItems[i+1:]...)
+			report.Skipped = sortedSkips(skips)
+			return report, err
+		}
+		if skipReason != "" {
+			skips[skipReason]++
+			continue
+		}
+		report.Applied = append(report.Applied, res)
+	}
+	for i, item := range skinItems {
+		if err := ctx.Err(); err != nil {
+			report.NotRun = append(report.NotRun, skinItems[i:]...)
+			report.Skipped = sortedSkips(skips)
+			return report, err
+		}
+		res, skipReason, err := r.deployLegacySkin(ctx, target.DataDir, item)
+		if err != nil {
+			report.FailedBatches = append(report.FailedBatches, BatchFailure{
+				Reason: err.Error(), Items: []PlanItem{item},
+			})
+			report.NotRun = append(report.NotRun, skinItems[i+1:]...)
 			report.Skipped = sortedSkips(skips)
 			return report, err
 		}
@@ -195,6 +218,68 @@ func (r *Runner) deployLegacySet(ctx context.Context, dataDir string, item PlanI
 		return res, "", fmt.Errorf("deploy: 集载荷无 .osu 文件（数据异常）：%s", item.ContentKey)
 	}
 	return res, "", nil
+}
+
+// deployLegacySkin 落地单个皮肤：Skins/<Name>/ 链接目录（同 deployLegacySet
+// 模式——现场复核同名目录已在 / 仓缺字节两路跳过，逐文件 EnsureLinked）。
+// stable 皮肤内容键（目录规范化哈希）与 lazer 不同构，跨端配对靠 Name
+// 弱键：同名目录存在即视为已持有（不比较内容——用户本地改过的皮肤
+// 绝不覆盖）。
+func (r *Runner) deployLegacySkin(ctx context.Context, dataDir string, item PlanItem) (ItemResult, string, error) {
+	skin, err := r.loadLegacySkinPayload(ctx, item)
+	if err != nil {
+		return ItemResult{}, "", err
+	}
+	res := ItemResult{Kind: hub.KindSkin, ContentKey: item.ContentKey, Action: item.Action}
+	dir := filepath.Join(dataDir, "Skins", sanitizeDirComponent(skin.Name))
+	if _, serr := os.Stat(dir); serr == nil {
+		return res, "目标端已有同名皮肤目录（Name 弱键配对，不覆盖）", nil
+	}
+	if r.deps.Files == nil {
+		return res, "", fmt.Errorf("deploy: 皮肤投放需 Deps.Files（链接引擎）")
+	}
+	for _, f := range skin.Files {
+		if has, herr := r.deps.Files.Store.Has(f.Hash); herr != nil || !has {
+			return res, fmt.Sprintf("仓内缺字节（来源收集不完整）：%s", f.Filename), nil
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return res, "", fmt.Errorf("deploy: 建皮肤目录 %s: %w", dir, err)
+	}
+	for _, f := range skin.Files {
+		target := filepath.Join(dir, f.Filename)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return res, "", fmt.Errorf("deploy: 建皮肤子目录 %s: %w", f.Filename, err)
+		}
+		if _, lerr := r.deps.Files.EnsureLinked(f.Hash, target); lerr != nil {
+			return res, "", fmt.Errorf("deploy: 建链 %s: %w", f.Filename, lerr)
+		}
+	}
+	return res, "", nil
+}
+
+// loadLegacySkinPayload 取皮肤决定值：PayloadJSON 优先，回退 hub canonical。
+func (r *Runner) loadLegacySkinPayload(ctx context.Context, item PlanItem) (hub.Skin, error) {
+	var skin hub.Skin
+	if item.PayloadJSON != "" {
+		if err := json.Unmarshal([]byte(item.PayloadJSON), &skin); err != nil {
+			return skin, fmt.Errorf("皮肤项 %s 决定值解码: %w", item.ContentKey, err)
+		}
+		return skin, nil
+	}
+	var payload string
+	err := r.deps.Hub.DB().QueryRowContext(ctx,
+		`SELECT payload FROM skin WHERE content_hash=?`, item.ContentKey).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return skin, fmt.Errorf("deploy: hub 缺皮肤行 %s（并发清除？）", item.ContentKey)
+	}
+	if err != nil {
+		return skin, err
+	}
+	if err := json.Unmarshal([]byte(payload), &skin); err != nil {
+		return skin, fmt.Errorf("deploy: hub 行 %s 解码: %w", item.ContentKey, err)
+	}
+	return skin, nil
 }
 
 // deployLegacyCollections 合并重写 collection.db（S9）：读现有 → 逐项
