@@ -142,6 +142,12 @@ func newRealBackend(deps Deps, prog ProgressSink) (*Backend, error) {
 		if _, err := os.Stat(role.RealmPath); err != nil {
 			continue // RealmPath 已不存在：留在配置但不进注册表
 		}
+		// stable 端（StorageLegacy）：ForkRole.RealmPath 字段承载的是安装
+		// 目录（字段名历史遗留，registerFork 写入侧约定），还原为 DataDir。
+		if p, ok := forks.Profile(role.ForkID); ok && p.Storage == forks.StorageLegacy {
+			reg.put(forks.LibraryRef{ForkID: role.ForkID, DataDir: role.RealmPath})
+			continue
+		}
 		reg.put(forks.LibraryRef{
 			ForkID:    role.ForkID,
 			RealmPath: role.RealmPath,
@@ -252,8 +258,16 @@ func expandHome(path string) string {
 
 // Register 手动注册：path 可给数据目录或库文件本身；识别失败返回 ForkID
 // 为空串的 ref（携带解析后的 RealmPath 与原始版本供 UI 指认，§6.1）；
-// 只有路径不可访问等硬错误走 error。
+// 只有路径不可访问等硬错误走 error。stable 安装目录（含 osu!.db）直接
+// 命中第五端身份（stable-legacy §0），先于 realm 定位链。
 func (s *realLibrary) Register(path string) (forks.LibraryRef, error) {
+	if ref, ok := forks.IdentifyLegacyDir(strings.TrimSpace(expandHome(path))); ok {
+		s.reg.put(ref)
+		if err := s.cfg.registerFork(ref); err != nil {
+			return forks.LibraryRef{}, err
+		}
+		return ref, nil
+	}
 	realmPath, err := resolveRealmPath(path)
 	if err != nil {
 		return forks.LibraryRef{}, err
@@ -284,11 +298,23 @@ func safeIdentify(path string, snaps *forks.SnapshotStore) (ref forks.LibraryRef
 }
 
 // AssignFork 用户指认 fork 身份（绝不猜，§6.1）；指认后按 Profile 解码版本。
-// path 与 Register 同样接受数据目录或库文件。
+// path 与 Register 同样接受数据目录或库文件。stable 指认要求目录确含
+// osu!.db（目录特征即身份，stable-legacy §0）。
 func (s *realLibrary) AssignFork(path, forkID string) (forks.LibraryRef, error) {
 	p, ok := forks.Profile(forkID)
 	if !ok {
 		return forks.LibraryRef{}, fmt.Errorf("appsvc: 未知 fork %q（可选：%s）", forkID, forkIDs())
+	}
+	if p.Storage == forks.StorageLegacy {
+		ref, ok := forks.IdentifyLegacyDir(strings.TrimSpace(expandHome(path)))
+		if !ok {
+			return forks.LibraryRef{}, fmt.Errorf("appsvc: 目录不含 osu!.db，无法认定为 stable 端: %s", path)
+		}
+		s.reg.put(ref)
+		if err := s.cfg.registerFork(ref); err != nil {
+			return forks.LibraryRef{}, err
+		}
+		return ref, nil
 	}
 	realmPath, err := resolveRealmPath(path)
 	if err != nil {
@@ -367,7 +393,14 @@ func buildCard(ref forks.LibraryRef, running map[string]bool) LibraryCard {
 		Registered:      true,
 		RunningNames:    []string{},
 	}
-	if st, err := os.Stat(ref.RealmPath); err == nil {
+	if p, ok := forks.Profile(ref.ForkID); ok && p.Storage == forks.StorageLegacy {
+		// stable 端卡片：无 realm 库——索引体量以 osu!.db 计、实体面
+		// 以 Songs/ 计（stable-legacy §0）。
+		if st, err := os.Stat(filepath.Join(ref.DataDir, "osu!.db")); err == nil {
+			card.RealmSize = st.Size()
+		}
+		card.FilesDir = filepath.Join(ref.DataDir, "Songs")
+	} else if st, err := os.Stat(ref.RealmPath); err == nil {
 		card.RealmSize = st.Size()
 	}
 	card.FilesSize, card.FilesCount = dirStats(card.FilesDir)
@@ -384,6 +417,9 @@ func buildCard(ref forks.LibraryRef, running map[string]bool) LibraryCard {
 
 // versionLabel 组装版本显示（Ez 解码呈现「52011 = 官方 52 + Ez 11」，§6.1）。
 func versionLabel(ref forks.LibraryRef) string {
+	if ref.ForkID == "stable" {
+		return "stable（文件系统端）" // 无 schema 版本语义（版本号在 osu!.db 头部）
+	}
 	if ref.DiskVersion == 0 {
 		return "未知（运行中）"
 	}

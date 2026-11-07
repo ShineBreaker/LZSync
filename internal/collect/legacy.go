@@ -109,7 +109,7 @@ func (r *Runner) adoptLegacyFiles(root string, mode Mode) legacyAdoptStats {
 			if err != nil {
 				return nil // 目录不存在（没下过谱面/皮肤）等：正常态，整体静默
 			}
-			if d.IsDir() || !d.Type().IsRegular() {
+			if d.IsDir() || !isRegularOrLink(d.Type()) {
 				return nil
 			}
 			switch mode {
@@ -241,7 +241,7 @@ func projectLegacySet(dir string, dbRows []legacydb.BeatmapEntry, count func(str
 	}
 	var names []string
 	for _, e := range entries {
-		if e.Type().IsRegular() {
+		if isRegularOrLink(e.Type()) {
 			names = append(names, e.Name())
 		}
 	}
@@ -369,7 +369,7 @@ func projectLegacySkin(dir, name string, count func(string)) *hub.Skin {
 	type skinFile struct{ rel, hash string }
 	var files []skinFile
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !d.Type().IsRegular() {
+		if err != nil || !isRegularOrLink(d.Type()) {
 			return nil
 		}
 		content, rerr := os.ReadFile(p)
@@ -534,6 +534,14 @@ func legacyDirSetID(dirName string) int64 {
 		return 0
 	}
 	return id
+}
+
+// isRegularOrLink 判定目录项是否为实体文件：常规文件或符号链接。stable
+// 端收集/投放采用链接形态持有字节（回链后 Songs//Skins/ 内均为链接），
+// DirEntry.Type() 是链接自身的类型位、不含 IsRegular——链接必须显式放行
+//（读侧 os.ReadFile 跟随链接取内容，语义等价）。
+func isRegularOrLink(t fs.FileMode) bool {
+	return t.IsRegular() || t&os.ModeSymlink != 0
 }
 
 // fileSHA256Hex 是内容 SHA-256 的 hex（stable 侧内容键形态，与 filestore

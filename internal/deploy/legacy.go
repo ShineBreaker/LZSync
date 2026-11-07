@@ -434,7 +434,10 @@ func legacySetDifficultyHashes(dir string) (map[string]bool, bool) {
 	}
 	out := map[string]bool{}
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !strings.HasSuffix(strings.ToLower(e.Name()), ".osu") {
+		// 链接形态放行：投放后 Songs/ 内是链接（Type() 非 regular），
+		// ReadFile 跟随链接取内容，与实体文件等价。
+		if !(e.Type().IsRegular() || e.Type()&os.ModeSymlink != 0) ||
+			!strings.HasSuffix(strings.ToLower(e.Name()), ".osu") {
 			continue
 		}
 		content, rerr := os.ReadFile(filepath.Join(dir, e.Name()))

@@ -287,20 +287,25 @@ func (c *configStore) applyScope(scope SyncScope, realmPathOf func(forkID string
 
 // registerFork upsert 一个端（Register/AssignFork 共用）：新条目默认
 // Source/Target 皆开，已有条目保角色只更新 RealmPath；RealmPath 从
-// ignored 移除。
+// ignored 移除。stable 端（StorageLegacy）的安装目录写入 RealmPath 字段
+//（字段名历史遗留，newRealBackend 回填侧按端类型还原为 DataDir）。
 func (c *configStore) registerFork(ref forks.LibraryRef) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	rolePath := ref.RealmPath
+	if p, ok := forks.Profile(ref.ForkID); ok && p.Storage == forks.StorageLegacy {
+		rolePath = ref.DataDir
+	}
 	for i := range c.cfg.Forks {
 		if c.cfg.Forks[i].ForkID == ref.ForkID {
-			c.cfg.Forks[i].RealmPath = ref.RealmPath
-			return c.removeIgnoredLocked(ref.RealmPath)
+			c.cfg.Forks[i].RealmPath = rolePath
+			return c.removeIgnoredLocked(rolePath)
 		}
 	}
 	c.cfg.Forks = append(c.cfg.Forks, ForkRole{
-		ForkID: ref.ForkID, RealmPath: ref.RealmPath, Source: true, Target: true,
+		ForkID: ref.ForkID, RealmPath: rolePath, Source: true, Target: true,
 	})
-	return c.removeIgnoredLocked(ref.RealmPath)
+	return c.removeIgnoredLocked(rolePath)
 }
 
 // removeIgnoredLocked 从 ignored 摘除路径（registerFork/applyScope 的尾随

@@ -63,6 +63,7 @@ export const FORK_COLORS: Record<string, string> = {
   delta: "#C88BF5",
   ez2lazer: "#FF7EB6",
   g0v0: "#7CE8B8",
+  stable: "#F5C86B",
 };
 
 export function forkColor(forkID: string): string {

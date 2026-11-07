@@ -209,7 +209,7 @@ export function renderHome(root: HTMLElement): () => void {
     const node = el("div", { class: "client unidentified" });
     const name = p.realmPath.split("/").pop() ?? p.realmPath;
     const idents = el("div", { class: "csub ident" });
-    for (const id of ["delta", "ez2lazer", "g0v0", "lazer"]) {
+    for (const id of ["delta", "ez2lazer", "g0v0", "lazer", "stable"]) {
       const d = forkDot(id, 9);
       d.style.cursor = "pointer";
       d.title = id;
