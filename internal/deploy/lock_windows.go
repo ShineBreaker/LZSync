@@ -22,6 +22,7 @@ package deploy
 // realm 版本时需复核此名。
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -58,12 +59,24 @@ func probeOccupiedPlatform(realmPath string) error {
 	// CreateMutexW 会新建（=无会话），CloseHandle 后引用归零自动销毁，
 	// 对后续 realm 打开无影响。
 	h, err := windows.CreateMutex(nil, false, name)
-	if err != nil {
+	// CreateMutexW 打开已存在的互斥体返回有效句柄 + ERROR_ALREADY_EXISTS
+	// （x/sys 把该码包装为 err）——「已存在」是正常信号而非失败，继续
+	// 试锁；仅句柄为 NULL 才是真失败。err 检查必须在 defer CloseHandle
+	// 之后：提前 return 会泄漏有效句柄，令互斥体对象永不销毁、后续探测
+	// 恒判占用（CI Windows 三轮实证）。
+	if h != 0 {
+		defer windows.CloseHandle(h) //nolint:errcheck // 探测句柄，关闭失败不影响判定
+		if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return fmt.Errorf("%w（写互斥不可探测: %v）", ErrTargetOccupied, err)
+		}
+	} else {
+		if err == nil {
+			err = errors.New("CreateMutexW 返回 NULL 且无错误码")
+		}
 		// 与 Unix 探测同语义：占用信号不可得本身即异常形态，按占用拒
 		// （保守侧，S5 防写坏优先）。
 		return fmt.Errorf("%w（写互斥不可探测: %v）", ErrTargetOccupied, err)
 	}
-	defer windows.CloseHandle(h) //nolint:errcheck // 探测句柄，关闭失败不影响判定
 	event, err := windows.WaitForSingleObject(h, 0)
 	if err != nil {
 		return fmt.Errorf("%w（写互斥不可探测: %v）", ErrTargetOccupied, err)
