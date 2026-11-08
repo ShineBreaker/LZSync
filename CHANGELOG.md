@@ -5,6 +5,42 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-08
+
+Windows 端安全与体验修复批次：写前两道占用防线（进程守卫 + 占用拒写）
+在 Windows 全部失效的缺陷修复，CI 三平台补齐测试门禁，扫描零结果反馈。
+
+### 修复
+
+- **进程守卫 Windows 漏检**（#2）：`matchProcess` 把 `.exe` 后缀追加到
+  tasklist 枚举名而非名单名（`osu!.exe` + `.exe` 永远匹配不上按程序集
+  名登记的名单），官方 lazer / Ez2Lazer / g0v0 在 Windows 检测不到，
+  游戏运行时守卫仍放行。改为把后缀加到名单名上对齐枚举名。
+- **占用拒写（S5）Windows 未实现**（#3）：`lock_windows.go` 的占用探针
+  恒返回 nil，目标库被其他进程持有写会话时 Deploy 不拒绝反而写入。
+  落地独占打开探测：对 `<db>.lock` 以 FILE_SHARE_NONE 尝试打开，活动的
+  realm 会话即触发 sharing violation 判 `ErrTargetOccupied`，语义与
+  Unix flock 探测对齐。
+- **文档大小写冲突**（#4）：git 索引同时存在 `docs/DESIGN.md` 与
+  `docs/design.md`，Windows/macOS 大小写不敏感文件系统上克隆即告警、
+  工作区缺文件、`git status` 幽灵改动。UI 准则更名 `docs/ui-spec.md`，
+  全部引用同步更新。
+
+### 测试与 CI
+
+- CI windows/macos job 补上与 Linux 对齐的 `go vet + go test` 门禁
+  （#5）——此前仅 Linux 跑测试，Windows 专属回归发布前不可见。
+- 测试三平台可移植化：TestExpandHome 按平台设 HOME/USERPROFILE；权限
+  注入用例在 Windows 显式跳过（os.Chmod 无法表达目录权限剥夺，等价
+  注入需 ACL）。
+- 集成测试 hermetic 化：Guard 增进程枚举注入缝（`NewNoScanGuard`），
+  宿主机恰好运行真实 osu! 时测试不再被误拦。
+
+### 体验
+
+- 扫描按结果数量反馈（#6）：干净环境零结果时不再静默无操作，弹引导
+  toast（+ → 选择文件夹… 手动添加）；首次自动扫描失败不再吞错。
+
 ## [1.1.0] - 2026-11-07
 
 新增**旧版 osu!（stable）端**接入：与四个 lazer fork 并列的第五端，
