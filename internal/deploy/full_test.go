@@ -394,12 +394,16 @@ func TestDeployOccupiedRejected(t *testing.T) {
 	cmd.Process.Kill() //nolint:errcheck
 	cmd.Wait()         //nolint:errcheck
 	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
 	for {
 		if err := probeOccupied(ref.RealmPath); err == nil {
+			lastErr = nil
 			break
+		} else {
+			lastErr = err
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("kill 持锁子进程后 5 秒探测仍失败（锁未释放）")
+			t.Fatalf("kill 持锁子进程后 5 秒探测仍失败（锁未释放）: %v", lastErr)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
