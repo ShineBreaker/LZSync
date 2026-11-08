@@ -18,9 +18,11 @@ Windows 端安全与体验修复批次：写前两道占用防线（进程守卫
   游戏运行时守卫仍放行。改为把后缀加到名单名上对齐枚举名。
 - **占用拒写（S5）Windows 未实现**（#3）：`lock_windows.go` 的占用探针
   恒返回 nil，目标库被其他进程持有写会话时 Deploy 不拒绝反而写入。
-  落地独占打开探测：对 `<db>.lock` 以 FILE_SHARE_NONE 尝试打开，活动的
-  realm 会话即触发 sharing violation 判 `ErrTargetOccupied`，语义与
-  Unix flock 探测对齐。
+  落地命名互斥体试锁探测：realm-core 在 Windows 的跨进程写互斥是命名
+  互斥体（`Local\realm_named_intermutex_…`，写事务期间由
+  `DB::do_begin_write` 持有至 commit/rollback），试拿同名互斥体 0ms
+  超时即判 `ErrTargetOccupied`——语义与 Unix flock 探测对齐，拦住真正
+  的写冲突。
 - **文档大小写冲突**（#4）：git 索引同时存在 `docs/DESIGN.md` 与
   `docs/design.md`，Windows/macOS 大小写不敏感文件系统上克隆即告警、
   工作区缺文件、`git status` 幽灵改动。UI 准则更名 `docs/ui-spec.md`，
