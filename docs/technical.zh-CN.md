@@ -55,7 +55,7 @@ LZSync 将条目的「同步身份」与「当前取值」分离，并记录每�
 | **osu!lazer** | `osu` | `client.realm`、`files/` | `52` | 官方上游基线，连接 Bancho 服务器。 |
 | **DeltaLazer** | `deltalazer` | `client.realm`、`files/` | `51` | 检测 `.osu` 中的 `[BeatmapSectionGimmicks]` 与 `[BeatmapHitObjectGimmicks]` 段落，流向非 Delta 客户端时发出提醒，避免其他客户端编辑器保存时丢失 Gimmick 数据。按全局 `0..98` 与规则集 `0..19` 的范围过滤键位枚举。 |
 | **Ez2Lazer** | `osu-Ez2Lazer` | `client_52011.realm`、`files/` | `52011` | 将版本号 `52011` 解码为官方版本 `52` 加 Ez 修订号 `11`。原位更新时保留 `Beatmap`、`Score`、`BeatmapSet`、`Ruleset` 上的 10 个扩展列；向其他客户端导出时跳过 `bms` 规则集、`ext:set:` 外部托管谱面集以及非零 `JudgeMode`/`HealthMode` 成绩。 |
-| **g0v0** | `g0v0` | `client.realm`、`files/` | `52` | 隔离 `g0v0.top` 私服与官方服的 `OnlineID` 命名空间，跨服写入时将在线 ID 置为 `-1`。跳过 `OnlineID >= 10` 的市场规则集及其成绩。 |
+| **g0v0** | `g0v0` | `client.realm`、`files/` | `52` | 保留官方谱面 `OnlineID`：g0v0-server 使用 Bancho 的谱面 id，客户端缺少该 id 时不会加载排行榜，也不会提交成绩。成绩 id 与账号 id 仍与 `g0v0.top` 隔离。跳过 `OnlineID >= 10` 的市场规则集及其成绩。 |
 | **osu!stable** | 自定义安装目录 | `osu!.db`、`collection.db`、`Songs/`、`Skins/` | 旧版二进制 | 支持谱面集、收藏夹与皮肤双向同步。直接扫描 `Songs/` 目录并从 `osu!.db` 补充难度 MD5 与星级；以链接方式生成 `Songs/<setID> <artist> - <title>/` 目录并原子重写 `collection.db`。永不写入 `osu!.db`，新增曲目由游戏启动时自动索引。 |
 
 加入日期、最后游玩时间、在线状态、本地星级、PP 与音频偏移等端本地字段绝不覆盖目标端已有记录。账号凭据与设备绑定文件，包含 `Token`、`Username`、`ReleaseStream`、`framework.ini`、`storage.ini` 与 `online.db`，全部硬性排除在同步范围之外。

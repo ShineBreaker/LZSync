@@ -32,7 +32,7 @@ LZSync connects all your installed osu! clients to a single local hub. Download 
 - **Eight data categories.** Sync beatmap sets with all difficulties, collections, user skins, local scores with replays, key bindings, ruleset settings, mod presets, and shared `game.ini` options. Toggle each category on or off on the home screen.
 - **Three-way change tracking.** LZSync remembers what each client had at the end of the last sync. If you add maps to a collection or rebind a key in one client, that update propagates to the others. If two clients change the same item in different ways, LZSync pauses that item and lets you choose which client wins or keep both versions separate.
 - **Deletions stay deleted.** Removing a beatmap inside a client records a per-client deletion marker. Future syncs will not bring deleted beatmaps back unless you restore them from the Deleted view.
-- **Client-aware translation.** LZSync adapts records for each target client before writing. It keeps Ez2Lazer's 10 custom columns intact, isolates `g0v0.top` private server IDs from Bancho, warns before DeltaLazer gimmick charts go to editors that drop gimmick sections, and filters out unsupported rulesets or mods.
+- **Client-aware translation.** LZSync adapts records for each target client before writing. It keeps Ez2Lazer's 10 custom columns intact, keeps Bancho beatmap ids for g0v0 leaderboards and isolates g0v0 score and account ids from Bancho, warns before DeltaLazer gimmick charts go to editors that drop gimmick sections, and filters out unsupported rulesets or mods.
 - **Built-in database protection.** LZSync never alters a client's `client.realm` schema version and never writes to `osu!.db`. Before every write, it verifies that the game is closed, saves a timestamped database backup that you can restore in two clicks, and checks the database structure before committing.
 
 ## Supported clients
@@ -42,7 +42,7 @@ LZSync connects all your installed osu! clients to a single local hub. Download 
 | **osu!lazer** | All 8 categories | `client.realm` v52 | Official Bancho baseline |
 | **DeltaLazer** | All 8 categories | `client.realm` v51 | Detects gimmick chart sections and filters editor key ranges |
 | **Ez2Lazer** | All 8 categories | `client_52011.realm` v52011 | Preserves 10 custom columns and skips BMS or external sets on export |
-| **g0v0** | All 8 categories | `client.realm` v52 | Isolates `g0v0.top` online IDs and skips market rulesets |
+| **g0v0** | All 8 categories | `client.realm` v52 | Keeps Bancho beatmap ids so private-server leaderboards still load, isolates g0v0 score and account ids, and skips market rulesets |
 | **osu!stable** | Beatmap sets, collections, skins | `osu!.db`, `collection.db`, `Songs/`, `Skins/` | Links song folders and updates `collection.db` via temp-file rename without touching `osu!.db` |
 
 ## How a sync run works

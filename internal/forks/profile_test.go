@@ -48,7 +48,7 @@ func TestAllRegistersAllForks(t *testing.T) {
 }
 
 // TestStableProfile 是 stable 端（legacy 文件系统载体）的静态差异断言
-//（stable-legacy §0/§4/§5）。
+// （stable-legacy §0/§4/§5）。
 func TestStableProfile(t *testing.T) {
 	p, ok := Profile("stable")
 	if !ok {
@@ -171,7 +171,7 @@ func TestProfileStaticData(t *testing.T) {
 }
 
 // TestEzStructureData Ez 的 7 张专有表与 10 个追加列逐名核对
-//（fork-ez2lazer §2.4/§2.5/§7A 字段级摘录）。
+// （fork-ez2lazer §2.4/§2.5/§7A 字段级摘录）。
 func TestEzStructureData(t *testing.T) {
 	p, _ := Profile("ez2lazer")
 	wantTables := []string{
@@ -259,6 +259,16 @@ func TestCompatFilterData(t *testing.T) {
 	g0, _ := Profile("g0v0")
 	if g0.MarketRulesetMinOnlineID != 10 {
 		t.Errorf("g0v0 MarketRulesetMinOnlineID = %d, 期望 10", g0.MarketRulesetMinOnlineID)
+	}
+	if g0.ServerRealm != "g0v0.top" {
+		t.Errorf("g0v0 ServerRealm = %q，期望 g0v0.top（账号/成绩 id）", g0.ServerRealm)
+	}
+	if g0.BeatmapRealm() != "ppy" {
+		t.Errorf("g0v0 BeatmapRealm = %q，期望 ppy（谱面 id 镜像官方，排行榜依赖它）", g0.BeatmapRealm())
+	}
+	lazerProfile, _ := Profile("lazer")
+	if lazerProfile.BeatmapRealm() != "ppy" {
+		t.Errorf("lazer BeatmapRealm = %q，期望 ppy", lazerProfile.BeatmapRealm())
 	}
 	for _, p := range []ForkProfile{ez, g0} {
 		if p.MarketRulesetMinOnlineID != 0 && len(p.OwnRulesets) > 0 {

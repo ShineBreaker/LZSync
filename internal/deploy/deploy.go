@@ -383,7 +383,10 @@ func (r *Runner) runBatch(ctx context.Context, realm *realmc.Realm, targetFork s
 			if item.SourceFork != "" {
 				src = item.SourceFork
 			}
-			ap, skip, rep, err := setW.exec(bs, item.OldContentKey, s8SameRealm(src, targetFork), item.Action, item.Restore)
+			ap, skip, rep, err := setW.exec(bs, item.OldContentKey, idScope{
+				beatmap: s8SameBeatmapRealm(src, targetFork),
+				account: s8SameRealm(src, targetFork),
+			}, item.Action, item.Restore)
 			if err != nil {
 				return nil, nil, nil, fmt.Errorf("批内项 %s: %w", item.ContentKey, err)
 			}
@@ -628,9 +631,9 @@ func (r *Runner) loadBeatmapSet(ctx context.Context, contentHash string) (hub.Be
 	return bs, hub.Origin{GUID: originGUID, Fork: originFork}, true, nil
 }
 
-// s8SameRealm 判定 canonical 来源与目标是否同服务器命名空间（S8：
-// origin_fork → ForkProfile.ServerRealm vs 目标 fork）。任一 fork 不在
-// 注册表时保守视为异域（宁少勿错，§5.4「能少不能错」）。
+// s8SameRealm 判定来源与目标的账号/成绩命名空间是否相同（S8：
+// Score.OnlineID 与 RealmUser.OnlineID）。任一 fork 不在注册表时保守
+// 视为异域（宁少勿错，§5.4「能少不能错」）。
 func s8SameRealm(originFork, targetFork string) bool {
 	op, ok1 := forks.Profile(originFork)
 	tp, ok2 := forks.Profile(targetFork)
@@ -638,6 +641,18 @@ func s8SameRealm(originFork, targetFork string) bool {
 		return false
 	}
 	return op.ServerRealm == tp.ServerRealm
+}
+
+// s8SameBeatmapRealm 判定谱面 OnlineID 是否同一命名空间。g0v0 的账号域
+// 是 g0v0.top，谱面域却是 ppy（服务端镜像官方谱面 id）。排行榜和成绩
+// 提交读的是难度 OnlineID，这个域判错会把私服排行榜打成不可用。
+func s8SameBeatmapRealm(originFork, targetFork string) bool {
+	op, ok1 := forks.Profile(originFork)
+	tp, ok2 := forks.Profile(targetFork)
+	if !ok1 || !ok2 {
+		return false
+	}
+	return op.BeatmapRealm() == tp.BeatmapRealm()
 }
 
 // clearRestoredTombstones 投放成功后清除恢复项的 tombstone（§6.2：勾选

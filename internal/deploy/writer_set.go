@@ -21,8 +21,13 @@ package deploy
 //（S4 软删）；③ 解绑旧难度上的本地成绩（Score.BeatmapInfo 关系置 null、
 // BeatmapHash 字符串列保留）。
 //
-// S8：OnlineID 仅同 ServerRealm（origin_fork → ForkProfile 派生）携带；
-// 异域新行置 -1、更新行不触碰该列（§4.4 / §5.4）。
+// S8 分两套命名空间（idScope）：
+//   - account：Score / RealmUser 的 OnlineID，按 ServerRealm。g0v0 与官方
+//     不同域，新行置 -1，更新不触碰。
+//   - beatmap：BeatmapSet / Beatmap 的 OnlineID，按 BeatmapServerRealm。
+//     g0v0 与官方同属 ppy（服务端镜像官方谱面 id）。来源 id > 0 才写；
+//     来源尚未解析时不把目标已有 id 清成 -1。客户端排行榜和成绩提交都
+//     要求难度 OnlineID > 0。
 
 import (
 	"fmt"
@@ -166,12 +171,18 @@ func prepareBeatmapSetWriter(r *realmc.Realm) (*beatmapSetWriter, error) {
 	return w, nil
 }
 
+// idScope 是一次投放的 S8 判定。beatmap 管谱面 id，account 管作者/用户 id。
+type idScope struct {
+	beatmap bool
+	account bool
+}
+
 // exec 执行单个谱面集计划项（§3.3 执行期现场复核 + 写入）。oldKey 是
-// version-replace 项的目标旧版本集内容键（其他动作空串）。sameRealm 是
-// S8 判定结果（origin_fork 与目标 fork 的 ServerRealm 相同）。restore 标记
-// 恢复项（用户显式勾选「恢复（已删除）」）：现场同键行已软删时唯有恢复
-// 项才允许写回 DeletePending=false（HB2 删除不复活）。
-func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool, action Action, restore bool) (applied, skipStat, string, error) {
+// version-replace 项的目标旧版本集内容键（其他动作空串）。scope 是 S8
+// 两套命名空间的判定结果。restore 标记恢复项（用户显式勾选「恢复
+// （已删除）」）：现场同键行已软删时唯有恢复项才允许写回
+// DeletePending=false（HB2 删除不复活）。
+func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, scope idScope, action Action, restore bool) (applied, skipStat, string, error) {
 	// §5.4-D5 投放防线：外部托管集 Hash（路径编码而非内容哈希，files/
 	// 无字节）不投放。收集侧已滤（§4.1），此处拦 M2 旧数据/手工构造的
 	// hub 已收行——判定走全注册表 ExtSetHashPrefix（§4.3 数据化，
@@ -183,7 +194,7 @@ func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool
 		}, "", nil
 	}
 	if action == ActionVersionReplace {
-		return w.execVersionReplace(bs, oldKey, sameRealm)
+		return w.execVersionReplace(bs, oldKey, scope)
 	}
 	if w.absent {
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
@@ -225,20 +236,20 @@ func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool
 		}
 		// 重续安全：已一致 → 跳过。判定面 = 写面的对偶（写面不写的字段
 		// 不比：难度 / Files 列表在同 Hash 语义下内容等价，§4.2）。
-		same, err := w.matchesCanonical(existing, bs, sameRealm)
+		same, err := w.matchesCanonical(existing, bs, scope)
 		if err != nil {
 			return applied{}, skipStat{}, "", err
 		}
 		if same {
 			return applied{}, skipStat{reason: "目标已是 canonical 值（重续判定：已存在 → 跳过）", count: 1}, repoint, nil
 		}
-		if err := w.writeSetScalars(existing, bs, false, sameRealm); err != nil {
+		if err := w.writeSetScalars(existing, bs, false, scope); err != nil {
 			return applied{}, skipStat{}, "", err
 		}
 		return applied{action: action}, skipStat{}, repoint, nil
 	}
 
-	obj, err := w.createSet(bs, sameRealm)
+	obj, err := w.createSet(bs, scope)
 	if err != nil {
 		return applied{}, skipStat{}, "", err
 	}
@@ -261,7 +272,7 @@ func (w *beatmapSetWriter) exec(bs hub.BeatmapSet, oldKey string, sameRealm bool
 //
 // 重续时不比对新行标量（本地行为字段如 LastPlayed 默认保留目标值，D22；
 // 整集身份以内容键幂等锚定）。
-func (w *beatmapSetWriter) execVersionReplace(bs hub.BeatmapSet, oldKey string, sameRealm bool) (applied, skipStat, string, error) {
+func (w *beatmapSetWriter) execVersionReplace(bs hub.BeatmapSet, oldKey string, scope idScope) (applied, skipStat, string, error) {
 	if w.absent {
 		return applied{}, skipStat{reason: w.absentWhy, count: 1}, "", nil
 	}
@@ -278,20 +289,33 @@ func (w *beatmapSetWriter) execVersionReplace(bs hub.BeatmapSet, oldKey string, 
 	if err != nil {
 		return applied{}, skipStat{}, "", fmt.Errorf("deploy: 现场匹配谱面集 %s: %w", bs.Hash, err)
 	}
-	if newRow != nil {
-		w.r.ReleaseObject(newRow)
-	}
 	oldRow, err := w.r.FindFirstByString(w.setCK, w.setCols["Hash"], oldKey)
 	if err != nil {
+		if newRow != nil {
+			w.r.ReleaseObject(newRow)
+		}
 		return applied{}, skipStat{}, "", fmt.Errorf("deploy: 现场匹配旧版本谱面集 %s: %w", oldKey, err)
+	}
+	var kept keptOnlineIdentity
+	if oldRow != nil {
+		kept, err = w.readKeptOnlineIdentity(oldRow)
+		if err != nil {
+			if newRow != nil {
+				w.r.ReleaseObject(newRow)
+			}
+			w.r.ReleaseObject(oldRow)
+			return applied{}, skipStat{}, "", err
+		}
 	}
 
 	switch {
 	case newRow != nil && oldRow == nil:
 		// 旧版本已被目标端清理/手删而新版本已在：动作已兑现，无处软删。
+		w.r.ReleaseObject(newRow)
 		return applied{}, skipStat{reason: "目标已是新版本且旧版本已不在现场（重续判定：已存在 → 跳过）", count: 1}, "", nil
 	case newRow != nil:
 		defer w.r.ReleaseObject(oldRow)
+		defer w.r.ReleaseObject(newRow)
 		dp, err := w.r.GetBool(oldRow, dpKey)
 		if err != nil {
 			return applied{}, skipStat{}, "", err
@@ -299,7 +323,10 @@ func (w *beatmapSetWriter) execVersionReplace(bs hub.BeatmapSet, oldKey string, 
 		if dp {
 			return applied{}, skipStat{reason: "目标已是新版本且旧版本已软删（重续判定：已存在 → 跳过）", count: 1}, "", nil
 		}
-		// 新行已在（第三方落位或前次批提交），跳过重建只补②③。
+		// 新行已在（第三方落位或前次批提交），跳过重建只补排行榜身份与②③。
+		if err := w.restoreLeaderboardIdentity(newRow, kept); err != nil {
+			return applied{}, skipStat{}, "", err
+		}
 		if err := w.softDeleteAndUnlink(oldRow, dpKey); err != nil {
 			return applied{}, skipStat{}, "", err
 		}
@@ -307,7 +334,7 @@ func (w *beatmapSetWriter) execVersionReplace(bs hub.BeatmapSet, oldKey string, 
 			"目标已出现新版本行：跳过重建，仅补软删与解绑", nil
 	case oldRow == nil:
 		// 新旧都不在现场：降级为普通新建（改判入报告）。
-		obj, err := w.createSet(bs, sameRealm)
+		obj, err := w.createSet(bs, scope)
 		if err != nil {
 			return applied{}, skipStat{}, "", err
 		}
@@ -319,8 +346,14 @@ func (w *beatmapSetWriter) execVersionReplace(bs hub.BeatmapSet, oldKey string, 
 	defer w.r.ReleaseObject(oldRow)
 	// ① 新版本整套（§5.4：以 origin_guid 新建全链，未变难度的 blob 由
 	// 链接先行保证幂等，§5.3）。
-	obj, err := w.createSet(bs, sameRealm)
+	obj, err := w.createSet(bs, scope)
 	if err != nil {
+		return applied{}, skipStat{}, "", err
+	}
+	// 新行若没带上能开排行榜的谱面 id / 状态，沿用目标旧行已经生效的值。
+	// 版本替换会软删旧行；不带回这些列，g0v0 上原本能看的排行榜会消失。
+	if err := w.restoreLeaderboardIdentity(obj, kept); err != nil {
+		w.r.ReleaseObject(obj)
 		return applied{}, skipStat{}, "", err
 	}
 	w.r.ReleaseObject(obj)
@@ -406,10 +439,249 @@ func (w *beatmapSetWriter) setBeatmapHashes(setRow realmObjectPtr) (map[string]b
 	return out, nil
 }
 
+// keptOnlineIdentity 是版本替换前目标旧行上「已经能打开排行榜」的在线
+// 身份。g0v0 客户端只在难度 OnlineID > 0 且 Status > Pending（0）时请求
+// 排行榜；私服还会把官方未上架的图标成 Approved。整集替换若用源端的
+// Pending/Graveyard 或 -1 盖掉这些值，排行榜会直接变成 BeatmapUnavailable。
+type keptOnlineIdentity struct {
+	setOnlineID int64
+	hasSetID    bool
+	setStatus   int64
+	hasSetStat  bool
+	diffs       []keptDiffIdentity
+}
+
+type keptDiffIdentity struct {
+	name     string
+	onlineID int64
+	hasID    bool
+	status   int64
+	hasStat  bool
+}
+
+// showsLeaderboard 对应 LeaderboardManager 的 Status > Pending 门槛。
+func showsLeaderboard(status int64) bool { return status > 0 }
+
+func (w *beatmapSetWriter) readKeptOnlineIdentity(setRow realmObjectPtr) (keptOnlineIdentity, error) {
+	var kept keptOnlineIdentity
+	if key, ok := w.setCols["OnlineID"]; ok {
+		v, err := w.r.GetInt64(setRow, key)
+		if err != nil {
+			return kept, fmt.Errorf("deploy: 读旧集 OnlineID: %w", err)
+		}
+		if v > 0 {
+			kept.setOnlineID = v
+			kept.hasSetID = true
+		}
+	}
+	if key, ok := w.setCols["Status"]; ok {
+		v, err := w.r.GetInt64(setRow, key)
+		if err != nil {
+			return kept, fmt.Errorf("deploy: 读旧集 Status: %w", err)
+		}
+		if showsLeaderboard(v) {
+			kept.setStatus = v
+			kept.hasSetStat = true
+		}
+	}
+	lstKey, ok := w.setCols["Beatmaps"]
+	if !ok {
+		return kept, nil
+	}
+	statusKey, hasStatus := w.bmCols["Status"]
+	nameKey, hasName := w.bmCols["DifficultyName"]
+	idKey, hasID := w.bmCols["OnlineID"]
+	if !hasStatus && !hasID {
+		return kept, nil
+	}
+	lst, err := w.r.GetList(setRow, lstKey)
+	if err != nil {
+		return kept, fmt.Errorf("deploy: 取旧集 Beatmaps（排行榜身份）: %w", err)
+	}
+	defer lst.Close()
+	n, err := lst.Size()
+	if err != nil {
+		return kept, err
+	}
+	for i := uint64(0); i < n; i++ {
+		bm, err := lst.GetLinkedObject(i)
+		if err != nil {
+			return kept, fmt.Errorf("deploy: 读旧难度（排行榜身份）: %w", err)
+		}
+		if bm == nil {
+			continue
+		}
+		d := keptDiffIdentity{}
+		if hasName {
+			d.name, err = w.r.GetString(bm, nameKey)
+			if err != nil {
+				w.r.ReleaseObject(bm)
+				return kept, fmt.Errorf("deploy: 读旧难度名: %w", err)
+			}
+		}
+		if hasID {
+			id, err := w.r.GetInt64(bm, idKey)
+			if err != nil {
+				w.r.ReleaseObject(bm)
+				return kept, fmt.Errorf("deploy: 读旧难度 OnlineID: %w", err)
+			}
+			if id > 0 {
+				d.onlineID = id
+				d.hasID = true
+			}
+		}
+		if hasStatus {
+			st, err := w.r.GetInt64(bm, statusKey)
+			if err != nil {
+				w.r.ReleaseObject(bm)
+				return kept, fmt.Errorf("deploy: 读旧难度 Status: %w", err)
+			}
+			if showsLeaderboard(st) {
+				d.status = st
+				d.hasStat = true
+			}
+		}
+		w.r.ReleaseObject(bm)
+		if d.hasID || d.hasStat {
+			kept.diffs = append(kept.diffs, d)
+		}
+	}
+	return kept, nil
+}
+
+// restoreLeaderboardIdentity 把目标旧行上仍有效的谱面 id 和排行榜状态
+// 补回新版本。只填新行上缺失的部分：来源已经带了正的 OnlineID，或状态
+// 本身就能开排行榜，就保持来源值。
+func (w *beatmapSetWriter) restoreLeaderboardIdentity(setRow realmObjectPtr, kept keptOnlineIdentity) error {
+	if key, ok := w.setCols["OnlineID"]; ok && kept.hasSetID {
+		v, err := w.r.GetInt64(setRow, key)
+		if err != nil {
+			return fmt.Errorf("deploy: 读新集 OnlineID: %w", err)
+		}
+		if v <= 0 {
+			if err := w.r.SetInt64(setRow, key, kept.setOnlineID); err != nil {
+				return fmt.Errorf("deploy: 保留旧集 OnlineID: %w", err)
+			}
+		}
+	}
+	if key, ok := w.setCols["Status"]; ok && kept.hasSetStat {
+		v, err := w.r.GetInt64(setRow, key)
+		if err != nil {
+			return fmt.Errorf("deploy: 读新集 Status: %w", err)
+		}
+		if !showsLeaderboard(v) {
+			if err := w.r.SetInt64(setRow, key, kept.setStatus); err != nil {
+				return fmt.Errorf("deploy: 保留旧集排行榜状态: %w", err)
+			}
+		}
+	}
+	lstKey, ok := w.setCols["Beatmaps"]
+	if !ok || len(kept.diffs) == 0 {
+		return nil
+	}
+	statusKey, hasStatus := w.bmCols["Status"]
+	nameKey, hasName := w.bmCols["DifficultyName"]
+	idKey, hasID := w.bmCols["OnlineID"]
+	lst, err := w.r.GetList(setRow, lstKey)
+	if err != nil {
+		return fmt.Errorf("deploy: 取新集 Beatmaps（排行榜身份）: %w", err)
+	}
+	defer lst.Close()
+	n, err := lst.Size()
+	if err != nil {
+		return err
+	}
+	for i := uint64(0); i < n; i++ {
+		bm, err := lst.GetLinkedObject(i)
+		if err != nil {
+			return fmt.Errorf("deploy: 读新难度（排行榜身份）: %w", err)
+		}
+		if bm == nil {
+			continue
+		}
+		if err := w.restoreDiffIdentity(bm, kept, hasName, nameKey, hasID, idKey, hasStatus, statusKey); err != nil {
+			w.r.ReleaseObject(bm)
+			return err
+		}
+		w.r.ReleaseObject(bm)
+	}
+	return nil
+}
+
+func (w *beatmapSetWriter) restoreDiffIdentity(bm realmObjectPtr, kept keptOnlineIdentity, hasName bool, nameKey int64, hasID bool, idKey int64, hasStatus bool, statusKey int64) error {
+	var name string
+	if hasName {
+		var err error
+		name, err = w.r.GetString(bm, nameKey)
+		if err != nil {
+			return fmt.Errorf("deploy: 读新难度名: %w", err)
+		}
+	}
+	var onlineID int64
+	if hasID {
+		var err error
+		onlineID, err = w.r.GetInt64(bm, idKey)
+		if err != nil {
+			return fmt.Errorf("deploy: 读新难度 OnlineID: %w", err)
+		}
+		if onlineID <= 0 {
+			if id, ok := keptDiffOnlineID(kept, name); ok {
+				if err := w.r.SetInt64(bm, idKey, id); err != nil {
+					return fmt.Errorf("deploy: 保留旧难度 OnlineID: %w", err)
+				}
+				onlineID = id
+			}
+		}
+	}
+	if !hasStatus {
+		return nil
+	}
+	status, err := w.r.GetInt64(bm, statusKey)
+	if err != nil {
+		return fmt.Errorf("deploy: 读新难度 Status: %w", err)
+	}
+	if showsLeaderboard(status) {
+		return nil
+	}
+	if st, ok := keptDiffStatus(kept, name, onlineID); ok {
+		if err := w.r.SetInt64(bm, statusKey, st); err != nil {
+			return fmt.Errorf("deploy: 保留旧难度排行榜状态: %w", err)
+		}
+	}
+	return nil
+}
+
+func keptDiffOnlineID(kept keptOnlineIdentity, name string) (int64, bool) {
+	for _, d := range kept.diffs {
+		if d.hasID && name != "" && d.name == name {
+			return d.onlineID, true
+		}
+	}
+	return 0, false
+}
+
+func keptDiffStatus(kept keptOnlineIdentity, name string, onlineID int64) (int64, bool) {
+	if onlineID > 0 {
+		for _, d := range kept.diffs {
+			if d.hasStat && d.hasID && d.onlineID == onlineID {
+				return d.status, true
+			}
+		}
+	}
+	if name != "" {
+		for _, d := range kept.diffs {
+			if d.hasStat && d.name == name {
+				return d.status, true
+			}
+		}
+	}
+	return 0, false
+}
+
 // createSet 新建整集全链（集行 → Files usage → 逐难度），返回集行句柄
 // （调用方释放）。同 Guid 主键已存在 = 内容键外的罕见冲突，如实上抛
 // 整批回滚（§4.2「新建以 origin_guid 为主键」的碰撞语义）。
-func (w *beatmapSetWriter) createSet(bs hub.BeatmapSet, sameRealm bool) (realmObjectPtr, error) {
+func (w *beatmapSetWriter) createSet(bs hub.BeatmapSet, scope idScope) (realmObjectPtr, error) {
 	var setObj realmObjectPtr
 	var err error
 	if w.setPK {
@@ -431,7 +703,7 @@ func (w *beatmapSetWriter) createSet(bs hub.BeatmapSet, sameRealm bool) (realmOb
 		w.r.ReleaseObject(setObj)
 		return nil, err
 	}
-	if err := w.writeSetScalars(setObj, bs, true, sameRealm); err != nil {
+	if err := w.writeSetScalars(setObj, bs, true, scope); err != nil {
 		return fail(err)
 	}
 
@@ -466,7 +738,7 @@ func (w *beatmapSetWriter) createSet(bs hub.BeatmapSet, sameRealm bool) (realmOb
 					bm.DifficultyName, bm.RulesetShortName)]++
 				continue
 			}
-			bmObj, err := w.createBeatmap(bm, setObj, rsObj, sameRealm)
+			bmObj, err := w.createBeatmap(bm, setObj, rsObj, scope)
 			w.r.ReleaseObject(rsObj)
 			if err != nil {
 				return fail(err)
@@ -481,12 +753,24 @@ func (w *beatmapSetWriter) createSet(bs hub.BeatmapSet, sameRealm bool) (realmOb
 	return setObj, nil
 }
 
+// writeResolvedOnlineID 写谱面 OnlineID。同命名空间且 id > 0 才落来源值；
+// 否则新建写 -1，更新什么都不做（保留目标端已经从服务器拿到的 id）。
+func (w *beatmapSetWriter) writeResolvedOnlineID(obj realmObjectPtr, key, id int64, isCreate, sameNamespace bool) error {
+	if !sameNamespace || id <= 0 {
+		if !isCreate {
+			return nil
+		}
+		id = -1
+	}
+	return w.r.SetInt64(obj, key, id)
+}
+
 // writeSetScalars 写集行白名单标量列。isUpdate 时不动 ID / Hash（保目标
 // Guid，§4.2；内容键命中必相等，写它是死代码）。DeletePending 恒写
 // canonical 值 false（正常进 hub 的行即如此，§4.1；恢复项靠它撤销软删）。
 // B7 端本地字段（forks.LocalFields["BeatmapSet"]：DateAdded/Status/
 // Protected）只在新建行落来源端值，就地更新不覆写目标端已有值。
-func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet, isCreate, sameRealm bool) error {
+func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet, isCreate bool, scope idScope) error {
 	if isCreate {
 		// 主键形态的 ID 已由 CreateObjectWithGuidPK 落定（主键列不可再 set）。
 		if !w.setPK {
@@ -506,16 +790,12 @@ func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet
 			}
 		}
 	}
-	// OnlineID（S8）：同域随行携带；异域新行置 -1；异域更新不触碰。
+	// 谱面 OnlineID：同谱面域且来源 id > 0 才覆盖。来源还没解析出 id
+	//（<=0）时，新建写 -1，更新保留目标已有值——清成 -1 会让 g0v0
+	// 的排行榜请求和成绩提交一起停掉。异谱面域新行一律 -1。
 	if key, ok := w.setCols["OnlineID"]; ok {
-		want := bs.OnlineID
-		if !sameRealm && isCreate {
-			want = -1
-		}
-		if sameRealm || isCreate {
-			if err := w.r.SetInt64(obj, key, want); err != nil {
-				return fmt.Errorf("deploy: 写谱面集 %s OnlineID: %w", bs.Hash, err)
-			}
+		if err := w.writeResolvedOnlineID(obj, key, bs.OnlineID, isCreate, scope.beatmap); err != nil {
+			return fmt.Errorf("deploy: 写谱面集 %s OnlineID: %w", bs.Hash, err)
 		}
 	}
 	if key, ok := w.setCols["DateAdded"]; ok && (isCreate || !forks.IsLocalField("BeatmapSet", "DateAdded")) {
@@ -575,8 +855,10 @@ func (w *beatmapSetWriter) writeSetScalars(obj realmObjectPtr, bs hub.BeatmapSet
 // matchesCanonical 现场集行是否已与 canonical 写面一致（重续判定输入）。
 // 与 writeSetScalars 严格对偶：不写的列（ID/Hash/难度/Files 列表、异域
 // 更新的 OnlineID、就地更新的 B7 端本地列）不比。
-func (w *beatmapSetWriter) matchesCanonical(obj realmObjectPtr, bs hub.BeatmapSet, sameRealm bool) (bool, error) {
-	if sameRealm {
+func (w *beatmapSetWriter) matchesCanonical(obj realmObjectPtr, bs hub.BeatmapSet, scope idScope) (bool, error) {
+	// 只比这次确实会写的 OnlineID。来源 id <= 0 时写面不触碰该列，
+	// 拿它和现场值比会让每次重续都误判成还要更新。
+	if scope.beatmap && bs.OnlineID > 0 {
 		if key, ok := w.setCols["OnlineID"]; ok {
 			v, err := w.r.GetInt64(obj, key)
 			if err != nil || v != bs.OnlineID {
@@ -756,9 +1038,9 @@ func resolveRulesetObj(r *realmc.Realm, rulesetCK uint32, rulesetCols map[string
 
 // createBeatmap 新建一行难度并挂好全部结构（标量白名单全列 + Ruleset
 // 链接 + Difficulty/UserSettings embedded + 独立 Metadata 行 + 父集反向
-// 链接），返回行句柄（调用方释放并挂入 Beatmaps 列表）。sameRealm 是
-// S8 判定结果（透传给 Metadata.Author 的 RealmUser.OnlineID 面）。
-func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObjectPtr, sameRealm bool) (realmObjectPtr, error) {
+// 链接），返回行句柄（调用方释放并挂入 Beatmaps 列表）。scope.beatmap
+// 管难度 OnlineID，scope.account 管 Metadata.Author 的用户 id。
+func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObjectPtr, scope idScope) (realmObjectPtr, error) {
 	var bmObj realmObjectPtr
 	var err error
 	if w.bmPK {
@@ -816,16 +1098,10 @@ func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObje
 			}
 		}
 	}
-	// OnlineID（S8）：同域随行携带；异域新行置 -1。S8 条文字面未单列难度级
-	// OnlineID，但 rationale（fork-g0v0 §7.5「凡 OnlineID……不可跨侧对拷」）
-	// 对难度级同样成立，且同一新建链路里集行置 -1 而难度行携带原值自相
-	// 矛盾——统一受 S8 约束（本函数只服务新建链路，无「异域更新」态）。
+	// 难度 OnlineID 是排行榜和成绩提交的键（GetScoresRequest /
+	// CreateSoloScoreRequest 都读它）。与集行同一套谱面域规则。
 	if key, ok := w.bmCols["OnlineID"]; ok {
-		want := int64(bm.OnlineID)
-		if !sameRealm {
-			want = -1
-		}
-		if err := w.r.SetInt64(bmObj, key, want); err != nil {
+		if err := w.writeResolvedOnlineID(bmObj, key, int64(bm.OnlineID), true, scope.beatmap); err != nil {
 			return fail(fmt.Errorf("deploy: 写难度 %s OnlineID: %w", bm.DifficultyName, err))
 		}
 	}
@@ -928,7 +1204,7 @@ func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObje
 	}
 
 	// Metadata 独立行（每难度一份，lazer-baseline §2.5/§2.6）。
-	mdObj, err := w.createMetadata(bm.Metadata, sameRealm)
+	mdObj, err := w.createMetadata(bm.Metadata, scope)
 	if err != nil {
 		return fail(err)
 	}
@@ -947,9 +1223,10 @@ func (w *beatmapSetWriter) createBeatmap(bm hub.Beatmap, setObj, rsObj realmObje
 
 // createMetadata 新建一行 BeatmapMetadata（C2 白名单全列：标量 + Author
 // embedded RealmUser + UserTags 列表），返回行句柄（调用方释放）。
-// sameRealm 是 S8 判定结果：Author.OnlineID 同域随行携带、异域置 -1
-//（本函数只服务新建链路——就地更新不动难度/Metadata，无「异域更新」态）。
-func (w *beatmapSetWriter) createMetadata(md hub.Metadata, sameRealm bool) (realmObjectPtr, error) {
+// scope.account 决定 Author.OnlineID：同账号域随行携带、异域置 -1
+// （本函数只服务新建链路——就地更新不动难度/Metadata，无「异域更新」态）。
+// 谱面 id 与作者用户 id 不是同一个命名空间。
+func (w *beatmapSetWriter) createMetadata(md hub.Metadata, scope idScope) (realmObjectPtr, error) {
 	mdObj, err := w.r.CreateObject(w.mdCK)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: 新建 Metadata 行: %w", err)
@@ -985,7 +1262,7 @@ func (w *beatmapSetWriter) createMetadata(md hub.Metadata, sameRealm bool) (real
 			// 用户 id 不落目标库（对齐集行 OnlineID 与成绩写入器 User.OnlineID
 			// 的处理面）。
 			want := int64(md.Author.OnlineID)
-			if !sameRealm {
+			if !scope.account {
 				want = -1
 			}
 			if err := w.r.SetInt64(author, key, want); err != nil {

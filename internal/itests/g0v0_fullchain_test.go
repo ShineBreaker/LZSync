@@ -4,12 +4,11 @@ package itests
 // ① 市场规则集过滤：g0v0 座（G0v0DiffSeed：OnlineID≥10 市场规则集行 +
 // 指向它的成绩）真实收集 → 指向市场行的成绩整条丢弃 + 计数告知，hub 零
 // 污染；市场行与成绩行留现场（丢弃 = 不入 hub，不是删除游戏侧）。
-// ② OnlineID 命名空间双向（S8，origin_fork → ServerRealm 判定）：
-// g0v0→官方：异域新行 OnlineID 全链置 -1（集行/难度行/Author.OnlineID/
-// 成绩 OnlineID/User.OnlineID）；官方→g0v0：现场同键行就地更新时
-// OnlineID/LegacyOnlineID/User.OnlineID 列不触碰（现场值保留，白名单
-// 其余列被 canonical 覆盖证明覆盖写入确实发生）。librealm 缺失时显式
-// SKIP（§8.1）。
+// ② OnlineID 命名空间（S8）：谱面 id 在 g0v0 与官方之间同属 ppy（服务端
+// 镜像 osu.ppy.sh），跨端原样携带，否则客户端排行榜和成绩提交会因
+// OnlineID <= 0 停掉。账号域与成绩 id 仍然隔离：Author.OnlineID、
+// Score.OnlineID/LegacyOnlineID/User.OnlineID 在跨端新行置 -1，就地
+// 更新不触碰。librealm 缺失时显式 SKIP（§8.1）。
 
 import (
 	"context"
@@ -57,7 +56,7 @@ func TestG0v0CompatFullChain(t *testing.T) {
 		assertRealmInt64(t, r, mktObj, "Score", "OnlineID", 99001, "市场成绩行留现场（收集不删）")
 	})
 
-	// ---- ②a g0v0 → 官方（lazer 空座 B）：异域新行 OnlineID 置 -1 ----
+	// ---- ②a g0v0 → 官方（lazer 空座 B）：谱面 id 携带，账号/成绩 id 置 -1 ----
 	refB := buildLib(t, fixture.ForkLazer, fixture.VersionLazer, fixture.Seed{})
 	planB, err := deploy.BuildPlan(ctx, e.hub, refB, deploy.BuildOptions{Files: e.engine.Store})
 	if err != nil {
@@ -91,11 +90,12 @@ func TestG0v0CompatFullChain(t *testing.T) {
 	withRO(t, lib, refB.RealmPath, func(r *realmc.Realm) {
 		setObj := findRowByString(t, r, "BeatmapSet", "Hash", stdSetA.Hash)
 		defer r.ReleaseObject(setObj)
-		assertRealmInt64(t, r, setObj, "BeatmapSet", "OnlineID", -1,
-			"异域新行集 OnlineID 置 -1（canonical=1001，g0v0.top→ppy）")
+		assertRealmInt64(t, r, setObj, "BeatmapSet", "OnlineID", stdSetA.OnlineID,
+			"谱面集 OnlineID 跨 g0v0/官方携带（同一 ppy 谱面域）")
 		for _, bm := range stdSetA.Beatmaps {
 			bmObj := findRowByString(t, r, "Beatmap", "Hash", bm.Hash)
-			assertRealmInt64(t, r, bmObj, "Beatmap", "OnlineID", -1, "异域新行难度 OnlineID 置 -1")
+			assertRealmInt64(t, r, bmObj, "Beatmap", "OnlineID", int64(bm.OnlineID),
+				"难度 OnlineID 跨 g0v0/官方携带（排行榜与提交用的键）")
 			r.ReleaseObject(bmObj)
 		}
 		mdObj := findRowByString(t, r, "BeatmapMetadata", "Title", stdSetA.Title)
@@ -151,7 +151,7 @@ func TestG0v0CompatFullChain(t *testing.T) {
 		t.Fatalf("StandardSeed(D): %v", err)
 	}
 	seedD.BeatmapSets[0].OnlineID = 777001
-	seedD.BeatmapSets[0].StatusInt = 0      // B7 端本地字段：现场差异但就地更新不覆写（G10 保留断言面）
+	seedD.BeatmapSets[0].StatusInt = 0       // B7 端本地字段：现场差异但就地更新不覆写（G10 保留断言面）
 	seedD.BeatmapSets[0].DateSubmitted = nil // 非本地字段现场差异 → matchesCanonical 不一致 → 覆盖写入确实发生
 	seedD.Scores[0].OnlineID = 888001
 	seedD.Scores[0].LegacyOnlineID = 888002
@@ -218,8 +218,8 @@ func TestG0v0CompatFullChain(t *testing.T) {
 				t.Errorf("DateSubmitted 覆盖后应非空 canonical 值: null=%v err=%v", null, err)
 			}
 		}
-		assertRealmInt64(t, r, setObj, "BeatmapSet", "OnlineID", 777001,
-			"异域更新不触碰集 OnlineID（canonical=1001，现场值保留）")
+		assertRealmInt64(t, r, setObj, "BeatmapSet", "OnlineID", seedC.BeatmapSets[0].OnlineID,
+			"谱面 id 同属 ppy，就地更新写成来源的官方 id（现场假值 777001 不是 g0v0 自己的命名空间）")
 
 		// 成绩：TotalScore 被 canonical 覆盖（覆盖证据），S8 三列保持现场值。
 		scObj := findRowByString(t, r, "Score", "Hash", dScore.Hash)

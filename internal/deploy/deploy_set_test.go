@@ -3,7 +3,8 @@ package deploy
 // 谱面集投放验收（design.md §7-M2-2 谱面集/难度投放 + §5.3 链接先行）：
 // fixture 双库全链——投放 N 个合成集后目标库行数/内容键集合/逐字段相等、
 // 游戏侧 files/ 哈希实体齐全且字节读回校验、结构档案零漂移、重续幂等；
-// S8 双向（同域携带 / 异域新行 -1 / 异域更新不触碰该列）；缺列降级 +
+// S8 双向（同域携带 / 账号域 Author 置 -1、谱面 id 在 ppy 域内携带 /
+// 未解析的谱面 id 不覆盖目标已有值）；缺列降级 +
 // 官方规则集缺行新建分支；版本更新 skip 项呈现（留待块 4）；执行期改判。
 // librealm 缺失时显式 SKIP（§8.1 补充门：不得静默绿）。
 
@@ -389,11 +390,11 @@ func namedFilesEqual(a, b []hub.NamedFile) bool {
 }
 
 // assertSetDeepEqual 逐字段断言。wantOnlineID 是集行 OnlineID 的独立期望
-//（S8 异域/重续场景读回值 ≠ canonical 值）；crossRealmCreate 标记「本次
-// 写入是异域新建形态」——该形态下难度行 OnlineID 与 Metadata.Author 的
-// RealmUser.OnlineID（各难度 canonical 值不同/相同，故不取单值参数）期望
-// 均为 -1，其余场景期望各自 canonical 值。
-func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID int64, crossRealmCreate bool) {
+// （S8 重续场景读回值 ≠ canonical 值）。crossAccount 标记「账号域不同」：
+// Metadata.Author 的 RealmUser.OnlineID 期望 -1。谱面 OnlineID（集行由
+// wantOnlineID 指定，难度行跟 canonical）走 BeatmapServerRealm，g0v0 与
+// 官方同属 ppy，不在这里清掉。
+func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID int64, crossAccount bool) {
 	t.Helper()
 	if got.ID != want.ID && !guidEqual(got.ID, want.ID) {
 		t.Errorf("集 Guid = %s，期望 %s", got.ID, want.ID)
@@ -432,11 +433,11 @@ func assertSetDeepEqual(t *testing.T, got, want hub.BeatmapSet, wantOnlineID int
 			t.Errorf("多出难度 %s（Hash %s）", bm.DifficultyName, bm.Hash)
 			continue
 		}
-		assertBeatmapDeepEqual(t, bm, wantBM, crossRealmCreate)
+		assertBeatmapDeepEqual(t, bm, wantBM, crossAccount)
 	}
 }
 
-func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, crossRealmCreate bool) {
+func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, crossAccount bool) {
 	t.Helper()
 	if got.ID != want.ID && !guidEqual(got.ID, want.ID) {
 		t.Errorf("难度 %s Guid = %s，期望 %s", want.DifficultyName, got.ID, want.ID)
@@ -467,12 +468,8 @@ func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, crossRealmCreat
 			t.Errorf("难度 %s %s = %d，期望 %d", want.DifficultyName, c.name, c.a, c.b)
 		}
 	}
-	wantOnlineID := int64(want.OnlineID)
-	if crossRealmCreate {
-		wantOnlineID = -1
-	}
-	if int64(got.OnlineID) != wantOnlineID {
-		t.Errorf("难度 %s OnlineID = %d，期望 %d", want.DifficultyName, got.OnlineID, wantOnlineID)
+	if got.OnlineID != want.OnlineID {
+		t.Errorf("难度 %s OnlineID = %d，期望 %d", want.DifficultyName, got.OnlineID, want.OnlineID)
 	}
 	for _, c := range []struct {
 		name string
@@ -522,7 +519,7 @@ func assertBeatmapDeepEqual(t *testing.T, got, want hub.Beatmap, crossRealmCreat
 		t.Errorf("难度 %s Author 标量 = %+v，期望 %+v", want.DifficultyName, got.Metadata.Author, want.Metadata.Author)
 	}
 	wantAuthorOnlineID := int64(want.Metadata.Author.OnlineID)
-	if crossRealmCreate {
+	if crossAccount {
 		wantAuthorOnlineID = -1
 	}
 	if int64(got.Metadata.Author.OnlineID) != wantAuthorOnlineID {
@@ -738,8 +735,9 @@ func TestDeployBeatmapSetFullChain(t *testing.T) {
 	}
 }
 
-// TestDeployBeatmapSetS8 S8 双向：同域携带；异域新行置 -1；异域更新
-// 不触碰 OnlineID 列。
+// TestDeployBeatmapSetS8 S8：同域携带谱面 id；g0v0 与官方谱面 id 同属
+// ppy，跨端也携带。Author.OnlineID 仍按账号域隔离。仅本地字段不同的
+// 更新不改写 OnlineID。
 func TestDeployBeatmapSetS8(t *testing.T) {
 	lib := mustLib(t)
 	ctx := context.Background()
@@ -789,8 +787,8 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 	applySnap(t, h, hub.Snapshot{ForkID: refB.ForkID, CollectedAt: t0.Add(time.Hour),
 		BeatmapSets: []hub.BeatmapSet{set}})
 
-	// ② 异域新行置 -1：canonical 来源换 g0v0（ServerRealm "g0v0.top"），
-	// 新集（不同 Hash）投放 → OnlineID 落 -1。
+	// ② g0v0 → delta：账号域不同，Author.OnlineID 置 -1。谱面 id 两边都是
+	// ppy（g0v0 镜像官方谱面 id），集行和难度行原样携带，排行榜才找得到图。
 	set2, err := fixture.MaterializeSet(7002, "S8 Artist", "S8 Title II", "mapperS8",
 		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("s8 osu bytes ii")}}, nil, files)
 	if err != nil {
@@ -816,7 +814,7 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !ok {
 			t.Fatal("异域新行投放后读回缺集")
 		}
-		assertSetDeepEqual(t, got, set2, -1, true) // S8：异域新行集/难度/Author 三面 OnlineID 均 -1
+		assertSetDeepEqual(t, got, set2, set2.OnlineID, true) // 谱面 id 同属 ppy；Author 仍是账号域，置 -1
 	})
 
 	// ③ 异域更新不触碰（§0-B2/B4：canonical 首见即定 + 冲突默认不落地
@@ -862,6 +860,225 @@ func TestDeployBeatmapSetS8(t *testing.T) {
 		if !got.DateAdded.Equal(set.DateAdded) || got.StatusInt != set.StatusInt {
 			t.Errorf("B7 本地字段被覆写：DateAdded=%v StatusInt=%d，期望保留目标端值 %v/%d",
 				got.DateAdded, got.StatusInt, set.DateAdded, set.StatusInt)
+		}
+	})
+}
+
+// TestDeployG0v0KeepsBeatmapIdentityForLeaderboard 官方谱面投到 g0v0 时
+// 保留谱面 OnlineID（客户端靠它拉排行榜、提交成绩），账号域的作者 id
+// 和成绩 OnlineID 仍然隔离。
+func TestDeployG0v0KeepsBeatmapIdentityForLeaderboard(t *testing.T) {
+	lib := mustLib(t)
+	ctx := context.Background()
+	files := map[string][]byte{}
+	set, err := fixture.MaterializeSet(4242, "LB Artist", "LB Title", "mapperLB",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("leaderboard osu bytes")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet: %v", err)
+	}
+	set.ID = "42424242-4242-4242-8242-424242424242"
+	set.Beatmaps[0].ID = "42424242-4242-4242-8242-424242424243"
+
+	ref, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkG0v0, SchemaVersion: fixture.VersionG0v0,
+		DataDir: t.TempDir(), Seed: fixture.Seed{},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build: %v", err)
+	}
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	h := openMemHub(t)
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0, BeatmapSets: []hub.BeatmapSet{set}})
+	plan, err := NewPlan(ref.ForkID, []PlanItem{{
+		Kind: hub.KindBeatmapSet, ContentKey: set.Hash, Action: ActionCreate,
+		SourceFork: fixture.ForkLazer, Summary: "谱面集",
+	}})
+	if err != nil {
+		t.Fatalf("NewPlan: %v", err)
+	}
+	plan.Target = ref
+	if _, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil); err != nil {
+		t.Fatalf("Deploy(谱面): %v", err)
+	}
+	withSetReader(t, lib, ref.RealmPath, func(sr *setReader) {
+		got, ok := sr.readSetProjection(set.Hash)
+		if !ok {
+			t.Fatal("g0v0 缺谱面集")
+		}
+		if got.OnlineID != 4242 {
+			t.Errorf("集 OnlineID = %d，期望 4242（排行榜按官方谱面 id 查询）", got.OnlineID)
+		}
+		if len(got.Beatmaps) != 1 || got.Beatmaps[0].OnlineID != set.Beatmaps[0].OnlineID {
+			t.Errorf("难度 OnlineID = %+v，期望 %d", got.Beatmaps, set.Beatmaps[0].OnlineID)
+		}
+		if got.Beatmaps[0].StatusInt != 1 {
+			t.Errorf("难度 Status = %d，期望 Ranked(1)", got.Beatmaps[0].StatusInt)
+		}
+		if got.Beatmaps[0].Metadata.Author.OnlineID != -1 {
+			t.Errorf("Author.OnlineID = %d，期望 -1（账号域仍隔离）", got.Beatmaps[0].Metadata.Author.OnlineID)
+		}
+	})
+
+	sc := makeScore("42424242-4242-4242-8242-424242424244", set.Beatmaps[0].Hash, "osu",
+		[]byte("bancho replay must not keep its score id"), files)
+	sc.OnlineID = 55555
+	fillStore(t, store, files)
+	hScore := openMemHub(t)
+	applySnap(t, hScore, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0, Scores: []hub.Score{sc}})
+	if _, err := NewRunner(Deps{Hub: hScore, Files: filestore.NewEngine(store)}).
+		Deploy(ctx, scorePlan(t, ref.ForkID, ref, []hub.Score{sc}), nil); err != nil {
+		t.Fatalf("Deploy(成绩): %v", err)
+	}
+	withSetReader(t, lib, ref.RealmPath, func(sr *setReader) {
+		got, ok := readScoreRow(t, sr, sc)
+		if !ok {
+			t.Fatal("g0v0 缺成绩")
+		}
+		if got.OnlineID != -1 {
+			t.Errorf("成绩 OnlineID = %d，期望 -1（成绩 id 不属于 ppy 谱面域）", got.OnlineID)
+		}
+		if got.User.OnlineID != -1 {
+			t.Errorf("成绩 User.OnlineID = %d，期望 -1", got.User.OnlineID)
+		}
+	})
+}
+
+// TestDeployG0v0VersionReplaceKeepsLeaderboardStatus 版本替换不能把
+// g0v0 上已经能显示排行榜的状态盖成官方的 Pending，也不能在来源没有
+// 谱面 id 时把目标旧 id 丢掉。
+func TestDeployG0v0VersionReplaceKeepsLeaderboardStatus(t *testing.T) {
+	lib := mustLib(t)
+	ctx := context.Background()
+	files := map[string][]byte{}
+	v1, err := fixture.MaterializeSet(2002, "Keep Artist", "Keep Title", "mapper",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("osu file format v14\nv1\n")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet(v1): %v", err)
+	}
+	v1.StatusInt = 2 // Approved：私服为了开排行榜回写的状态
+	v1.Beatmaps[0].StatusInt = 2
+	v2, err := fixture.MaterializeSet(2002, "Keep Artist", "Keep Title", "mapper",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("osu file format v14\nv2-edited\n")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet(v2): %v", err)
+	}
+	v2.ID = "20022002-2002-4202-8202-200220022002"
+	v2.Beatmaps[0].ID = "20022002-2002-4202-8202-200220022003"
+	v2.StatusInt = 0 // Pending：官方状态，客户端会因此关掉排行榜
+	v2.Beatmaps[0].StatusInt = 0
+	v2.OnlineID = -1 // 来源尚未解析；目标旧行的 id 必须留下来
+	v2.Beatmaps[0].OnlineID = -1
+
+	ref, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkG0v0, SchemaVersion: fixture.VersionG0v0,
+		DataDir: t.TempDir(),
+		Seed:    fixture.Seed{BeatmapSets: []hub.BeatmapSet{v1}, Files: files},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build: %v", err)
+	}
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	h := openMemHub(t)
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0, BeatmapSets: []hub.BeatmapSet{v2}})
+	plan, err := NewPlan(ref.ForkID, []PlanItem{{
+		Kind: hub.KindBeatmapSet, ContentKey: v2.Hash, OldContentKey: v1.Hash,
+		Action: ActionVersionReplace, SourceFork: fixture.ForkLazer, Summary: "版本替换",
+	}})
+	if err != nil {
+		t.Fatalf("NewPlan: %v", err)
+	}
+	plan.Target = ref
+	report, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil)
+	if err != nil {
+		t.Fatalf("Deploy: %v（report=%+v）", err, report)
+	}
+	withSetReader(t, lib, ref.RealmPath, func(sr *setReader) {
+		got, ok := sr.readSetProjection(v2.Hash)
+		if !ok {
+			t.Fatal("新版本未落地")
+		}
+		if got.OnlineID != v1.OnlineID {
+			t.Errorf("新集 OnlineID = %d，期望沿用目标旧值 %d", got.OnlineID, v1.OnlineID)
+		}
+		if got.StatusInt != 2 {
+			t.Errorf("新集 Status = %d，期望保留 Approved(2)", got.StatusInt)
+		}
+		if len(got.Beatmaps) != 1 {
+			t.Fatalf("难度数 = %d", len(got.Beatmaps))
+		}
+		if got.Beatmaps[0].OnlineID != v1.Beatmaps[0].OnlineID {
+			t.Errorf("新难度 OnlineID = %d，期望 %d", got.Beatmaps[0].OnlineID, v1.Beatmaps[0].OnlineID)
+		}
+		if got.Beatmaps[0].StatusInt != 2 {
+			t.Errorf("新难度 Status = %d，期望保留 Approved(2)（否则排行榜判定 BeatmapUnavailable）", got.Beatmaps[0].StatusInt)
+		}
+		old, ok := sr.readSetProjection(v1.Hash)
+		if !ok || !old.DeletePending {
+			t.Fatalf("旧版本 DeletePending = %v ok=%v，期望已软删", old.DeletePending, ok)
+		}
+	})
+}
+
+// TestDeployDoesNotClearResolvedBeatmapOnlineID 来源谱面 id 还是 -1 时，
+// 就地更新不能把目标端已经从服务器拿到的 id 清掉。
+func TestDeployDoesNotClearResolvedBeatmapOnlineID(t *testing.T) {
+	lib := mustLib(t)
+	ctx := context.Background()
+	files := map[string][]byte{}
+	set, err := fixture.MaterializeSet(4242, "Keep Artist", "Keep Title", "mapper",
+		[]fixture.DiffMaterial{{Name: "Only", OsuBytes: []byte("resolved osu bytes")}}, nil, files)
+	if err != nil {
+		t.Fatalf("MaterializeSet: %v", err)
+	}
+	ref, err := fixture.Build(ctx, fixture.Spec{
+		ForkID: fixture.ForkG0v0, SchemaVersion: fixture.VersionG0v0,
+		DataDir: t.TempDir(),
+		Seed:    fixture.Seed{BeatmapSets: []hub.BeatmapSet{set}, Files: files},
+	})
+	if err != nil {
+		t.Fatalf("fixture.Build: %v", err)
+	}
+	unresolved := set
+	unresolved.OnlineID = -1
+	unresolved.Beatmaps[0].OnlineID = -1
+	later := set.DateSubmitted.Add(time.Hour)
+	unresolved.DateSubmitted = &later
+	store, err := filestore.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatalf("filestore.Open: %v", err)
+	}
+	fillStore(t, store, files)
+	h := openMemHub(t)
+	applySnap(t, h, hub.Snapshot{ForkID: fixture.ForkLazer, CollectedAt: t0, BeatmapSets: []hub.BeatmapSet{unresolved}})
+	plan, err := NewPlan(ref.ForkID, []PlanItem{{
+		Kind: hub.KindBeatmapSet, ContentKey: set.Hash, Action: ActionUpdate,
+		SourceFork: fixture.ForkLazer, Summary: "更新",
+	}})
+	if err != nil {
+		t.Fatalf("NewPlan: %v", err)
+	}
+	plan.Target = ref
+	if _, err := NewRunner(Deps{Hub: h, Files: filestore.NewEngine(store)}).Deploy(ctx, plan, nil); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	withSetReader(t, lib, ref.RealmPath, func(sr *setReader) {
+		got, ok := sr.readSetProjection(set.Hash)
+		if !ok {
+			t.Fatal("更新后缺集")
+		}
+		if got.OnlineID != 4242 {
+			t.Errorf("集 OnlineID = %d，期望保持 4242", got.OnlineID)
+		}
+		if got.DateSubmitted == nil || !got.DateSubmitted.Equal(later) {
+			t.Errorf("DateSubmitted = %v，期望被来源覆盖为 %v（证明更新发生了）", got.DateSubmitted, later)
 		}
 	})
 }

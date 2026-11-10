@@ -111,7 +111,7 @@ LZSync 本体是一座**收全的仓库**（hub），每个 fork 都是它的导
 | S5a | **file format 版本防线**：LZSync 携带的 librealm 钉死 20.1.x，与四端精确对齐（四端 Realm NuGet 全部 20.1.0，本仓库核验：`reference/{lazer,delta,Ez2Lazer,g0v0}/osu.Game/osu.Game.csproj` 依次 :40/:42/:44/:66 → 内置 core 20.1.1 / file format v24）；对打开失败的库（文件格式比自带 core 更新，未来某端升级 SDK 后的场景）一律拒绝读写并提示升级 LZSync，绝不尝试用更高版本 core 触碰用户库 | realm 文件格式 v10+ 的自动升级**不可逆**（无法被旧 SDK 打开，go-realm-options §1.3-2）——S1–S10 只防 schema 版本，此处补 file format 版本；同代对齐下无风险，防线针对未来分叉 |
 | S6 | **File 表行与模型引用必须同一事务成对写入**；files/ 磁盘文件（链接或副本，§5.3）先于 Realm 行落地 | lazer 的 `Cleanup()` 会物理删除所有引用计数为零的 RealmFile 及其磁盘文件（lazer-baseline §1.4；fork-comparison R3）；先写行后落文件则产生读流失败的坏引用（fork-ez2lazer §6 外部托管行即此后果） |
 | S7 | **绝不写悬空行**：成绩在目标库找不到 `BeatmapHash` 对应难度即跳过并计数，绝不落地无谱面成绩；单独同步难度而目标缺父谱面集时报错阻止 | ScoreInfo.BeatmapInfo 官方允许为 null 但那是「谱面事后变化」的暂态；工具写入悬空行即制造坏数据（ezrealmsync-design §2.7、§2.8） |
-| S8 | **在线 ID 不跨服务器对拷**：`Score.OnlineID/LegacyOnlineID`、`BeatmapSet.OnlineID`、`RealmUser.OnlineID` 只在两端连接同一服务器时可携带；任何端与 g0v0 之间绝不互拷（新行置 -1，更新行不触碰该列） | OnlineID 分属不同服务器的命名空间，对拷即张冠李戴（fork-g0v0 §7.5；fork-comparison R1） |
+| S8 | **账号与成绩 id 不跨服务器对拷；谱面 id 按谱面域携带**：`Score.OnlineID/LegacyOnlineID`、`RealmUser.OnlineID` 只在两端 `ServerRealm` 相同时携带，任何端与 g0v0 之间新行置 -1、更新行不触碰。`BeatmapSet.OnlineID` / `Beatmap.OnlineID` 按 `BeatmapServerRealm`：g0v0 镜像官方谱面 id（与 Bancho 同属 `ppy`），跨端必须原样携带。来源 id ≤ 0 时不把目标已有 id 清掉；版本替换若新行没有可用谱面 id 或排行榜状态，保留目标旧行上已经能显示排行榜的值 | 成绩/用户 id 分属不同服务器（fork-g0v0 §7.5）。谱面 id 不是：g0v0-server `get_or_fetch` 调 `osu.ppy.sh/api/v2/beatmaps/lookup` 并保存返回的 id。客户端 `LeaderboardManager` 在 `OnlineID <= 0` 或 `Status <= Pending` 时直接 `BeatmapUnavailable`，`SoloPlayer` 在 `OnlineID <= 0` 时不提交 |
 | S9 | **全库级覆盖永远是最后一步**：任何重建整库/整目录的操作先产临时产物、自检（版本号、结构、行数三查）通过后再原子替换原文件 | 前面任何失败原文件一字未动（ezrealmsync-design §4.2 的收窄链路先例） |
 | S10 | **凭据与机器绑定数据绝不同步**：`game.ini` 的 `Token`/`Username`、`framework.ini`、`storage.ini`、`client.realm.lock/.management/.note`、`rulesets/`、`online.db`、各 fork 私有文件（`EzSkinSettings.ini`、`rulesets.json` 等）一律排除 | OAuth 凭据敏感且跨服务器错位、framework.ini 绑定显示器/音频设备、伴生文件是进程锁（fork-comparison §5.3 红灯清单） |
 | S12 | **ini 类文件原子写**：game.ini 的任何写入走「写前备份原件 → 临时文件 → rename 原子替换」，绝不就地覆写 | ini 无事务概念，游戏关闭的写入窗口内 LZSync 崩溃会留半份文件；EZRealmSync 不做 ini，无先例可搬，须自补此纪律 |
@@ -355,8 +355,8 @@ EZRealmSync 按 `(EntityKind, Guid)` diff 成立的前提是 A/B 同属一个库
 
 | 适用范围 | 谱面身份键 | 可靠性与默认动作 |
 |---------|-----------|----------------|
-| 同服务器两端（lazer↔delta↔Ez，`ServerRealm` 相同） | 集级 `OnlineID > 0` 且相等 | 强键：同一 beatmapset 在官方服务器的稳定 id（lazer-baseline §2.4），且 S8 本就允许同服务器同步 OnlineID → 默认按版本更新执行 |
-| 跨服务器（任一端为 g0v0），或两端任一 `OnlineID = -1`（本地谱面） | 元数据键 `(Artist, Title, Author.Username)`（取首难度 Metadata）相等 → **疑似**同谱面 | 弱键：同名同作者不同谱面存在误判可能 → 归入「需用户确认」组、默认不勾选（ask 策略，fork-comparison §3），用户拍板后方可按版本更新执行 |
+| `BeatmapServerRealm` 相同且集级 `OnlineID > 0`（lazer↔delta↔Ez↔stable，以及 g0v0：谱面 id 镜像官方，同属 `ppy`） | `online:<id>` | 强键：同一 beatmapset 在官方谱面库的稳定 id（lazer-baseline §2.4）。g0v0 的账号域不同，但谱面域相同，强键仍然成立 → 默认按版本更新执行 |
+| `OnlineID <= 0`（本地谱面，或来源尚未向服务器解析出 id） | 元数据键 `(Artist, Title, Author.Username)`（取首难度 Metadata）相等 → **疑似**同谱面 | 弱键：同名同作者不同谱面存在误判可能 → 归入「需用户确认」组、默认不勾选（ask 策略，fork-comparison §3），用户拍板后方可按版本更新执行 |
 
 难度层不做独立版本对账：集级身份成立后**整集按一个新版本处理**——BeatmapInfo 无软删列、无独立清理通道（软删仅在 Set/Score/Skin/ModPreset，lazer-baseline §2.5、fork-comparison C8），难度行的生命周期必须挂在可软删的父集上管理（处置语义见 §5.4）。
 
@@ -567,7 +567,7 @@ type ForkProfile struct {
 ### M3 差异适配与外围：全 fork 覆盖 + 设置 + 降级
 
 1. Ez 库参与全类型同步：10 个 Ez 列在覆盖写入时原值保留（构造库断言）、7 张技能表/外部托管 set/BMS 规则集连带行全部按规则丢弃且计数告知、StatisticsJson 未知键过滤、mod 白名单拦截（构造含 Ez 判定档/未知键/非官方 mod 的成绩夹具逐条断言）。
-2. g0v0 库参与：市场规则集行（OnlineID ≥ 10）过滤；OnlineID 命名空间规则生效（跨服务器方向新行置 -1、更新行不动该列，构造库断言）。
+2. g0v0 库参与：市场规则集行（OnlineID ≥ 10）过滤；成绩/账号 OnlineID 跨服务器新行置 -1、更新行不触碰；谱面 OnlineID 按 BeatmapServerRealm=ppy 跨端携带（构造库断言）。
 3. 键位（ActionInt 枚举域交集过滤）/规则集设置/ModPreset/game.ini 白名单键同步。
 4. delta gimmick 检测告警在预览页呈现（构造含 gimmick section 的 .osu 夹具）。
 5. 降级路径：无 native 库时应用可启动并提示；`(.osz/.osk/.osr 生成 + 拉起客户端导入)` 至少对 .osz 跑通。
