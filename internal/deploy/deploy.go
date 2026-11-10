@@ -237,6 +237,14 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 			report.Repointed = append(report.Repointed, RepointedItem{Item: batch[it], Reason: reason})
 		}
 	}
+	// 已经同步坏掉的谱面（OnlineID=-1，或版本替换把能开排行榜的状态
+	// 盖掉）不进差异计划。每次投放顺手修，下一次同步即使没有别的写入
+	// 也会再走这里（空计划由 CommitRun 单独调用）。
+	if n, err := r.repairBeatmapLeaderboards(ctx, realm, plan.TargetFork); err != nil {
+		return report, err
+	} else if n > 0 {
+		skipped[BeatmapIdentityRepairReason] += n
+	}
 	report.Skipped = sortedSkips(skipped)
 	report.GimmickWarnings = appliedGimmickWarnings(plan, report.Applied)
 

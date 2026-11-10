@@ -270,6 +270,21 @@ func TestCompatFilterData(t *testing.T) {
 	if lazerProfile.BeatmapRealm() != "ppy" {
 		t.Errorf("lazer BeatmapRealm = %q，期望 ppy", lazerProfile.BeatmapRealm())
 	}
+	// 谱面 id 清零只发生在 BeatmapRealm 不同的两端之间。目前注册的端
+	// 谱面域都是 ppy（g0v0 镜像官方谱面 id）；lazer/delta/ez/stable 的
+	// 账号域也是 ppy，彼此同步本来就不会清谱面 id。
+	for _, id := range []string{"lazer", "delta", "ez2lazer", "stable", "g0v0"} {
+		p, _ := Profile(id)
+		if p.BeatmapRealm() != "ppy" {
+			t.Errorf("%s BeatmapRealm = %q，期望 ppy", id, p.BeatmapRealm())
+		}
+	}
+	for _, id := range []string{"lazer", "delta", "ez2lazer", "stable"} {
+		p, _ := Profile(id)
+		if p.ServerRealm != p.BeatmapRealm() {
+			t.Errorf("%s 账号域 %q 与谱面域 %q 不应分裂（不是独立私服谱面库）", id, p.ServerRealm, p.BeatmapRealm())
+		}
+	}
 	for _, p := range []ForkProfile{ez, g0} {
 		if p.MarketRulesetMinOnlineID != 0 && len(p.OwnRulesets) > 0 {
 			// 不构成错误（两种机制可并存），仅提示数据面一致性。

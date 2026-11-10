@@ -58,6 +58,8 @@ LZSync 将条目的「同步身份」与「当前取值」分离，并记录每�
 | **g0v0** | `g0v0` | `client.realm`、`files/` | `52` | 保留官方谱面 `OnlineID`：g0v0-server 使用 Bancho 的谱面 id，客户端缺少该 id 时不会加载排行榜，也不会提交成绩。成绩 id 与账号 id 仍与 `g0v0.top` 隔离。跳过 `OnlineID >= 10` 的市场规则集及其成绩。 |
 | **osu!stable** | 自定义安装目录 | `osu!.db`、`collection.db`、`Songs/`、`Skins/` | 旧版二进制 | 支持谱面集、收藏夹与皮肤双向同步。直接扫描 `Songs/` 目录并从 `osu!.db` 补充难度 MD5 与星级；以链接方式生成 `Songs/<setID> <artist> - <title>/` 目录并原子重写 `collection.db`。永不写入 `osu!.db`，新增曲目由游戏启动时自动索引。 |
 
+lazer、DeltaLazer、Ez2Lazer 与 osu!stable 的谱面 id 都属于 Bancho，彼此同步不会把 `Beatmap.OnlineID` 清成 `-1`。会清掉的只有 g0v0 那条独立的账号域。Ez2Lazer 的 `ServerPreset`（`EzSkinSettings.ini` 里的官方 / 手动 / g0v0）和 g0v0 的 `CustomApiUrl` 是单机安装设置，不是额外的客户端档案。之后再同步一次会修已经损坏的谱面：缺失的谱面 id 从同一谱面域的其他客户端，或从本库旧行（含已软删的版本）补回；排行榜状态只从本库旧行恢复，不会按官方端的状态凭空标成 Ranked/Approved。成绩 id 和账号 id 不在修复范围内。
+
 加入日期、最后游玩时间、在线状态、本地星级、PP 与音频偏移等端本地字段绝不覆盖目标端已有记录。账号凭据与设备绑定文件，包含 `Token`、`Username`、`ReleaseStream`、`framework.ini`、`storage.ini` 与 `online.db`，全部硬性排除在同步范围之外。
 
 ## 数据库安全机制

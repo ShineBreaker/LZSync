@@ -248,7 +248,12 @@ var profiles = []ForkProfile{
 		ProcessNames:  []string{"Ez2Lazer"},         // EZRealmSync 守卫名单（ezrealmsync-design §5.5）
 		DecodeVersion: decodeEz,
 		DiskVersion:   52011, // 52×1000+11（fork-ez2lazer §2.1）
-		ServerRealm:   "ppy", // 默认官方服务器（ServerPreset 官方/手动/g0v0 可切，fork-ez2lazer §4.4；静态 Profile 取默认）
+		// 默认连官方服，谱面 id 与账号 id 都在 ppy。ServerPreset 可在本机
+		// 改成 Manual 或 g0v0（EzSkinSettings.ini，不同步）。那是安装期
+		// 配置而不是另一个 fork：默认档不会把谱面 id 清成 -1。指到 g0v0
+		// 时谱面 id 仍是官方 id；Manual 的谱面域无法从静态 Profile 判定，
+		// 修复路径只补本库已有的 id，不另造一套命名空间。
+		ServerRealm: "ppy",
 		// 10 个追加规范列（fork-ez2lazer §2.4 字段级摘录；表名用 Realm 侧
 		// 表名，与 fork-comparison §2-C2 白名单键同风格；HostingKindInt 的
 		// [MapTo] 列名为 HostingKind，§7A / ezrealmsync-design §2.5 静态名单同款）。
