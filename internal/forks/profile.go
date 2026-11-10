@@ -20,7 +20,7 @@ type SkinFingerprint struct {
 }
 
 // StorageKind 端存储载体类型：realm 库端（四端）或 legacy 文件系统端
-//（stable——osu!.db 二进制索引 + Songs/Skins 解包目录，无 realm 库，
+// （stable——osu!.db 二进制索引 + Songs/Skins 解包目录，无 realm 库，
 // stable-legacy §0）。collect 按 StorageRealm 投影 realm、按 StorageLegacy
 // 扫描目录与 db；deploy 同理分派写入后端。
 type StorageKind int
@@ -51,8 +51,18 @@ type ForkProfile struct {
 	// DiskVersion 当前已知的磁盘 schema 版本（fork-comparison §1.1：
 	// 52 / 51 / 52011 / 52），版本探测降级链的身份判定数据落点。
 	DiskVersion uint64
-	// ServerRealm 服务器命名空间指纹（"ppy" vs "g0v0.top"），S8 判定依据。
+	// ServerRealm 账号与成绩的服务器命名空间（"ppy" vs "g0v0.top"）。
+	// Score.OnlineID / LegacyOnlineID / RealmUser.OnlineID 只在两端
+	// ServerRealm 相同时携带（S8）。
 	ServerRealm string
+	// BeatmapServerRealm 谱面 OnlineID 的命名空间。空 = 与 ServerRealm 相同。
+	// g0v0 的账号和成绩 id 属于 g0v0.top，但谱面 id 直接沿用 osu! 官方 id：
+	// g0v0-server 的 Beatmap.get_or_fetch 请求
+	// https://osu.ppy.sh/api/v2/beatmaps/lookup，并把返回的 id 当作主键。
+	// 客户端排行榜（LeaderboardManager）在 Beatmap.OnlineID <= 0 或
+	// Status <= Pending 时直接失败；SoloPlayer 在 OnlineID <= 0 时不提交
+	// 成绩。把官方谱面 id 清成 -1 会让私服排行榜和后续提交一起失效。
+	BeatmapServerRealm string
 	// ExtColumns 本 fork 在官方基线之外追加的列（表名 → 列名；Ez 的 10 列）。
 	ExtColumns map[string][]string
 	// ExtTables 本 fork 专有表（Ez 7 张技能表）。
@@ -100,11 +110,19 @@ type ForkProfile struct {
 // OnlineID >= 该值即市场第三方规则集（g0v0-server 从 10 起编号，
 // fork-g0v0 §2.1 IsBuiltinRuleset 的 < 10 判据）。这些行 ShortName 随
 // 服务器市场动态变化、无法静态枚举进 OwnRulesets，adapter 按本常量过滤
-//（design §5.4-D8：行与指向它的成绩一并丢弃并计数）。
+// （design §5.4-D8：行与指向它的成绩一并丢弃并计数）。
 const G0v0MarketRulesetMinOnlineID = 10
 
+// BeatmapRealm 返回谱面 OnlineID 的命名空间。未单独声明时与账号域相同。
+func (p ForkProfile) BeatmapRealm() string {
+	if p.BeatmapServerRealm != "" {
+		return p.BeatmapServerRealm
+	}
+	return p.ServerRealm
+}
+
 // decodePlain 非 Ez 端解码：磁盘版本即裸上游版本，无 fork 修订
-//（fork-comparison §1.1「裸上游版本号」）。
+// （fork-comparison §1.1「裸上游版本号」）。
 func decodePlain(v uint64) (int, int) { return int(v), 0 }
 
 // decodeEz Ez 版本编码解码（fork-ez2lazer §2.1 RealmAccess：
@@ -124,7 +142,7 @@ func EncodeEzVersion(upstream, forkRev int) uint64 {
 }
 
 // lockedIniKeys 四端一致的红灯键（S10）：Token/Username 是 OAuth 凭据
-//（D15），ReleaseStream 是每端身份配置、枚举域四端互不相同（D14）。
+// （D15），ReleaseStream 是每端身份配置、枚举域四端互不相同（D14）。
 var lockedIniKeys = []string{"Token", "Username", "ReleaseStream"}
 
 // officialModAcronyms 官方（ppy 系四端共同基线）mod acronym 名录：
@@ -139,7 +157,7 @@ var officialModAcronyms = []string{
 }
 
 // officialStatisticsKeys 官方 HitResult 枚举的 StatisticsJson 键名录
-//（snake_case 键形，lazer API 序列化约定；四端同值——delta 明确不引入
+// （snake_case 键形，lazer API 序列化约定；四端同值——delta 明确不引入
 // 新 HitResult 枚举值（fork-delta §5.3），Ez/g0v0 未改该枚举，
 // fork-comparison C11）。枚举成员清单不在 docs/research 摘录内，按官方
 // osu.Game/Rulesets/Scoring/HitResult.cs 逐成员转写（15 项）。
@@ -152,7 +170,7 @@ var officialStatisticsKeys = []string{
 
 // KeyBindingActionDomain 键位 ActionInt 枚举域上界（D20 数据面，deploy
 // 侧 compat 消费）：GlobalAction 与各规则集 Action 枚举的值域上界
-//（开区间 [0, max)）。枚举值域非负；官方 2026 编辑器重构给规则集
+// （开区间 [0, max)）。枚举值域非负；官方 2026 编辑器重构给规则集
 // Action 枚举加了 Editor*=10000 起的显式段（Osu/Taiko/Catch/Mania
 // Action 均含），上界取两段总最大值+1——段间空隙值两端均无对应动作，
 // 放行无害。各端数值 2026-10-25 实测取样（上游源码枚举成员计数，含
@@ -166,6 +184,7 @@ var officialStatisticsKeys = []string{
 //     fork-delta §5.5）：GlobalAction 99 成员（0..98——官方尾部 22 个
 //     新增〔EditorSelectTool 等 13 编辑器键位 + EditorSeek 系列〕全
 //     缺，纯前缀子集）；规则集 Action 无 Editor* 段（最大 ManiaAction 19）。
+//
 // 0 = 该端未取样（交集不可判定，投放侧放行）。
 type KeyBindingActionDomain struct {
 	GlobalMax  int // 全局键位（RulesetName=null）的 GlobalAction 值域上界
@@ -176,12 +195,12 @@ var profiles = []ForkProfile{
 	{
 		// 官方 lazer：一切对比的基线（fork-comparison §0）。
 		ID:            "lazer",
-		DataDirName:   "osu",             // fork-comparison §1.1（debug 为 osu-development）
-		RealmFilePat:  "client.realm",    // release；DEBUG 构建为 client_52.realm（§1.1）
+		DataDirName:   "osu",                   // fork-comparison §1.1（debug 为 osu-development）
+		RealmFilePat:  "client.realm",          // release；DEBUG 构建为 client_52.realm（§1.1）
 		ProcessNames:  []string{"osu!", "osu"}, // 程序集名 "osu!"（fork-g0v0 §1.1 对照）+ EZRealmSync 守卫名单先例（ezrealmsync-design §5.5）
 		DecodeVersion: decodePlain,
-		DiskVersion:   52,                // fork-comparison §1.1
-		ServerRealm:   "ppy",             // osu.ppy.sh
+		DiskVersion:   52,    // fork-comparison §1.1
+		ServerRealm:   "ppy", // osu.ppy.sh
 		// 目标端兼容基线（§5.4 adapter 输入）：官方 mod/HitResult 名录。
 		ModAcronyms:    officialModAcronyms,
 		StatisticsKeys: officialStatisticsKeys,
@@ -189,7 +208,7 @@ var profiles = []ForkProfile{
 		// GlobalAction 121 成员（0..120）；规则集 Action 含 Editor*=10000
 		// 显式段（最大 OsuAction 10005）。
 		KeyBindingAction: KeyBindingActionDomain{GlobalMax: 121, RulesetMax: 10006},
-		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys},
+		IniKeys:          IniKeyPolicy{Locked: lockedIniKeys},
 	},
 	{
 		// DeltaLazer：Realm 与官方完全同构、schema 停在 51、连官方服务器但
@@ -199,7 +218,7 @@ var profiles = []ForkProfile{
 		RealmFilePat:  "client.realm", // fork-delta §1.2
 		ProcessNames:  nil,            // 可执行名未记录（fork-comparison U13/T2），守卫名单用户可扩展（§6.4）
 		DecodeVersion: decodePlain,
-		DiskVersion:   51, // fork-delta §2.1（唯一缺官方 v52 的 RealmOnlineAsset）
+		DiskVersion:   51,    // fork-delta §2.1（唯一缺官方 v52 的 RealmOnlineAsset）
 		ServerRealm:   "ppy", // 未改任何端点（fork-delta §1.3）
 		// Realm 与官方同构（fork-delta §2）：mod/HitResult 名录随官方基线。
 		ModAcronyms:    officialModAcronyms,
@@ -224,12 +243,17 @@ var profiles = []ForkProfile{
 		//（任何构建，含 release），官方列全保留 + 10 规范列 + 7 张技能表
 		//（fork-ez2lazer §0–§2）。
 		ID:            "ez2lazer",
-		DataDirName:   "osu-Ez2Lazer", // fork-ez2lazer §1.1（debug 为 osu-Ez2Lazer-development）
+		DataDirName:   "osu-Ez2Lazer",               // fork-ez2lazer §1.1（debug 为 osu-Ez2Lazer-development）
 		RealmFilePat:  "client_<diskVersion>.realm", // §2.2：#if DEBUG 被注释掉，release 也带版本后缀
-		ProcessNames:  []string{"Ez2Lazer"}, // EZRealmSync 守卫名单（ezrealmsync-design §5.5）
+		ProcessNames:  []string{"Ez2Lazer"},         // EZRealmSync 守卫名单（ezrealmsync-design §5.5）
 		DecodeVersion: decodeEz,
 		DiskVersion:   52011, // 52×1000+11（fork-ez2lazer §2.1）
-		ServerRealm:   "ppy", // 默认官方服务器（ServerPreset 官方/手动/g0v0 可切，fork-ez2lazer §4.4；静态 Profile 取默认）
+		// 默认连官方服，谱面 id 与账号 id 都在 ppy。ServerPreset 可在本机
+		// 改成 Manual 或 g0v0（EzSkinSettings.ini，不同步）。那是安装期
+		// 配置而不是另一个 fork：默认档不会把谱面 id 清成 -1。指到 g0v0
+		// 时谱面 id 仍是官方 id；Manual 的谱面域无法从静态 Profile 判定，
+		// 修复路径只补本库已有的 id，不另造一套命名空间。
+		ServerRealm: "ppy",
 		// 10 个追加规范列（fork-ez2lazer §2.4 字段级摘录；表名用 Realm 侧
 		// 表名，与 fork-comparison §2-C2 白名单键同风格；HostingKindInt 的
 		// [MapTo] 列名为 HostingKind，§7A / ezrealmsync-design §2.5 静态名单同款）。
@@ -266,7 +290,7 @@ var profiles = []ForkProfile{
 		// tag 2026.1023.0 与官方代完全一致——GlobalAction 121 成员
 		//（0..120）；规则集 Action 含 Editor* 段（最大 10005）。
 		KeyBindingAction: KeyBindingActionDomain{GlobalMax: 121, RulesetMax: 10006},
-		IniKeys:        IniKeyPolicy{Locked: lockedIniKeys}, // OsuSetting 枚举与官方一致（fork-ez2lazer §3.1）
+		IniKeys:          IniKeyPolicy{Locked: lockedIniKeys}, // OsuSetting 枚举与官方一致（fork-ez2lazer §3.1）
 	},
 	{
 		// stable（旧版 osu!，wine 运行）：legacy 文件系统端——数据形态为
@@ -291,13 +315,14 @@ var profiles = []ForkProfile{
 	{
 		// g0v0!：Realm schema 与官方 52 完全一致（零结构改动），差异全在
 		// 在线链路与规则集管理（fork-g0v0 §0–§2）。
-		ID:            "g0v0",
-		DataDirName:   "g0v0",         // fork-g0v0 §1.1（debug 为 g0v0-development）
-		RealmFilePat:  "client.realm", // fork-g0v0 §1.1 CLIENT_DATABASE_FILENAME 同官方
-		ProcessNames:  []string{"g0v0!"}, // 程序集名带感叹号（fork-g0v0 §1.1 <AssemblyName>g0v0!</AssemblyName>，匹配时不可去掉 !）
-		DecodeVersion: decodePlain,
-		DiskVersion:   52, // fork-g0v0 §2
-		ServerRealm:   "g0v0.top", // 全部端点 *.g0v0.top、独立账号体系（fork-g0v0 §1.3、§7.5）
+		ID:                 "g0v0",
+		DataDirName:        "g0v0",            // fork-g0v0 §1.1（debug 为 g0v0-development）
+		RealmFilePat:       "client.realm",    // fork-g0v0 §1.1 CLIENT_DATABASE_FILENAME 同官方
+		ProcessNames:       []string{"g0v0!"}, // 程序集名带感叹号（fork-g0v0 §1.1 <AssemblyName>g0v0!</AssemblyName>，匹配时不可去掉 !）
+		DecodeVersion:      decodePlain,
+		DiskVersion:        52,         // fork-g0v0 §2
+		ServerRealm:        "g0v0.top", // 账号与成绩 id：*.g0v0.top，与官方互不相通（fork-g0v0 §1.3、§7.5）
+		BeatmapServerRealm: "ppy",      // 谱面 id 镜像 osu.ppy.sh（g0v0-server get_or_fetch），排行榜靠它
 		// 市场规则集（OnlineID>=10）ShortName 动态，走常量判定；RX/AP 特殊
 		// 规则集（osurx 等 OnlineID 4–7）是内存概念不落库（fork-g0v0 §2.1、§5.3）。
 		OwnRulesets: nil,
@@ -353,7 +378,7 @@ func (p ForkProfile) ownsDir(dirName string) bool {
 }
 
 // matchesFingerprint 判断结构视图是否命中本 profile 的专有表/列指纹
-//（fork 身份 = 版本编码 + 结构指纹，§3.2；ezrealmsync-design §6.2-2
+// （fork 身份 = 版本编码 + 结构指纹，§3.2；ezrealmsync-design §6.2-2
 // HasEzFingerprint 思路的泛化：任意 fork 声明的专有结构命中即认定）。
 func (p ForkProfile) matchesFingerprint(v structureView) bool {
 	for _, t := range p.ExtTables {

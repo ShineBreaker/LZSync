@@ -492,6 +492,26 @@ func (s *realSync) CommitRun(runID string) (RunReport, error) {
 				freshIni[fid] = false // ini 写入失败 → 该端 ini 基线不动
 			}
 		}
+		// 没有别的写入时也扫一遍。被清成 -1 的谱面 id 不进差异计划，
+		// 只在这里才能被下一次同步补回来。
+		if role.Target && !realmOK {
+			if ref, ok := run.refs[fid]; ok {
+				if n, rerr := s.dRunner().RepairBeatmapLeaderboards(ctx, ref); rerr != nil {
+					if fr.Error == "" {
+						fr.Error = rerr.Error()
+					}
+				} else if n > 0 {
+					realmOK = true
+					if fr.Deploy == nil {
+						fr.Deploy = &deploy.Report{}
+					}
+					fr.Deploy.Skipped = append(fr.Deploy.Skipped, hub.SkipStat{
+						Reason: deploy.BeatmapIdentityRepairReason,
+						Count:  n,
+					})
+				}
+			}
+		}
 		if realmOK {
 			// 重收集：写入成功的目标端按原 Mode 刷新快照/presence。
 			opts := collect.Options{
