@@ -1,10 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 220 220">
+  <defs>
+    <linearGradient id="gCyan" gradientUnits="userSpaceOnUse" x1="0" y1="40" x2="0" y2="180">
+      <stop offset="0" stop-color="#57c8e8"/><stop offset="1" stop-color="#4eb4d1"/>
+    </linearGradient>
+    <linearGradient id="gPurple" gradientUnits="userSpaceOnUse" x1="0" y1="40" x2="0" y2="180">
+      <stop offset="0" stop-color="#7c6cf0"/><stop offset="1" stop-color="#7061d8"/>
+    </linearGradient>
+    <linearGradient id="gPink" gradientUnits="userSpaceOnUse" x1="0" y1="40" x2="0" y2="180">
+      <stop offset="0" stop-color="#ff7eb6"/><stop offset="1" stop-color="#e571a4"/>
+    </linearGradient>
+  </defs>
   <rect width="220" height="220" rx="52" fill="#1d232c"/>
-  <path d="M110 54 a56 56 0 0 1 48.5 84" fill="none" stroke="#57c8e8" stroke-width="16" stroke-linecap="round"/>
-  <path d="M158 138 l-16 4 8 16 z" fill="#57c8e8"/>
-  <path d="M158.5 138 a56 56 0 0 1 -97 0" fill="none" stroke="#7c6cf0" stroke-width="16" stroke-linecap="round"/>
-  <path d="M62 138 l16 4 -8 16 z" fill="#7c6cf0"/>
-  <path d="M61.5 138 a56 56 0 0 1 48.5 -84" fill="none" stroke="#ff7eb6" stroke-width="16" stroke-linecap="round"/>
-  <path d="M110 54 l-14 10 18 8 z" fill="#ff7eb6"/>
-  <circle cx="110" cy="116" r="10" fill="#e9edf3"/>
+  <!-- 三段带圆头+圆滑尖尾的环形弧段（顺时针 青→紫→粉），argon 式粗环宽 24（r40-64），所有接缝二次贝塞尔过渡 -->
+  <path d="M110.00 70.00 A12 12 0 0 1 110.00 46.00 A64 64 0 0 1 173.91 113.35 Q173.03 121.11 175.31 126.08 L176.20 128.04 Q179.54 135.31 172.71 131.15 L154.52 120.07 Q149.39 116.95 149.95 112.09 A40 40 0 0 0 110.00 70.00 Z" fill="url(#gCyan)"/>
+  <path d="M144.64 130.00 A12 12 0 0 1 165.43 142.00 A64 64 0 0 1 75.14 163.67 Q68.86 159.03 63.42 158.52 L61.28 158.31 Q53.31 157.57 60.33 153.73 L79.02 143.52 Q84.29 140.64 88.21 143.55 A40 40 0 0 0 144.64 130.00 Z" fill="url(#gPurple)"/>
+  <path d="M75.36 130.00 A12 12 0 0 1 54.57 142.00 A64 64 0 0 1 80.94 52.98 Q88.11 49.86 91.27 45.40 L92.52 43.65 Q97.15 37.12 96.96 45.12 L96.46 66.41 Q96.32 72.41 91.84 74.36 A40 40 0 0 0 75.36 130.00 Z" fill="url(#gPink)"/>
+  <circle cx="110" cy="110" r="12" fill="#e9edf3"/>
 </svg>
