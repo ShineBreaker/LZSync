@@ -39,6 +39,8 @@ jobs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          lfs: true
       - id: v
         run: |
           version=$(sed -n 's/.*version: *"\([^"]*\)".*/\1/p' mygo.config.ts | head -1)
@@ -53,6 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          lfs: true
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -95,6 +99,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+        with:
+          lfs: true
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -140,6 +146,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          lfs: true
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -173,6 +181,8 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          lfs: true
       - name: 汇总产物
         uses: actions/download-artifact@v4
         with:
