@@ -32,6 +32,8 @@ g0v0 私服谱面排行榜修复与图标更新。此前投放会清掉 g0v0 的
 
 - **发版检出 Git LFS**：三端构建与 Release 汇总 job 显式拉取 LFS
   对象，图标和 README 截图不再以指针文件进入产物。
+- **RPM 装配兼容新版 rpmbuild**：payload 改从稳定的 `SOURCES/`
+  目录读取，不再依赖会随包名和版本变化的 `%{_builddir}`。
 - **Guix 包版本对齐**：`lzsync.scm` 版本与 `mygo.config.ts` 同步为
   `1.1.2`。
 

@@ -1,7 +1,7 @@
 # lzsync.spec — LZSync 的 RPM 打包定义（Fedora/RHEL 系）。
 # 由 scripts/package-rpm.sh 驱动：payload 目录已按安装布局装配在
-# lzsync_payload（默认 _builddir/lzsync-payload），本 spec 只做复制
-# 与声明。版本经 rpmbuild --define "lzsync_version X.Y.Z" 注入。
+# SOURCES/lzsync-payload，本 spec 只做复制与声明。版本经
+# rpmbuild --define "lzsync_version X.Y.Z" 注入。
 #
 # 布局与 mygo deb 对齐：应用在 /opt/lzsync/（可执行文件 + realm-core
 # 共享库 + 资源同目录，realmc 打包路径解析命中），/usr/bin 建链接，
@@ -12,7 +12,7 @@
 %global lzsync_version 0.0.0
 %endif
 %global lzsync_release 1%{?dist}
-%global lzsync_payload %{_builddir}/lzsync-payload
+%global lzsync_payload %{_sourcedir}/lzsync-payload
 
 Name:           lzsync
 Version:        %{lzsync_version}

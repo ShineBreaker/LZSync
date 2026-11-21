@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="$REPO_ROOT/build/linux-amd64"
 VERSION="${1:-$(sed -n 's/.*version: *"\([^"]*\)".*/\1/p' "$REPO_ROOT/mygo.config.ts" | head -1)}"
 TOP="$REPO_ROOT/build/rpm"
-PAYLOAD="$TOP/BUILD/lzsync-payload"
+PAYLOAD="$TOP/SOURCES/lzsync-payload"
 
 for f in lzsync librealm-ffi.so lzsync.desktop lzsync.png icon.png; do
 	[ -f "$STAGE/$f" ] || {
@@ -23,6 +23,7 @@ for f in lzsync librealm-ffi.so lzsync.desktop lzsync.png icon.png; do
 	}
 done
 
+mkdir -p "$TOP/RPMS" "$TOP/SRPMS" "$TOP/SPECS" "$TOP/SOURCES"
 rm -rf "$PAYLOAD"
 mkdir -p "$PAYLOAD/opt/lzsync" "$PAYLOAD/usr/bin" \
 	"$PAYLOAD/usr/share/applications" \
@@ -36,7 +37,6 @@ sed 's|^Exec=.*|Exec=/opt/lzsync/lzsync|' "$STAGE/lzsync.desktop" \
 	> "$PAYLOAD/usr/share/applications/lzsync.desktop"
 cp "$STAGE/lzsync.png" "$PAYLOAD/usr/share/icons/hicolor/1024x1024/apps/lzsync.png"
 
-mkdir -p "$TOP/RPMS" "$TOP/SRPMS" "$TOP/SPECS" "$TOP/SOURCES"
 rpmbuild -bb \
 	--define "_topdir $TOP" \
 	--define "lzsync_version $VERSION" \
