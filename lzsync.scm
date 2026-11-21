@@ -29,7 +29,7 @@
 
 (package
   (name "lzsync")
-  (version "1.0.0")
+  (version "1.1.2")
   (source #f)
   (build-system trivial-build-system)
   (synopsis "管理多个 osu!lazer fork 数据目录的同步工具")
