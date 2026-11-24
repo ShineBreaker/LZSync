@@ -68,7 +68,7 @@ type diffRepair struct {
 // RepairBeatmapLeaderboards 扫一遍目标库，把已经损坏的谱面排行榜身份
 // 补回来。没有需要修的行时不备份、不写库。stable 没有 realm 谱面表，
 // 直接返回 0。
-func (r *Runner) RepairBeatmapLeaderboards(ctx context.Context, target forks.LibraryRef) (int, error) {
+func (r *Runner) RepairBeatmapLeaderboards(ctx context.Context, target forks.LibraryRef) (count int, err error) {
 	profile, ok := forks.Profile(target.ForkID)
 	if !ok || profile.Storage != forks.StorageRealm || target.RealmPath == "" {
 		return 0, nil
@@ -93,7 +93,9 @@ func (r *Runner) RepairBeatmapLeaderboards(ctx context.Context, target forks.Lib
 		return 0, fmt.Errorf("deploy: 打开目标库 %s: %w", target.RealmPath, err)
 	}
 	snaps, err := readBeatmapSnaps(ro)
-	ro.Close()
+	if closeErr := ro.Close(); closeErr != nil && err == nil {
+		err = fmt.Errorf("deploy: 关闭目标库只读句柄: %w", closeErr)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -111,7 +113,11 @@ func (r *Runner) RepairBeatmapLeaderboards(ctx context.Context, target forks.Lib
 	if err != nil {
 		return 0, fmt.Errorf("deploy: 打开目标库 %s: %w", target.RealmPath, err)
 	}
-	defer realm.Close()
+	defer func() {
+		if closeErr := realm.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("deploy: 关闭目标库写句柄: %w", closeErr)
+		}
+	}()
 	n, err := r.repairBeatmapLeaderboards(ctx, realm, target.ForkID)
 	if err != nil {
 		return 0, err

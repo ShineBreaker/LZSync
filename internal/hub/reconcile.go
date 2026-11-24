@@ -79,6 +79,44 @@ func (s *Store) ReconcileAgainst(ctx context.Context, forkID string, kinds []Ent
 
 // Tombstones 返回目标 fork 各类型的全部 tombstone（恢复组的完整数据面，
 // diff 层 TombstoneHits 的数据源；含已不在 hub 当前版本集合中的键）。
+func (s *Store) Presence(ctx context.Context, forkID string, kinds []EntityKind) (map[EntityKind]map[string]string, error) {
+	if forkID == "" {
+		return nil, fmt.Errorf("hub: presence 缺少 fork_id")
+	}
+	out := make(map[EntityKind]map[string]string, len(kinds))
+	for _, kind := range kinds {
+		values, err := s.presenceOf(ctx, forkID, kind)
+		if err != nil {
+			return nil, err
+		}
+		out[kind] = values
+	}
+	return out, nil
+}
+
+// ClearTombstones removes a batch of restored tombstones atomically.
+func (s *Store) ClearTombstones(ctx context.Context, forkID string, keys map[EntityKind][]string) error {
+	if forkID == "" {
+		return fmt.Errorf("hub: 清 tombstone 缺少 fork_id")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("hub: 开 tombstone 事务: %w", err)
+	}
+	defer tx.Rollback()
+	for kind, values := range keys {
+		for _, key := range values {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM tombstone WHERE fork_id=? AND kind=? AND content_key=?", forkID, kind, key); err != nil {
+				return fmt.Errorf("hub: 清 tombstone %s: %w", key, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("hub: 提交 tombstone 事务: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Tombstones(ctx context.Context, forkID string) (map[EntityKind]map[string]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT kind, content_key, deleted_at FROM tombstone WHERE fork_id=? ORDER BY kind, content_key`, forkID)

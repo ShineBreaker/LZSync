@@ -18,9 +18,8 @@ import (
 	"lzsync/internal/realmc"
 )
 
-// ErrNotImplemented 是骨架期公共契约残留：编排层施工前 appsvc 等上层以
-// 它做穿透断言。collect 已施工、本包不再返回此错误；保留导出直至上层
-// 施工完成并移除引用（届时连同本注释一并删除）。
+// ErrNotImplemented 保留为兼容旧调用方的公共错误值。当前收集编排已实现，
+// 正常路径不会返回此错误。
 var ErrNotImplemented = errors.New("collect: 契约桩未实现")
 
 // Deps 是 Runner 的协作依赖。
@@ -123,6 +122,12 @@ func (r *Runner) CollectWith(ctx context.Context, target forks.LibraryRef, opts 
 	}
 	if target.ForkID == "" || target.RealmPath == "" {
 		return report, fmt.Errorf("collect: 目标库未解析（ForkID/RealmPath 为空）")
+	}
+	if r.deps.Guard == nil {
+		return report, fmt.Errorf("collect: Deps.Guard 未配置")
+	}
+	if opts.Mode != ModeSnapshotOnly && r.deps.Files == nil {
+		return report, fmt.Errorf("collect: 文件收集模式需要配置 Deps.Files")
 	}
 	if err := r.deps.Guard.EnsureClearFork(target.ForkID); err != nil {
 		return report, err

@@ -118,8 +118,7 @@ func NewRunner(deps Deps) *Runner {
 //
 // 目标库取 plan.Target（投放执行需要 RealmPath；字符串 forkID 不足以定位
 // 库文件——计划构建方 BuildPlan 已填，手工构造计划的调用方须自填）。
-func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Report, error) {
-	report := Report{}
+func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (report Report, err error) {
 	if r.deps.Hub == nil {
 		return report, fmt.Errorf("deploy: Deps.Hub 未配置")
 	}
@@ -176,7 +175,11 @@ func (r *Runner) Deploy(ctx context.Context, plan Plan, prog ProgressFunc) (Repo
 	if err != nil {
 		return report, fmt.Errorf("deploy: 打开目标库 %s: %w", target.RealmPath, err)
 	}
-	defer realm.Close()
+	defer func() {
+		if closeErr := realm.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("deploy: 关闭目标库: %w", closeErr)
+		}
+	}()
 	emit(StageBackup, 0, 0, 1)
 	backupPath, err := backupTarget(r.deps.Backups, target.RealmPath)
 	if err != nil {
@@ -668,33 +671,19 @@ func s8SameBeatmapRealm(originFork, targetFork string) bool {
 // 重现」闸是其只读对偶），此处以单句幂等 DELETE 经 DB() 执行——该写入
 // 无多表原子性诉求，不破坏 hub 的事务纪律；hub 增补领域方法后应切换。
 func (r *Runner) clearRestoredTombstones(ctx context.Context, plan Plan) error {
-	type restoreKey struct {
-		kind hub.EntityKind
-		key  string
-	}
-	var keys []restoreKey
-	for _, it := range plan.Items {
-		if it.Restore {
-			keys = append(keys, restoreKey{it.Kind, it.ContentKey})
+	grouped := make(map[hub.EntityKind][]string)
+	for _, item := range plan.Items {
+		if item.Restore {
+			grouped[item.Kind] = append(grouped[item.Kind], item.ContentKey)
 		}
 	}
-	if len(keys) == 0 {
+	if len(grouped) == 0 {
 		return nil
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].kind != keys[j].kind {
-			return keys[i].kind < keys[j].kind
-		}
-		return keys[i].key < keys[j].key
-	})
-	for _, k := range keys {
-		if _, err := r.deps.Hub.DB().ExecContext(ctx,
-			`DELETE FROM tombstone WHERE fork_id=? AND kind=? AND content_key=?`,
-			plan.TargetFork, k.kind, k.key); err != nil {
-			return fmt.Errorf("清 tombstone %s: %w", k.key, err)
-		}
+	if r.deps.Hub == nil {
+		return fmt.Errorf("deploy: 清 tombstone 缺少 hub")
 	}
-	return nil
+	return r.deps.Hub.ClearTombstones(ctx, plan.TargetFork, grouped)
 }
 
 // splitScoreContentKey 拆解成绩组合内容键（hub.ScoreContentKey 的解析侧：

@@ -16,7 +16,8 @@ import (
 	"lzsync/internal/hub"
 )
 
-// ErrNotImplemented 标记契约桩：签名已定、实现待施工。
+// ErrNotImplemented 保留为兼容旧调用方的公共错误值。当前投放计划编排已实现，
+// 正常路径不会返回此错误。
 var ErrNotImplemented = errors.New("deploy: 契约桩未实现")
 
 // Action 计划项动作。
@@ -140,7 +141,7 @@ type BuildOptions struct {
 // BuildPlan 从 hub 对账结果构建默认投放计划（§3.2 计划 / §6.2 默认勾选）：
 // hub diff（ReconcileAgainst，当前版本差集）− 目标 tombstone 命中（恢复组
 // 默认排除，仅 RestoreKeys 显式勾选者进入）− 需确认项。conflict → skip
-//（§0-B4 判不准不动：各端取值不同、无三方基线裁决（G7 待办），默认保留
+// （§0-B4 判不准不动：各端取值不同、无三方基线裁决（G7 待办），默认保留
 // 差异不落地——用户在数据页显式勾选的冲突行仍走 appsvc planItemFrom 的
 // update 手动处置路径）。
 //
@@ -509,7 +510,7 @@ func skinSummary(name string) string {
 
 // SettingsReconcile M3 设置类对账行（deploy 内过渡承载：与 skinReconcile
 // 同构；三类共用的形态）。appsvc 预演/计划面经 ReconcileSettings 消费——
-// 预览页三类行与全量 BuildPlan 共源（§6.2）。 
+// 预览页三类行与全量 BuildPlan 共源（§6.2）。
 type SettingsReconcile struct {
 	Kind       hub.EntityKind
 	ContentKey string

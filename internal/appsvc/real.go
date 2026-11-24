@@ -1,10 +1,8 @@
 package appsvc
 
-// 真实后端实现：库身份走 forks、对账走 hub（ReconcileAgainst/Tombstones
-// + skin/score 过渡直查，见 reconcile_skin_score.go），fork↔fork 对比与
-// 收集/投放编排分别委托 diff / collect / deploy 层——这些层的契约桩尚未
-// 施工时如实上抛 ErrNotImplemented，UI 由 Mock 后端承载（M-4）。层实现
-// 落地后本文件零改动即接通真实链路。
+// 真实后端实现：库身份走 forks、对账走 hub，fork↔fork 对比与收集/投放
+// 编排分别委托 diff、collect、deploy 层。skin/score 与设置类仍由本层的
+// 过渡查询承载，见 reconcile_skin_score.go。
 
 import (
 	"context"
@@ -697,7 +695,7 @@ func (s *realCompare) CoverImage(contentKey string) (string, error) {
 
 // BuildPlan 组装并持久化投放计划（§6.2 勾选 → §6.3 计划输入）。
 // 动作面 = 收藏夹 + 谱面集（create/update/version-replace）+ 皮肤 + 成绩
-//（create/update）+ M3 设置类三类（键位/规则集设置/ModPreset，
+// （create/update）+ M3 设置类三类（键位/规则集设置/ModPreset，
 // create/update）——与 deploy 执行面（writer_set/writer_skin/writer_score/
 // writer_setting）对齐（§5.1；预演面同源，三类经 allReconcileItems 可见
 // 即可勾选投放）。
@@ -897,7 +895,7 @@ func reconcileToRow(it hub.ReconcileItem, sum *summarizer) DiffRow {
 
 // summarizer 内容键 → 人类可读摘要（§6.2）。收藏夹内容键即 Name（§4.2
 // 第一层），键本身就是摘要，无需查库；谱面集/皮肤/成绩摘要走 hub 查询面
-//（当前版本集合的 Title/Artist 规范值、皮肤 Name/Creator、成绩规则集/
+// （当前版本集合的 Title/Artist 规范值、皮肤 Name/Creator、成绩规则集/
 // 分数/日期）。
 type summarizer struct {
 	setTitles map[string]string // hash → "Artist - Title（Author）"
@@ -998,13 +996,13 @@ func shortKey(key string) string {
 // --- SyncService ---
 
 type realSync struct {
-	deps  Deps
-	reg   *registry
-	cfg   *configStore
-	cmp   *realCompare
-	prog  ProgressSink
-	cRun  *collect.Runner
-	dRun  *deploy.Runner
+	deps Deps
+	reg  *registry
+	cfg  *configStore
+	cmp  *realCompare
+	prog ProgressSink
+	cRun *collect.Runner
+	dRun *deploy.Runner
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -1126,6 +1124,10 @@ func (s *realSync) Running() SyncStatus {
 
 // RestoreBackup 从备份还原（guard.Backups 委托；还原前自动再备份）。
 func (s *realSync) RestoreBackup(forkID, backupPath string) error {
+	if err := s.begin("restore", forkID); err != nil {
+		return err
+	}
+	defer s.finish()
 	ref, ok := s.reg.get(forkID)
 	if !ok {
 		return fmt.Errorf("appsvc: 未注册的 fork %q", forkID)

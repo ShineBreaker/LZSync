@@ -301,11 +301,11 @@ func newRealInDir(t *testing.T, dataRoot, dir string) (*Backend, *hub.Store) {
 	}
 	t.Cleanup(func() { h.Close() })
 	deps := Deps{
-		Hub:       h,
-		Backups:   &guard.Backups{Dir: filepath.Join(dir, "backups")},
-		Guard:     guard.NewNoScanGuard(), // hermetic：不吃宿主机进程现场
-		DataRoot:  dataRoot,
-		DataDir:   dir,
+		Hub:      h,
+		Backups:  &guard.Backups{Dir: filepath.Join(dir, "backups")},
+		Guard:    guard.NewNoScanGuard(), // hermetic：不吃宿主机进程现场
+		DataRoot: dataRoot,
+		DataDir:  dir,
 	}
 	b, err := NewRealBackend(deps, nil)
 	if err != nil {
@@ -343,11 +343,11 @@ func TestExpandHome(t *testing.T) {
 		t.Setenv("HOME", home)
 	}
 	cases := map[string]string{
-		"~":           home,
-		"~/a/b":       filepath.Join(home, "a", "b"),
-		"/abs/path":   "/abs/path",
-		"relative/x":  "relative/x",
-		"~otheruser":  "~otheruser",
+		"~":          home,
+		"~/a/b":      filepath.Join(home, "a", "b"),
+		"/abs/path":  "/abs/path",
+		"relative/x": "relative/x",
+		"~otheruser": "~otheruser",
 	}
 	for in, want := range cases {
 		if got := expandHome(in); got != want {
@@ -530,7 +530,6 @@ func TestRealBuildPlanPersistenceAndSkipReasons(t *testing.T) {
 		t.Fatalf("重建后计划应恢复: (%+v, %v)", got, err)
 	}
 }
-
 
 func TestRealSyncPreconditions(t *testing.T) {
 	b, h, _ := newRealForTest(t, t.TempDir())
@@ -827,7 +826,6 @@ func TestPlanItemFromVersionUpdate(t *testing.T) {
 	}
 }
 
-
 // TestSummarizerCoversHistoricalVersions 摘要索引覆盖历史版本：待处理行
 // 指向的常是版本链旧端（superseded_by 非 NULL），只索引链尾会让这类行
 // 退化成「谱面集 <短哈希>」。
@@ -974,5 +972,13 @@ func TestRealComparePreviewSettingsKinds(t *testing.T) {
 	}
 	if actions[hub.KindModPreset] != deploy.ActionCreate {
 		t.Errorf("ModPreset 计划动作 = %s，期望 create（恢复项勾选拍板）", actions[hub.KindModPreset])
+	}
+}
+
+func TestRestoreBackupRespectsBusyState(t *testing.T) {
+	syncer := &realSync{reg: &registry{byID: map[string]forks.LibraryRef{}}, runs: map[string]*preparedRun{}}
+	syncer.status = SyncStatus{Busy: true, Kind: "deploy", ForkID: "lazer"}
+	if err := syncer.RestoreBackup("lazer", "/tmp/backup"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("RestoreBackup while busy = %v, want ErrBusy", err)
 	}
 }

@@ -6,8 +6,8 @@
 // UI 线程不被阻塞。
 //
 // 分层纪律：appsvc 是薄服务层——库身份走 forks、对账查询走 hub/diff、
-// 收集与投放编排走 collect/deploy Runner；编排层契约桩尚未施工时，
-// 相应服务如实上抛其 ErrNotImplemented，UI 由 Mock 后端承载开发与冒烟。
+// 收集与投放编排走 collect/deploy Runner。skin/score 与设置类保留本层
+// 的过渡查询，直到 hub/diff 支持对应的公共对账面。
 package appsvc
 
 import (
