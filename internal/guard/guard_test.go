@@ -104,6 +104,10 @@ func TestBackupsBackupFileAndNoOverwrite(t *testing.T) {
 	if err != nil || string(got) != "payload-v1" {
 		t.Fatalf("备份内容 = %q, %v，期望 payload-v1", got, err)
 	}
+	digest, err := os.ReadFile(p1 + ".sha256")
+	if err != nil || string(digest) == "" {
+		t.Fatalf("备份摘要读取失败: %q, %v", digest, err)
+	}
 
 	// 同名不覆盖（S2）。
 	if _, err := b.BackupFile(src); err == nil {

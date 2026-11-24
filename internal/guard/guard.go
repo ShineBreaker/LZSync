@@ -255,7 +255,7 @@ func (b *Backups) BackupFile(srcPath string) (string, error) {
 	if err := dstFile.Close(); err != nil {
 		return "", fmt.Errorf("guard: 关闭备份 %s: %w", dst, err)
 	}
-	digest, err := hashFile(srcPath)
+	digest, err := hashFile(dst)
 	if err != nil {
 		return "", fmt.Errorf("guard: 计算备份摘要 %s: %w", srcPath, err)
 	}
