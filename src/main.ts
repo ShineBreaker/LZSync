@@ -69,13 +69,17 @@ function paintNav(): void {
   sideBottom.append(st);
 }
 
+let countsRequest = 0;
+
 async function refreshCounts(): Promise<void> {
+  const request = ++countsRequest;
   try {
     const [cf, lib, hc] = await Promise.all([
       CompareService.listConflicts(),
       CompareService.library("beatmap_set" as EntityKind),
       CompareService.hubCounts(),
     ]);
+    if (request !== countsRequest) return;
     inboxCount = cf.length + lib.filter((i) => i.State === "confirm").length;
     counts = hc;
   } catch {

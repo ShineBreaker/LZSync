@@ -22,7 +22,7 @@ const stageMap = new Map<string, StagedEntry>();
 const stageSubs = new Set<() => void>();
 
 export function stageKey(kind: string, contentKey: string): string {
-  return `${kind}${contentKey}`;
+  return JSON.stringify([kind, contentKey]);
 }
 
 export const staged = {
@@ -127,7 +127,9 @@ let view: RunView = {
 const runSubs = new Set<() => void>();
 
 export function runView(): RunView {
-  return view;
+  const lanes: Record<string, LaneView> = {};
+  for (const [forkID, lane] of Object.entries(view.lanes)) lanes[forkID] = { ...lane };
+  return { ...view, lanes };
 }
 
 export function onRun(fn: () => void): () => void {
@@ -233,13 +235,14 @@ export async function confirmRun(): Promise<void> {
 }
 
 /** cancel 取消：preparing/committing → SyncService.cancel()；ready → 本地丢弃。 */
-export function cancelRun(): void {
+export async function cancelRun(): Promise<void> {
   if (view.phase === "ready") {
     set({ phase: "idle", preview: null, total: 0 });
     return;
   }
   if (view.phase === "preparing" || view.phase === "committing") {
-    void SyncService.cancel();
+    try { await SyncService.cancel(); }
+    catch (error) { toast("err", errText(error)); }
   }
 }
 
@@ -291,16 +294,16 @@ export function handleProgress(ev: ProgressEvent): void {
   const frac = ev.Total > 0 ? Math.min(1, ev.Current / ev.Total) : 0;
   const pullRange = PULL_STAGES[ev.Stage];
   if (view.phase === "preparing" && pullRange) {
-    const l = lane(ev.ForkID);
-    l.pull = Math.max(l.pull, pullRange[0] + (pullRange[1] - pullRange[0]) * frac);
-    emit();
+    const previous = view.lanes[ev.ForkID] ?? { pull: 0, write: 0 };
+    const pull = Math.max(previous.pull, pullRange[0] + (pullRange[1] - pullRange[0]) * frac);
+    set({ lanes: { ...view.lanes, [ev.ForkID]: { ...previous, pull } } });
     return;
   }
   const writeRange = WRITE_STAGES[ev.Stage];
   if (view.phase === "committing" && writeRange) {
-    const l = lane(ev.ForkID);
-    l.write = Math.max(l.write, writeRange[0] + (writeRange[1] - writeRange[0]) * frac);
-    emit();
+    const previous = view.lanes[ev.ForkID] ?? { pull: 0, write: 0 };
+    const write = Math.max(previous.write, writeRange[0] + (writeRange[1] - writeRange[0]) * frac);
+    set({ lanes: { ...view.lanes, [ev.ForkID]: { ...previous, write } } });
   }
 }
 
