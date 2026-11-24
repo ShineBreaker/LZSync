@@ -142,3 +142,25 @@ func TestCopyMissingMissingSource(t *testing.T) {
 		t.Fatal("缺失哈希不应在目标留任何产物")
 	}
 }
+
+func TestCopyMissingReplacesWrongContent(t *testing.T) {
+	src := newStore(t)
+	dst, err := Open(filepath.Join(t.TempDir(), "dst"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "source")
+	writeFile(t, path, "expected")
+	if err := src.Put(path); err != nil {
+		t.Fatal(err)
+	}
+	hash := mustHash(t, path)
+	target := filepath.Join(dst.Root, hash[:1], hash[:2], hash)
+	writeFile(t, target, "wrong")
+	if copied, err := CopyMissing(src.Root, dst.Root, []string{hash}); err != nil || copied != 1 {
+		t.Fatalf("CopyMissing = %d, %v", copied, err)
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "expected" {
+		t.Fatalf("target = %q, %v", data, err)
+	}
+}

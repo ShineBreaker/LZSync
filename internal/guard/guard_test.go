@@ -261,3 +261,32 @@ func TestEnsureClearForkPerForkNames(t *testing.T) {
 		t.Fatalf("EnsureClearFork(ghost) = %v，期望 ErrGameRunning（回落全名单）", err)
 	}
 }
+
+func TestRestoreRejectsChangedBackup(t *testing.T) {
+	root := t.TempDir()
+	backups, err := OpenBackups(filepath.Join(root, "backups"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "client.realm")
+	if err := os.WriteFile(target, []byte("current"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(root, "backup.realm")
+	if err := os.WriteFile(backup, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup+".sha256", []byte("0682c5f2076f099c34cfdd15a9e063849ed437a49677e6fcc5b4198c76575be5"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := backups.Restore(backup, target); err == nil {
+		t.Fatal("changed backup should be rejected")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "current" {
+		t.Fatalf("target changed after rejection: %q, %v", data, err)
+	}
+}

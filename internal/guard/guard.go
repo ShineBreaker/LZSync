@@ -4,6 +4,8 @@ package guard
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -253,6 +255,13 @@ func (b *Backups) BackupFile(srcPath string) (string, error) {
 	if err := dstFile.Close(); err != nil {
 		return "", fmt.Errorf("guard: 关闭备份 %s: %w", dst, err)
 	}
+	digest, err := hashFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("guard: 计算备份摘要 %s: %w", srcPath, err)
+	}
+	if err := os.WriteFile(dst+".sha256", []byte(digest), 0o644); err != nil {
+		return "", fmt.Errorf("guard: 写备份摘要 %s: %w", dst, err)
+	}
 	return dst, nil
 }
 
@@ -265,6 +274,10 @@ func (b *Backups) Restore(backupPath, targetPath string) error {
 		return fmt.Errorf("guard: 打开备份 %s: %w", backupPath, err)
 	}
 	defer bf.Close()
+	expected, err := backupDigest(backupPath)
+	if err != nil {
+		return err
+	}
 	// 还原前安全备份（目标存在时；S2 同源纪律）。
 	if _, err := os.Stat(targetPath); err == nil {
 		if _, err := b.BackupFile(targetPath); err != nil {
@@ -288,11 +301,47 @@ func (b *Backups) Restore(backupPath, targetPath string) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("guard: 关闭还原临时文件: %w", err)
 	}
+	actual, err := hashFile(tmpName)
+	if err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("guard: 校验还原临时文件: %w", err)
+	}
+	if actual != expected {
+		os.Remove(tmpName)
+		return fmt.Errorf("guard: 备份校验不符：期望 %s 实得 %s", expected, actual)
+	}
 	if err := os.Rename(tmpName, targetPath); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("guard: 原子替换还原目标 %s: %w", targetPath, err)
 	}
 	return nil
+}
+
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func backupDigest(path string) (string, error) {
+	if data, err := os.ReadFile(path + ".sha256"); err == nil {
+		value := strings.TrimSpace(string(data))
+		if len(value) == sha256.Size*2 {
+			return value, nil
+		}
+		return "", fmt.Errorf("guard: 备份摘要格式无效 %s", path)
+	} else if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("guard: 备份缺少完整性摘要 %s", path)
+	} else {
+		return "", fmt.Errorf("guard: 读取备份摘要 %s: %w", path, err)
+	}
 }
 
 // TouchAfterWrite 在 realm 写事务提交后更新文件 mtime：mmap 写入不更新

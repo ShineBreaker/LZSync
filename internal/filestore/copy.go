@@ -43,8 +43,15 @@ func CopyMissing(srcRoot, dstRoot string, hashes []string) (int, error) {
 			return copied, ErrInvalidHash
 		}
 		dst := filepath.Join(dstRoot, h[:1], h[:2], h)
-		if _, err := os.Stat(dst); err == nil {
-			continue // 目标已有即跳过
+		if st, err := os.Lstat(dst); err == nil {
+			if st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0 {
+				if got, hashErr := hashFile(dst); hashErr == nil && got == h {
+					continue
+				}
+				// 错误内容或错误链接由原子入位替换。
+			} else {
+				return copied, fmt.Errorf("filestore: 目标 %s 不是文件", dst)
+			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return copied, err
 		}
