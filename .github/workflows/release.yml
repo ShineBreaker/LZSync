@@ -64,7 +64,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - name: 打包工具链（rpmbuild、realm-core 编译链）
-        run: sudo apt-get update && sudo apt-get install -y rpm cmake ninja-build gcc-13 g++-13
+        run: sudo apt-get update && sudo apt-get install -y rpm cmake ninja-build gcc-13 g++-13 imagemagick
       - name: 缓存 realm-core 产物
         uses: actions/cache@v4
         with:

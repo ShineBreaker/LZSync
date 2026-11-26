@@ -54,8 +54,12 @@ command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f /u
 /opt/lzsync/
 /usr/bin/lzsync
 /usr/share/applications/lzsync.desktop
-/usr/share/icons/hicolor/1024x1024/apps/lzsync.png
+/usr/share/icons/hicolor/256x256/apps/lzsync.png
+/usr/share/icons/hicolor/512x512/apps/lzsync.png
 
 %changelog
+* Fri Nov 27 2026 ShineBreaker - 1.2.0-1
+- 版本差异识别、写入安全与 Linux 图标打包修复
+
 * Wed Oct 28 2026 ShineBreaker - 1.0.0-1
 - 首个发布版本

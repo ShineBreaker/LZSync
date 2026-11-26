@@ -3,8 +3,9 @@ import { defineConfig } from "mygo-cli";
 export default defineConfig({
   name: "LZSync",
   identifier: "io.github.shinebreaker.lzsync",
-  version: "1.1.2",
+  version: "1.2.0",
   copyright: "Copyright © 2026 ShineBreaker",
+  icon: "resources/icon.png",
   // `mygo dev` runs devCommand and loads devUrl; `mygo build` runs
   // buildCommand and embeds frontendDist into the app.
   devUrl: "http://localhost:5173",

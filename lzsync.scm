@@ -4,7 +4,7 @@
 ;; 本包负责把产物装入 store 并 wrap 出**独立可运行**环境：
 ;;   - 捆绑 build/native 的 librealm-ffi.so 并以 LZSYNC_LIBREALM 指向它；
 ;;   - webview 运行库（guix 无全局库路径，wrap 补 LD_LIBRARY_PATH 等搜索路径）；
-;;   - desktop 入口改写 Exec 为绝对路径、安装 hicolor 图标。
+;;   - desktop 入口改写 Exec 为绝对路径、安装标准尺寸 hicolor 图标。
 ;; 先跑 `just package` 再 guix build；产物源目录缺失即构建失败（fail fast）。
 ;; 说明：依赖源码的 hermetic 构建（Go/npm 全量 vendoring）成本百 MB 级，暂不采用。
 ;;
@@ -17,6 +17,7 @@
              (gnu packages glib)
              (gnu packages gnome)
              (gnu packages gtk)
+             (gnu packages imagemagick)
              (gnu packages webkit))
 
 (define dist-dir
@@ -29,7 +30,7 @@
 
 (package
   (name "lzsync")
-  (version "1.1.2")
+  (version "1.2.0")
   (source #f)
   (build-system trivial-build-system)
   (synopsis "管理多个 osu!lazer fork 数据目录的同步工具")
@@ -47,6 +48,7 @@ fork（官方 lazer、DeltaLazer、Ez2Lazer、g0v0）执行收集（fork→hub�
                 webkitgtk-for-gtk3
                 libsecret
                 gsettings-desktop-schemas))
+  (native-inputs (list imagemagick))
   (arguments
    (list
     #:modules '((guix build utils))
@@ -61,13 +63,21 @@ fork（官方 lazer、DeltaLazer、Ez2Lazer、g0v0）执行收集（fork→hub�
           (mkdir-p bin-dir)
           (mkdir-p lib-dir)
           (mkdir-p (string-append share "/applications"))
-          (mkdir-p (string-append share "/icons/hicolor/1024x1024/apps"))
           (copy-file (string-append #$dist-dir "/lzsync") bin)
           (chmod bin #o555)
           (copy-file #$librealm-so
                      (string-append lib-dir "/librealm-ffi.so"))
-          (copy-file (string-append #$dist-dir "/lzsync.png")
-                     (string-append share "/icons/hicolor/1024x1024/apps/lzsync.png"))
+          ;; hicolor 索引只登记到 512x512；1024 目录会被主题查找忽略。
+          (let ((icon (string-append #$dist-dir "/lzsync.png"))
+                (icons (string-append share "/icons/hicolor")))
+            (for-each
+             (lambda (size)
+               (let ((dir (string-append icons "/" size "x" size "/apps")))
+                 (mkdir-p dir)
+                 (invoke #$(file-append imagemagick "/bin/convert")
+                         icon "-resize" (string-append size "x" size)
+                         "-strip" (string-append dir "/lzsync.png"))))
+             '("256" "512")))
           (let ((desktop (string-append share "/applications/lzsync.desktop")))
             (copy-file (string-append #$dist-dir "/lzsync.desktop") desktop)
             (substitute* desktop
